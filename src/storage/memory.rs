@@ -56,6 +56,16 @@ impl MemoryTable {
     pub fn clear(&self) {
         self.batches.write().clear();
     }
+
+    /// Replace all batches in the table.
+    pub fn replace(&self, new_batches: Vec<RecordBatch>) {
+        *self.batches.write() = new_batches;
+    }
+
+    /// Get a clone of all batches in the table.
+    pub fn batches(&self) -> Vec<RecordBatch> {
+        self.batches.read().clone()
+    }
 }
 
 impl TableProvider for MemoryTable {
