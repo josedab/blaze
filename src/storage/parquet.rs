@@ -12,7 +12,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
 use crate::catalog::{ColumnStatistics, TableProvider, TableStatistics, TableType};
-use crate::error::{BlazeError, Result};
+use crate::error::Result;
 use crate::types::Schema;
 
 /// A table backed by a Parquet file.
@@ -137,12 +137,22 @@ impl ParquetTable {
                         total_null_count = None;
                     }
 
-                    // Track min/max (using first row group's values as representative)
-                    if rg_idx == 0 {
-                        min_value = col_chunk.min_bytes_opt()
-                            .map(|b| Self::bytes_to_string(b));
-                        max_value = col_chunk.max_bytes_opt()
-                            .map(|b| Self::bytes_to_string(b));
+                    // Track min/max across all row groups
+                    if let Some(rg_min_bytes) = col_chunk.min_bytes_opt() {
+                        let rg_min = Self::bytes_to_string(rg_min_bytes);
+                        min_value = match min_value {
+                            Some(ref current) if rg_min < *current => Some(rg_min),
+                            Some(current) => Some(current),
+                            None => Some(rg_min),
+                        };
+                    }
+                    if let Some(rg_max_bytes) = col_chunk.max_bytes_opt() {
+                        let rg_max = Self::bytes_to_string(rg_max_bytes);
+                        max_value = match max_value {
+                            Some(ref current) if rg_max > *current => Some(rg_max),
+                            Some(current) => Some(current),
+                            None => Some(rg_max),
+                        };
                     }
                 } else {
                     total_null_count = None;
@@ -195,6 +205,77 @@ impl ParquetTable {
         let reader = builder.build()?;
         Ok(reader)
     }
+
+    /// Internal scan implementation that handles both regular scan and filter pushdown
+    fn scan_internal(
+        &self,
+        projection: Option<&[usize]>,
+        filters: &[Arc<dyn crate::planner::PhysicalExpr>],
+        limit: Option<usize>,
+    ) -> Result<Vec<RecordBatch>> {
+        use arrow::array::BooleanArray;
+        use arrow::compute::filter_record_batch;
+
+        let reader = self.create_reader()?;
+        let mut result = Vec::new();
+        let mut rows_collected = 0;
+
+        for batch_result in reader {
+            let batch = batch_result?;
+
+            // Apply filters first (before projection) since filters may reference
+            // columns that aren't in the projection
+            let filtered_batch = if filters.is_empty() {
+                batch
+            } else {
+                let mut current_batch = batch;
+                for filter_expr in filters {
+                    let filter_result = filter_expr.evaluate(&current_batch)?;
+                    if let Some(bool_array) = filter_result.as_any().downcast_ref::<BooleanArray>() {
+                        current_batch = filter_record_batch(&current_batch, bool_array)?;
+                    }
+                }
+                current_batch
+            };
+
+            // Skip empty batches after filtering
+            if filtered_batch.num_rows() == 0 {
+                continue;
+            }
+
+            // Apply projection
+            let projected = match projection {
+                Some(indices) => {
+                    let columns: Vec<_> = indices.iter().map(|&i| filtered_batch.column(i).clone()).collect();
+                    let fields: Vec<_> = indices
+                        .iter()
+                        .map(|&i| filtered_batch.schema().field(i).clone())
+                        .collect();
+                    let schema = Arc::new(ArrowSchema::new(fields));
+                    RecordBatch::try_new(schema, columns)?
+                }
+                None => filtered_batch,
+            };
+
+            if let Some(limit) = limit {
+                let remaining = limit - rows_collected;
+                if remaining == 0 {
+                    break;
+                }
+                if projected.num_rows() <= remaining {
+                    rows_collected += projected.num_rows();
+                    result.push(projected);
+                } else {
+                    result.push(projected.slice(0, remaining));
+                    break;
+                }
+            } else {
+                result.push(projected);
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 impl TableProvider for ParquetTable {
@@ -220,53 +301,24 @@ impl TableProvider for ParquetTable {
         _filters: &[()],
         limit: Option<usize>,
     ) -> Result<Vec<RecordBatch>> {
-        let reader = self.create_reader()?;
-        let mut result = Vec::new();
-        let mut rows_collected = 0;
-
-        for batch_result in reader {
-            let batch = batch_result?;
-
-            let projected = match projection {
-                Some(indices) => {
-                    let columns: Vec<_> = indices.iter().map(|&i| batch.column(i).clone()).collect();
-                    let fields: Vec<_> = indices
-                        .iter()
-                        .map(|&i| batch.schema().field(i).clone())
-                        .collect();
-                    let schema = Arc::new(ArrowSchema::new(fields));
-                    RecordBatch::try_new(schema, columns)?
-                }
-                None => batch,
-            };
-
-            if let Some(limit) = limit {
-                let remaining = limit - rows_collected;
-                if remaining == 0 {
-                    break;
-                }
-                if projected.num_rows() <= remaining {
-                    rows_collected += projected.num_rows();
-                    result.push(projected);
-                } else {
-                    result.push(projected.slice(0, remaining));
-                    break;
-                }
-            } else {
-                result.push(projected);
-            }
-        }
-
-        Ok(result)
+        self.scan_internal(projection, &[], limit)
     }
 
     fn supports_filter_pushdown(&self) -> bool {
-        // Parquet supports predicate pushdown via row group pruning
         true
     }
 
     fn supports_limit_pushdown(&self) -> bool {
         true
+    }
+
+    fn scan_with_filters(
+        &self,
+        projection: Option<&[usize]>,
+        filters: &[Arc<dyn crate::planner::PhysicalExpr>],
+        limit: Option<usize>,
+    ) -> Result<Vec<RecordBatch>> {
+        self.scan_internal(projection, filters, limit)
     }
 }
 
