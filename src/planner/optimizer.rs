@@ -481,6 +481,13 @@ impl OptimizerRule for ProjectionPushdown {
     }
 
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+        // Check if the plan has an explicit projection that limits output columns.
+        // If not (e.g., SELECT * or just Filter on TableScan), we shouldn't push
+        // projection down because all columns are needed for output.
+        if !self.has_column_limiting_node(plan) {
+            return Ok(plan.clone());
+        }
+
         // Collect required columns and push down
         let required = self.collect_required_columns(plan);
         self.optimize_with_required(plan, &required)
@@ -488,6 +495,37 @@ impl OptimizerRule for ProjectionPushdown {
 }
 
 impl ProjectionPushdown {
+    /// Check if the plan has a node that explicitly limits output columns.
+    /// If no such node exists (e.g., SELECT * FROM table WHERE ...), projection
+    /// pushdown should not be applied because all columns are needed.
+    fn has_column_limiting_node(&self, plan: &LogicalPlan) -> bool {
+        match plan {
+            // These nodes explicitly limit output columns
+            LogicalPlan::Projection { .. } => true,
+            LogicalPlan::Aggregate { .. } => true,
+            LogicalPlan::Window { .. } => true,
+            LogicalPlan::SetOperation { .. } => true,
+
+            // These nodes pass through - check their input
+            LogicalPlan::Filter { input, .. } => self.has_column_limiting_node(input),
+            LogicalPlan::Sort { input, .. } => self.has_column_limiting_node(input),
+            LogicalPlan::Limit { input, .. } => self.has_column_limiting_node(input),
+            LogicalPlan::Distinct { input } => self.has_column_limiting_node(input),
+            LogicalPlan::SubqueryAlias { input, .. } => self.has_column_limiting_node(input),
+
+            // For joins, check both sides (conservative: require both to have limiting nodes)
+            LogicalPlan::Join { left, right, .. } => {
+                self.has_column_limiting_node(left) && self.has_column_limiting_node(right)
+            }
+            LogicalPlan::CrossJoin { left, right, .. } => {
+                self.has_column_limiting_node(left) && self.has_column_limiting_node(right)
+            }
+
+            // Leaf nodes or CTEs - no column limiting
+            _ => false,
+        }
+    }
+
     /// Collect all columns required by a plan and its children.
     fn collect_required_columns(&self, plan: &LogicalPlan) -> Vec<String> {
         let mut columns = Vec::new();
@@ -579,6 +617,23 @@ impl ProjectionPushdown {
             }
             LogicalExpr::Aggregate(agg) => {
                 for arg in &agg.args {
+                    self.collect_expr_columns(arg, columns);
+                }
+            }
+            LogicalExpr::Case { expr, when_then_exprs, else_expr } => {
+                if let Some(e) = expr {
+                    self.collect_expr_columns(e, columns);
+                }
+                for (when_expr, then_expr) in when_then_exprs {
+                    self.collect_expr_columns(when_expr, columns);
+                    self.collect_expr_columns(then_expr, columns);
+                }
+                if let Some(e) = else_expr {
+                    self.collect_expr_columns(e, columns);
+                }
+            }
+            LogicalExpr::ScalarFunction { args, .. } => {
+                for arg in args {
                     self.collect_expr_columns(arg, columns);
                 }
             }

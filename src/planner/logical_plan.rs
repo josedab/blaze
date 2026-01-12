@@ -7,7 +7,7 @@ use crate::catalog::ResolvedTableRef;
 use crate::error::Result;
 use crate::types::Schema;
 
-use super::logical_expr::{AggregateExpr, LogicalExpr, SortExpr};
+use super::logical_expr::{AggregateExpr, AggregateFunc, LogicalExpr, SortExpr};
 
 /// Static empty schema for plans that don't produce rows.
 static EMPTY_SCHEMA: LazyLock<Schema> = LazyLock::new(Schema::empty);
@@ -661,12 +661,15 @@ impl LogicalPlanBuilder {
 
     // Schema derivation helpers
     fn derive_projection_schema(&self, exprs: &[LogicalExpr]) -> Result<Schema> {
-        use crate::types::{DataType, Field};
+        use crate::types::Field;
 
-        // For now, create a simple schema from expression names
+        let input_schema = self.plan.schema();
         let fields: Vec<Field> = exprs
             .iter()
-            .map(|e| Field::new(e.name(), DataType::Utf8, true))
+            .map(|e| {
+                let data_type = e.data_type(input_schema);
+                Field::new(e.name(), data_type, true)
+            })
             .collect();
         Ok(Schema::new(fields))
     }
@@ -678,13 +681,33 @@ impl LogicalPlanBuilder {
     ) -> Result<Schema> {
         use crate::types::{DataType, Field};
 
+        let input_schema = self.plan.schema();
         let mut fields: Vec<Field> = group_by
             .iter()
-            .map(|e| Field::new(e.name(), DataType::Utf8, true))
+            .map(|e| {
+                let data_type = e.data_type(input_schema);
+                Field::new(e.name(), data_type, true)
+            })
             .collect();
 
         for agg in aggr_exprs {
-            fields.push(Field::new(agg.name(), DataType::Float64, true));
+            // Determine type based on aggregate function
+            let data_type = match agg.func {
+                AggregateFunc::Count | AggregateFunc::CountDistinct |
+                AggregateFunc::ApproxCountDistinct => DataType::Int64,
+                AggregateFunc::Sum | AggregateFunc::Avg |
+                AggregateFunc::ApproxPercentile | AggregateFunc::ApproxMedian => DataType::Float64,
+                AggregateFunc::Min | AggregateFunc::Max |
+                AggregateFunc::First | AggregateFunc::Last => {
+                    if let Some(arg) = agg.args.first() {
+                        arg.data_type(input_schema)
+                    } else {
+                        DataType::Float64
+                    }
+                }
+                AggregateFunc::ArrayAgg | AggregateFunc::StringAgg => DataType::Utf8,
+            };
+            fields.push(Field::new(agg.name(), data_type, true));
         }
 
         Ok(Schema::new(fields))

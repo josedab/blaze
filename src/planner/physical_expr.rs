@@ -1,11 +1,11 @@
 //! Physical expressions for query execution.
 
 use std::any::Any;
-use std::fmt::{self, Debug};
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch,
+    Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Int64Array, RecordBatch,
 };
 use arrow::compute::kernels::boolean;
 use arrow::compute::kernels::cmp;
@@ -264,6 +264,107 @@ impl PhysicalExpr for NotExpr {
     }
 }
 
+/// Bitwise NOT expression (~).
+#[derive(Debug)]
+pub struct BitwiseNotExpr {
+    expr: Arc<dyn PhysicalExpr>,
+}
+
+impl BitwiseNotExpr {
+    pub fn new(expr: Arc<dyn PhysicalExpr>) -> Self {
+        Self { expr }
+    }
+}
+
+impl PhysicalExpr for BitwiseNotExpr {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn data_type(&self) -> ArrowDataType {
+        self.expr.data_type()
+    }
+
+    fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
+        let result = self.expr.evaluate(batch)?;
+
+        match result.data_type() {
+            ArrowDataType::Int8 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::Int8Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int8 array"))?;
+                let negated: arrow::array::Int8Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            ArrowDataType::Int16 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::Int16Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int16 array"))?;
+                let negated: arrow::array::Int16Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            ArrowDataType::Int32 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::Int32Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int32 array"))?;
+                let negated: arrow::array::Int32Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            ArrowDataType::Int64 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int64 array"))?;
+                let negated: arrow::array::Int64Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            ArrowDataType::UInt8 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::UInt8Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected UInt8 array"))?;
+                let negated: arrow::array::UInt8Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            ArrowDataType::UInt16 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::UInt16Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected UInt16 array"))?;
+                let negated: arrow::array::UInt16Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            ArrowDataType::UInt32 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::UInt32Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected UInt32 array"))?;
+                let negated: arrow::array::UInt32Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            ArrowDataType::UInt64 => {
+                let arr = result.as_any().downcast_ref::<arrow::array::UInt64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected UInt64 array"))?;
+                let negated: arrow::array::UInt64Array = arr.iter()
+                    .map(|opt| opt.map(|v| !v))
+                    .collect();
+                Ok(Arc::new(negated))
+            }
+            dt => Err(BlazeError::type_error(format!(
+                "Bitwise NOT not supported for type {:?}. Supported: Int8-64, UInt8-64",
+                dt
+            )))
+        }
+    }
+
+    fn name(&self) -> &str {
+        "BITWISE_NOT"
+    }
+}
+
 /// IS NULL expression.
 #[derive(Debug)]
 pub struct IsNullExpr {
@@ -399,7 +500,7 @@ impl PhysicalExpr for CaseExpr {
     }
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
-        use arrow::array::{new_null_array, StringArray};
+        use arrow::array::new_null_array;
         use arrow::compute::kernels::zip::zip;
 
         let num_rows = batch.num_rows();
@@ -627,7 +728,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
         match self.name.to_uppercase().as_str() {
             "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "CONCAT" => ArrowDataType::Utf8,
             "LENGTH" | "CHAR_LENGTH" => ArrowDataType::Int64,
-            "ABS" | "CEIL" | "FLOOR" | "ROUND" => {
+            "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" => {
                 if !self.args.is_empty() {
                     self.args[0].data_type()
                 } else {
@@ -641,6 +742,10 @@ impl PhysicalExpr for ScalarFunctionExpr {
                     ArrowDataType::Null
                 }
             }
+            // Date/Time functions
+            "CURRENT_DATE" => ArrowDataType::Date32,
+            "CURRENT_TIMESTAMP" | "NOW" | "DATE_TRUNC" => ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            "EXTRACT" | "DATE_PART" => ArrowDataType::Int64,
             // JSON functions
             "JSON_EXTRACT" | "JSON_VALUE" | "JSON_OBJECT" | "JSON_ARRAY"
             | "JSON_TYPE" | "JSON_KEYS" => ArrowDataType::Utf8,
@@ -785,6 +890,277 @@ impl PhysicalExpr for ScalarFunctionExpr {
 
                 let result: StringArray = str_arr.iter()
                     .map(|opt| opt.map(|s| s.trim().to_string()))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+
+            "LTRIM" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("LTRIM requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                let str_arr = arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("LTRIM requires string argument"))?;
+
+                let result: StringArray = str_arr.iter()
+                    .map(|opt| opt.map(|s| s.trim_start().to_string()))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+
+            "RTRIM" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("RTRIM requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                let str_arr = arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("RTRIM requires string argument"))?;
+
+                let result: StringArray = str_arr.iter()
+                    .map(|opt| opt.map(|s| s.trim_end().to_string()))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+
+            "ROUND" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("ROUND requires at least 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                let precision = if self.args.len() > 1 {
+                    let prec_arg = self.args[1].evaluate(batch)?;
+                    let prec_arr = prec_arg.as_any().downcast_ref::<Int64Array>()
+                        .ok_or_else(|| BlazeError::type_error("ROUND precision must be integer"))?;
+                    if prec_arr.is_null(0) {
+                        0i32
+                    } else {
+                        prec_arr.value(0) as i32
+                    }
+                } else {
+                    0i32
+                };
+
+                match arg.data_type() {
+                    ArrowDataType::Float64 => {
+                        let arr = arg.as_any().downcast_ref::<Float64Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Float64"))?;
+                        let multiplier = 10f64.powi(precision);
+                        let result: Float64Array = arr.iter()
+                            .map(|opt| opt.map(|v| (v * multiplier).round() / multiplier))
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    ArrowDataType::Int64 => {
+                        // Integer rounding with negative precision
+                        if precision < 0 {
+                            let arr = arg.as_any().downcast_ref::<Int64Array>()
+                                .ok_or_else(|| BlazeError::type_error("Expected Int64"))?;
+                            let divisor = 10i64.pow((-precision) as u32);
+                            let result: Int64Array = arr.iter()
+                                .map(|opt| opt.map(|v| ((v as f64 / divisor as f64).round() as i64) * divisor))
+                                .collect();
+                            Ok(Arc::new(result))
+                        } else {
+                            Ok(arg)
+                        }
+                    }
+                    _ => Err(BlazeError::type_error("ROUND requires numeric argument")),
+                }
+            }
+
+            "CEIL" | "CEILING" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("CEIL requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+
+                match arg.data_type() {
+                    ArrowDataType::Float64 => {
+                        let arr = arg.as_any().downcast_ref::<Float64Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Float64"))?;
+                        let result: Float64Array = arr.iter()
+                            .map(|opt| opt.map(|v| v.ceil()))
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    ArrowDataType::Int64 => Ok(arg),
+                    _ => Err(BlazeError::type_error("CEIL requires numeric argument")),
+                }
+            }
+
+            "FLOOR" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("FLOOR requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+
+                match arg.data_type() {
+                    ArrowDataType::Float64 => {
+                        let arr = arg.as_any().downcast_ref::<Float64Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Float64"))?;
+                        let result: Float64Array = arr.iter()
+                            .map(|opt| opt.map(|v| v.floor()))
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    ArrowDataType::Int64 => Ok(arg),
+                    _ => Err(BlazeError::type_error("FLOOR requires numeric argument")),
+                }
+            }
+
+            "NULLIF" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("NULLIF requires 2 arguments"));
+                }
+                let arg1 = self.args[0].evaluate(batch)?;
+                let arg2 = self.args[1].evaluate(batch)?;
+
+                // Compare the two arrays - if equal, return null; otherwise return arg1
+                let eq_result = arrow::compute::kernels::cmp::eq(&arg1, &arg2)?;
+
+                // For NULLIF: when equal (true), return null; otherwise return arg1
+                // We need to create a null array for the null case
+                let null_array = arrow::array::new_null_array(arg1.data_type(), batch.num_rows());
+                let result = arrow::compute::kernels::zip::zip(&eq_result, &null_array, &arg1)?;
+                Ok(result)
+            }
+
+            // Date/Time functions
+            "CURRENT_DATE" => {
+                use chrono::Datelike;
+                let today = chrono::Local::now().date_naive();
+                let days_since_epoch = today.num_days_from_ce() - chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().num_days_from_ce();
+                let result: arrow::array::Date32Array = (0..batch.num_rows())
+                    .map(|_| Some(days_since_epoch))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+
+            "CURRENT_TIMESTAMP" | "NOW" => {
+                let now = chrono::Local::now();
+                let ts_micros = now.timestamp_micros();
+                let result: arrow::array::TimestampMicrosecondArray = (0..batch.num_rows())
+                    .map(|_| Some(ts_micros))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+
+            "EXTRACT" | "DATE_PART" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("EXTRACT requires 2 arguments (part, date)"));
+                }
+                let part_arg = self.args[0].evaluate(batch)?;
+                let date_arg = self.args[1].evaluate(batch)?;
+
+                let part_arr = part_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("EXTRACT part must be a string"))?;
+                let part = part_arr.value(0).to_uppercase();
+
+                match date_arg.data_type() {
+                    ArrowDataType::Date32 => {
+                        use chrono::Datelike;
+                        let date_arr = date_arg.as_any().downcast_ref::<arrow::array::Date32Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
+                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                        let result: Int64Array = date_arr.iter()
+                            .map(|opt| {
+                                opt.map(|days| {
+                                    let date = epoch + chrono::Duration::days(days as i64);
+                                    match part.as_str() {
+                                        "YEAR" => date.year() as i64,
+                                        "MONTH" => date.month() as i64,
+                                        "DAY" => date.day() as i64,
+                                        "DOW" | "DAYOFWEEK" => date.weekday().num_days_from_sunday() as i64,
+                                        "DOY" | "DAYOFYEAR" => date.ordinal() as i64,
+                                        "WEEK" => date.iso_week().week() as i64,
+                                        "QUARTER" => ((date.month() - 1) / 3 + 1) as i64,
+                                        _ => 0,
+                                    }
+                                })
+                            })
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    ArrowDataType::Timestamp(_, _) => {
+                        use chrono::{Datelike, Timelike};
+                        let ts_arr = date_arg.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Timestamp"))?;
+                        let result: Int64Array = ts_arr.iter()
+                            .map(|opt| {
+                                opt.map(|micros| {
+                                    let dt = chrono::DateTime::from_timestamp_micros(micros)
+                                        .map(|dt| dt.naive_utc())
+                                        .unwrap_or_else(|| chrono::NaiveDateTime::default());
+                                    match part.as_str() {
+                                        "YEAR" => dt.year() as i64,
+                                        "MONTH" => dt.month() as i64,
+                                        "DAY" => dt.day() as i64,
+                                        "HOUR" => dt.hour() as i64,
+                                        "MINUTE" => dt.minute() as i64,
+                                        "SECOND" => dt.second() as i64,
+                                        "DOW" | "DAYOFWEEK" => dt.weekday().num_days_from_sunday() as i64,
+                                        "DOY" | "DAYOFYEAR" => dt.ordinal() as i64,
+                                        "WEEK" => dt.iso_week().week() as i64,
+                                        "QUARTER" => ((dt.month() - 1) / 3 + 1) as i64,
+                                        "EPOCH" => micros / 1_000_000,
+                                        _ => 0,
+                                    }
+                                })
+                            })
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    _ => Err(BlazeError::type_error("EXTRACT requires date/timestamp argument")),
+                }
+            }
+
+            "DATE_TRUNC" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("DATE_TRUNC requires 2 arguments (precision, timestamp)"));
+                }
+                let part_arg = self.args[0].evaluate(batch)?;
+                let ts_arg = self.args[1].evaluate(batch)?;
+
+                let part_arr = part_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("DATE_TRUNC precision must be a string"))?;
+                let part = part_arr.value(0).to_uppercase();
+
+                let ts_arr = ts_arg.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    .ok_or_else(|| BlazeError::type_error("DATE_TRUNC requires timestamp argument"))?;
+
+                use chrono::{Datelike, Timelike, NaiveDate, NaiveDateTime, NaiveTime};
+                let result: arrow::array::TimestampMicrosecondArray = ts_arr.iter()
+                    .map(|opt| {
+                        opt.map(|micros| {
+                            let dt = chrono::DateTime::from_timestamp_micros(micros)
+                                .map(|dt| dt.naive_utc())
+                                .unwrap_or_else(|| NaiveDateTime::default());
+                            let truncated = match part.as_str() {
+                                "YEAR" => NaiveDateTime::new(
+                                    NaiveDate::from_ymd_opt(dt.year(), 1, 1).unwrap(),
+                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                ),
+                                "MONTH" => NaiveDateTime::new(
+                                    NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap(),
+                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                ),
+                                "DAY" => NaiveDateTime::new(
+                                    dt.date(),
+                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                ),
+                                "HOUR" => NaiveDateTime::new(
+                                    dt.date(),
+                                    NaiveTime::from_hms_opt(dt.hour(), 0, 0).unwrap(),
+                                ),
+                                "MINUTE" => NaiveDateTime::new(
+                                    dt.date(),
+                                    NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 0).unwrap(),
+                                ),
+                                _ => dt,
+                            };
+                            truncated.and_utc().timestamp_micros()
+                        })
+                    })
                     .collect();
                 Ok(Arc::new(result))
             }
@@ -974,6 +1350,148 @@ impl PhysicalExpr for ScalarFunctionExpr {
 
             _ => Err(BlazeError::not_implemented(format!("Function: {}", self.name))),
         }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Scalar subquery expression that holds a precomputed value.
+/// The subquery is executed once and the result is stored as a scalar.
+#[derive(Debug)]
+pub struct ScalarSubqueryExpr {
+    /// The precomputed result of the subquery
+    value: ScalarValue,
+    /// Name for this expression
+    name: String,
+}
+
+impl ScalarSubqueryExpr {
+    pub fn new(value: ScalarValue) -> Self {
+        Self {
+            name: "scalar_subquery".to_string(),
+            value,
+        }
+    }
+}
+
+impl PhysicalExpr for ScalarSubqueryExpr {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn data_type(&self) -> ArrowDataType {
+        self.value.data_type().to_arrow()
+    }
+
+    fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
+        // Expand the scalar value to match the batch size
+        self.value.to_array_of_size(batch.num_rows())
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// EXISTS subquery expression that holds a precomputed boolean result.
+#[derive(Debug)]
+pub struct ExistsExpr {
+    /// Whether the subquery returned any rows
+    exists: bool,
+    /// Whether the condition is negated (NOT EXISTS)
+    negated: bool,
+    /// Name for this expression
+    name: String,
+}
+
+impl ExistsExpr {
+    pub fn new(exists: bool, negated: bool) -> Self {
+        Self {
+            exists,
+            negated,
+            name: if negated { "not_exists" } else { "exists" }.to_string(),
+        }
+    }
+}
+
+impl PhysicalExpr for ExistsExpr {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn data_type(&self) -> ArrowDataType {
+        ArrowDataType::Boolean
+    }
+
+    fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
+        let result = if self.negated {
+            !self.exists
+        } else {
+            self.exists
+        };
+
+        // Create a boolean array with the same value for all rows
+        let mut builder = BooleanBuilder::new();
+        for _ in 0..batch.num_rows() {
+            builder.append_value(result);
+        }
+        Ok(Arc::new(builder.finish()))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// IN subquery expression that checks if value is in a set.
+#[derive(Debug)]
+pub struct InSubqueryExpr {
+    /// The expression to check
+    expr: Arc<dyn PhysicalExpr>,
+    /// Precomputed set of values from the subquery
+    values: Vec<ScalarValue>,
+    /// Whether the condition is negated (NOT IN)
+    negated: bool,
+    /// Name for this expression
+    name: String,
+}
+
+impl InSubqueryExpr {
+    pub fn new(expr: Arc<dyn PhysicalExpr>, values: Vec<ScalarValue>, negated: bool) -> Self {
+        Self {
+            name: if negated { "not_in_subquery" } else { "in_subquery" }.to_string(),
+            expr,
+            values,
+            negated,
+        }
+    }
+}
+
+impl PhysicalExpr for InSubqueryExpr {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn data_type(&self) -> ArrowDataType {
+        ArrowDataType::Boolean
+    }
+
+    fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
+        let expr_array = self.expr.evaluate(batch)?;
+        let mut builder = BooleanBuilder::new();
+
+        for i in 0..batch.num_rows() {
+            // Convert the array value to ScalarValue for comparison
+            let value = ScalarValue::try_from_array(&expr_array, i)?;
+
+            let found = self.values.iter().any(|v| v == &value);
+            let result = if self.negated { !found } else { found };
+            builder.append_value(result);
+        }
+
+        Ok(Arc::new(builder.finish()))
     }
 
     fn name(&self) -> &str {

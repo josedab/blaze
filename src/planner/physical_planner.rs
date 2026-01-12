@@ -4,28 +4,47 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+use arrow::datatypes::Schema as ArrowSchema;
 
 use crate::error::{BlazeError, Result};
-use crate::planner::logical_expr::{AggregateFunc, BinaryOp, LogicalExpr, UnaryOp};
-use crate::planner::logical_plan::{JoinType, LogicalPlan};
+use crate::planner::logical_expr::{BinaryOp, LogicalExpr, UnaryOp};
+use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::physical_expr::{
-    BinaryExpr, CastExpr, ColumnExpr, IsNotNullExpr, IsNullExpr, LiteralExpr, NotExpr, PhysicalExpr,
+    BinaryExpr, BitwiseNotExpr, CastExpr, ColumnExpr, IsNotNullExpr, IsNullExpr, LiteralExpr, NotExpr, PhysicalExpr,
     CaseExpr, BetweenExpr, LikeExpr, InListExpr, ScalarFunctionExpr,
+    ScalarSubqueryExpr, ExistsExpr, InSubqueryExpr,
 };
-use crate::planner::physical_plan::{self, AggregateExpr, PhysicalPlan, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction};
+use crate::planner::physical_plan::{AggregateExpr, PhysicalPlan, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction};
 use crate::types::ScalarValue;
+
+use arrow::record_batch::RecordBatch;
+
+/// Type alias for a function that executes a physical plan and returns results.
+pub type SubqueryExecutor = Box<dyn Fn(&PhysicalPlan) -> Result<Vec<RecordBatch>> + Send + Sync>;
 
 /// Physical query planner.
 ///
 /// Converts logical plans into physical plans that can be executed by the
 /// query execution engine.
-pub struct PhysicalPlanner {}
+pub struct PhysicalPlanner {
+    /// Optional executor for evaluating subqueries during planning.
+    subquery_executor: Option<SubqueryExecutor>,
+}
 
 impl PhysicalPlanner {
     /// Create a new physical planner.
     pub fn new() -> Self {
-        Self {}
+        Self {
+            subquery_executor: None,
+        }
+    }
+
+    /// Create a new physical planner with a subquery executor.
+    /// The executor is used to evaluate uncorrelated subqueries during planning.
+    pub fn with_subquery_executor(executor: SubqueryExecutor) -> Self {
+        Self {
+            subquery_executor: Some(executor),
+        }
     }
 
     /// Create a physical plan from a logical plan.
@@ -37,23 +56,24 @@ impl PhysicalPlanner {
                 projection,
                 filters,
             } => {
-                let arrow_schema = Arc::new(schema.to_arrow());
-
-                // Apply projection to schema if present
-                let output_schema = if let Some(proj) = projection {
-                    let projected_fields: Vec<_> = proj
-                        .iter()
-                        .map(|&i| arrow_schema.field(i).clone())
-                        .collect();
-                    Arc::new(ArrowSchema::new(projected_fields))
-                } else {
-                    arrow_schema
-                };
+                // The schema in LogicalPlan::TableScan is already the output schema
+                // (possibly projected by the optimizer). The projection field contains
+                // indices into the ORIGINAL table schema for the storage layer to use.
+                let output_schema = Arc::new(schema.to_arrow());
 
                 // Convert filter expressions
+                // IMPORTANT: Filters are evaluated against the ORIGINAL batch (before projection),
+                // so we need to map column names to their original indices when there's a projection.
                 let physical_filters: Vec<Arc<dyn PhysicalExpr>> = filters
                     .iter()
-                    .map(|f| self.create_physical_expr(f, &output_schema))
+                    .map(|f| {
+                        if let Some(proj) = projection {
+                            // Create a mapping from column name to original index
+                            self.create_physical_expr_with_projection_mapping(f, &output_schema, proj)
+                        } else {
+                            self.create_physical_expr(f, &output_schema)
+                        }
+                    })
                     .collect::<Result<Vec<_>>>()?;
 
                 Ok(PhysicalPlan::Scan {
@@ -223,7 +243,7 @@ impl PhysicalPlanner {
             }
 
             LogicalPlan::SetOperation {
-                op,
+                op: _,
                 left,
                 right,
                 schema,
@@ -352,6 +372,16 @@ impl PhysicalPlanner {
     }
 
     /// Create a physical expression from a logical expression.
+    /// Public API for creating physical expressions outside of plan context.
+    pub fn create_physical_expr_public(
+        &self,
+        expr: &LogicalExpr,
+        schema: &Arc<ArrowSchema>,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        self.create_physical_expr(expr, schema)
+    }
+
+    /// Create a physical expression from a logical expression.
     fn create_physical_expr(
         &self,
         expr: &LogicalExpr,
@@ -411,7 +441,7 @@ impl PhysicalPlanner {
                         Ok(Arc::new(BinaryExpr::new(zero, "minus", inner)))
                     }
                     UnaryOp::BitwiseNot => {
-                        Err(BlazeError::not_implemented("Bitwise NOT in physical plan"))
+                        Ok(Arc::new(BitwiseNotExpr::new(inner)))
                     }
                 }
             }
@@ -516,16 +546,84 @@ impl PhysicalPlanner {
                 Err(BlazeError::not_implemented("Window expression in physical plan"))
             }
 
-            LogicalExpr::ScalarSubquery(_) => {
-                Err(BlazeError::not_implemented("Scalar subquery in physical plan"))
+            LogicalExpr::ScalarSubquery(subquery_plan) => {
+                // Create physical plan for the subquery
+                let physical_subquery = self.create_physical_plan(subquery_plan)?;
+
+                // Execute the subquery if we have an executor
+                if let Some(ref executor) = self.subquery_executor {
+                    let batches = executor(&physical_subquery)?;
+
+                    // Extract the scalar value from the result
+                    let value = if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+                        ScalarValue::Null
+                    } else {
+                        // Get the first value from the first column of the first non-empty batch
+                        let batch = batches.iter().find(|b| b.num_rows() > 0)
+                            .ok_or_else(|| BlazeError::execution("Scalar subquery returned no rows"))?;
+
+                        if batch.num_columns() == 0 {
+                            return Err(BlazeError::execution("Scalar subquery returned no columns"));
+                        }
+
+                        ScalarValue::try_from_array(batch.column(0), 0)?
+                    };
+
+                    Ok(Arc::new(ScalarSubqueryExpr::new(value)))
+                } else {
+                    Err(BlazeError::not_implemented(
+                        "Scalar subquery requires a subquery executor. Use PhysicalPlanner::with_subquery_executor()"
+                    ))
+                }
             }
 
-            LogicalExpr::Exists { .. } => {
-                Err(BlazeError::not_implemented("EXISTS subquery in physical plan"))
+            LogicalExpr::Exists { subquery, negated } => {
+                // Create physical plan for the subquery
+                let physical_subquery = self.create_physical_plan(subquery)?;
+
+                // Execute the subquery if we have an executor
+                if let Some(ref executor) = self.subquery_executor {
+                    let batches = executor(&physical_subquery)?;
+
+                    // Check if any rows were returned
+                    let exists = batches.iter().any(|b| b.num_rows() > 0);
+
+                    Ok(Arc::new(ExistsExpr::new(exists, *negated)))
+                } else {
+                    Err(BlazeError::not_implemented(
+                        "EXISTS subquery requires a subquery executor. Use PhysicalPlanner::with_subquery_executor()"
+                    ))
+                }
             }
 
-            LogicalExpr::InSubquery { .. } => {
-                Err(BlazeError::not_implemented("IN subquery in physical plan"))
+            LogicalExpr::InSubquery { expr, subquery, negated } => {
+                // Create physical plan for the subquery
+                let physical_subquery = self.create_physical_plan(subquery)?;
+
+                // Create physical expression for the left-hand side
+                let physical_expr = self.create_physical_expr(expr, schema)?;
+
+                // Execute the subquery if we have an executor
+                if let Some(ref executor) = self.subquery_executor {
+                    let batches = executor(&physical_subquery)?;
+
+                    // Collect all values from the subquery result
+                    let mut values = Vec::new();
+                    for batch in &batches {
+                        if batch.num_columns() > 0 {
+                            let col = batch.column(0);
+                            for i in 0..batch.num_rows() {
+                                values.push(ScalarValue::try_from_array(col, i)?);
+                            }
+                        }
+                    }
+
+                    Ok(Arc::new(InSubqueryExpr::new(physical_expr, values, *negated)))
+                } else {
+                    Err(BlazeError::not_implemented(
+                        "IN subquery requires a subquery executor. Use PhysicalPlanner::with_subquery_executor()"
+                    ))
+                }
             }
 
             LogicalExpr::ScalarFunction { name, args } => {
@@ -548,9 +646,88 @@ impl PhysicalPlanner {
                 ))
             }
 
-            LogicalExpr::Placeholder { .. } => {
-                Err(BlazeError::not_implemented("Placeholders in physical plan"))
+            LogicalExpr::Placeholder { id } => {
+                Err(BlazeError::not_implemented(format!(
+                    "Query placeholders (${}). Use string formatting to substitute parameter values before execution.",
+                    id
+                )))
             }
+        }
+    }
+
+    /// Create a physical expression with projection mapping for filter pushdown.
+    /// When filters are pushed to TableScan and there's a projection, the filter
+    /// expressions need to use ORIGINAL column indices (before projection), because
+    /// filters are evaluated against the original batch in storage.
+    fn create_physical_expr_with_projection_mapping(
+        &self,
+        expr: &LogicalExpr,
+        projected_schema: &Arc<ArrowSchema>,
+        projection: &[usize],
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        match expr {
+            LogicalExpr::Column(col) => {
+                // Find column position in the projected schema
+                let projected_idx = projected_schema
+                    .fields()
+                    .iter()
+                    .position(|f| f.name() == &col.name)
+                    .ok_or_else(|| {
+                        BlazeError::analysis(format!("Column '{}' not found in schema", col.name))
+                    })?;
+
+                // Map to original index using projection array
+                let original_idx = projection[projected_idx];
+
+                Ok(Arc::new(ColumnExpr::new(col.name.clone(), original_idx)))
+            }
+
+            LogicalExpr::Literal(value) => Ok(Arc::new(LiteralExpr::new(value.clone()))),
+
+            LogicalExpr::BinaryExpr { left, op, right } => {
+                let left_expr = self.create_physical_expr_with_projection_mapping(left, projected_schema, projection)?;
+                let right_expr = self.create_physical_expr_with_projection_mapping(right, projected_schema, projection)?;
+
+                let op_str = match op {
+                    BinaryOp::Eq => "eq",
+                    BinaryOp::NotEq => "neq",
+                    BinaryOp::Lt => "lt",
+                    BinaryOp::LtEq => "lte",
+                    BinaryOp::Gt => "gt",
+                    BinaryOp::GtEq => "gte",
+                    BinaryOp::Plus => "plus",
+                    BinaryOp::Minus => "minus",
+                    BinaryOp::Multiply => "multiply",
+                    BinaryOp::Divide => "divide",
+                    BinaryOp::Modulo => "modulo",
+                    BinaryOp::And => "and",
+                    BinaryOp::Or => "or",
+                    BinaryOp::BitwiseAnd => "bitand",
+                    BinaryOp::BitwiseOr => "bitor",
+                    BinaryOp::BitwiseXor => "bitxor",
+                    BinaryOp::Concat => "concat",
+                };
+
+                Ok(Arc::new(BinaryExpr::new(left_expr, op_str, right_expr)))
+            }
+
+            LogicalExpr::Not(inner) => {
+                let inner_expr = self.create_physical_expr_with_projection_mapping(inner, projected_schema, projection)?;
+                Ok(Arc::new(NotExpr::new(inner_expr)))
+            }
+
+            LogicalExpr::IsNull(inner) => {
+                let inner_expr = self.create_physical_expr_with_projection_mapping(inner, projected_schema, projection)?;
+                Ok(Arc::new(IsNullExpr::new(inner_expr)))
+            }
+
+            LogicalExpr::IsNotNull(inner) => {
+                let inner_expr = self.create_physical_expr_with_projection_mapping(inner, projected_schema, projection)?;
+                Ok(Arc::new(IsNotNullExpr::new(inner_expr)))
+            }
+
+            // For expressions that don't contain column references, delegate to regular method
+            _ => self.create_physical_expr(expr, projected_schema),
         }
     }
 
@@ -679,7 +856,10 @@ mod tests {
     use crate::catalog::ResolvedTableRef;
     use crate::planner::logical_plan::LogicalPlanBuilder;
     use crate::planner::logical_expr::{AggregateExpr, Column as LogicalColumn};
+    use crate::planner::JoinType;
+    use crate::planner::logical_plan::SetOperation;
     use crate::types::{DataType, Field, Schema};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
 
     fn create_test_schema() -> Schema {
         Schema::new(vec![
@@ -1168,5 +1348,167 @@ mod tests {
         let physical = planner.create_physical_expr(&expr, &schema).unwrap();
 
         assert!(physical.name().to_lowercase().contains("cast") || physical.name().to_lowercase().contains("float"));
+    }
+
+    #[test]
+    fn test_physical_planner_inner_join() {
+        let left_schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let right_schema = Schema::new(vec![
+            Field::new("user_id", DataType::Int64, false),
+            Field::new("order_id", DataType::Int64, false),
+        ]);
+
+        let left_table_ref = ResolvedTableRef::new("default", "main", "users");
+        let right_table_ref = ResolvedTableRef::new("default", "main", "orders");
+
+        let left_plan = LogicalPlanBuilder::scan(left_table_ref, left_schema.clone()).build();
+        let right_plan = LogicalPlanBuilder::scan(right_table_ref, right_schema.clone()).build();
+
+        let join_schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("user_id", DataType::Int64, false),
+            Field::new("order_id", DataType::Int64, false),
+        ]);
+
+        let logical_plan = LogicalPlan::Join {
+            left: Arc::new(left_plan),
+            right: Arc::new(right_plan),
+            join_type: JoinType::Inner,
+            on: vec![(
+                LogicalExpr::Column(LogicalColumn { relation: None, name: "id".to_string() }),
+                LogicalExpr::Column(LogicalColumn { relation: None, name: "user_id".to_string() }),
+            )],
+            filter: None,
+            schema: join_schema,
+        };
+
+        let planner = PhysicalPlanner::new();
+        let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
+
+        match physical_plan {
+            PhysicalPlan::HashJoin { join_type, .. } => {
+                assert_eq!(join_type, JoinType::Inner);
+            }
+            _ => panic!("Expected HashJoin plan"),
+        }
+    }
+
+    #[test]
+    fn test_physical_planner_cross_join() {
+        let left_schema = Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+        ]);
+        let right_schema = Schema::new(vec![
+            Field::new("b", DataType::Int64, false),
+        ]);
+
+        let left_table_ref = ResolvedTableRef::new("default", "main", "t1");
+        let right_table_ref = ResolvedTableRef::new("default", "main", "t2");
+
+        let left_plan = LogicalPlanBuilder::scan(left_table_ref, left_schema.clone()).build();
+        let right_plan = LogicalPlanBuilder::scan(right_table_ref, right_schema.clone()).build();
+
+        let cross_schema = Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Int64, false),
+        ]);
+
+        let logical_plan = LogicalPlan::CrossJoin {
+            left: Arc::new(left_plan),
+            right: Arc::new(right_plan),
+            schema: cross_schema,
+        };
+
+        let planner = PhysicalPlanner::new();
+        let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
+
+        match physical_plan {
+            PhysicalPlan::CrossJoin { .. } => {}
+            _ => panic!("Expected CrossJoin plan"),
+        }
+    }
+
+    #[test]
+    fn test_physical_planner_union() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+        ]);
+
+        let table_ref1 = ResolvedTableRef::new("default", "main", "t1");
+        let table_ref2 = ResolvedTableRef::new("default", "main", "t2");
+
+        let left_plan = LogicalPlanBuilder::scan(table_ref1, schema.clone()).build();
+        let right_plan = LogicalPlanBuilder::scan(table_ref2, schema.clone()).build();
+
+        let logical_plan = LogicalPlan::SetOperation {
+            op: SetOperation::Union,
+            left: Arc::new(left_plan),
+            right: Arc::new(right_plan),
+            all: true,
+            schema: schema.clone(),
+        };
+
+        let planner = PhysicalPlanner::new();
+        let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
+
+        match physical_plan {
+            PhysicalPlan::Union { inputs, .. } => {
+                assert_eq!(inputs.len(), 2);
+            }
+            _ => panic!("Expected Union plan"),
+        }
+    }
+
+    #[test]
+    fn test_physical_planner_values() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, false),
+        ]);
+
+        let logical_plan = LogicalPlan::Values {
+            values: vec![
+                vec![
+                    LogicalExpr::Literal(ScalarValue::Int64(Some(1))),
+                    LogicalExpr::Literal(ScalarValue::Utf8(Some("hello".to_string()))),
+                ],
+            ],
+            schema: schema.clone(),
+        };
+
+        let planner = PhysicalPlanner::new();
+        let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
+
+        // Note: Current implementation returns empty data placeholder
+        match physical_plan {
+            PhysicalPlan::Values { .. } => {}
+            _ => panic!("Expected Values plan"),
+        }
+    }
+
+    #[test]
+    fn test_physical_planner_empty_relation() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+        ]);
+
+        let logical_plan = LogicalPlan::EmptyRelation {
+            produce_one_row: false,
+            schema: schema.clone(),
+        };
+
+        let planner = PhysicalPlanner::new();
+        let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
+
+        match physical_plan {
+            PhysicalPlan::Empty { produce_one_row, .. } => {
+                assert!(!produce_one_row);
+            }
+            _ => panic!("Expected Empty plan"),
+        }
     }
 }
