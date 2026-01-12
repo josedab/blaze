@@ -3,13 +3,12 @@
 //! Exchange operators handle data movement between parallel workers,
 //! implementing shuffle and broadcast operations.
 
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
+use std::sync::Mutex;
 
 use arrow::record_batch::RecordBatch;
 
 use crate::error::{BlazeError, Result};
-use super::partition::{HashPartitioner, RoundRobinPartitioner, coalesce_batches};
+use super::partition::{HashPartitioner, RoundRobinPartitioner};
 
 /// Type of exchange operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +365,7 @@ impl ExchangeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
 

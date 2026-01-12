@@ -135,7 +135,7 @@ fn print_help() {
 fn print_batches(batches: &[arrow::record_batch::RecordBatch]) {
     use arrow::util::pretty::print_batches;
 
-    if let Err(e) = print_batches(batches) {
+    if let Err(_) = print_batches(batches) {
         // Fallback to basic output
         for batch in batches {
             println!("Batch: {} rows, {} columns", batch.num_rows(), batch.num_columns());

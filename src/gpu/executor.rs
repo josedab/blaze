@@ -5,14 +5,13 @@
 
 use std::sync::Arc;
 
-use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
 use crate::error::{BlazeError, Result};
 use super::{
     GpuConfig,
-    memory::{GpuMemoryPool, GpuRecordBatch, MemoryTransfer},
-    kernels::{GpuKernel, KernelParams, KernelRegistry, AggregationType},
+    memory::{GpuMemoryPool, MemoryTransfer},
+    kernels::{KernelRegistry, AggregationType},
 };
 
 /// GPU query executor.
@@ -73,7 +72,7 @@ impl GpuExecutor {
         &self,
         operator: &GpuOperator,
         input: &[RecordBatch],
-        pool: &GpuMemoryPool,
+        _pool: &GpuMemoryPool,
     ) -> Result<Vec<RecordBatch>> {
         // Get the kernel for this operator
         let kernel_name = operator.kernel_name();
@@ -102,7 +101,7 @@ impl GpuExecutor {
             GpuOperator::Sort { sort_keys } => {
                 self.simulate_sort(input, sort_keys)
             }
-            GpuOperator::Join { join_type, left_keys, right_keys } => {
+            GpuOperator::Join { join_type: _, left_keys: _, right_keys: _ } => {
                 // Join requires two inputs - for now just pass through
                 Ok(input.to_vec())
             }

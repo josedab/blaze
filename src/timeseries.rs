@@ -23,7 +23,7 @@
 //! ORDER BY hour
 //! ```
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 
 use crate::error::{BlazeError, Result};
 

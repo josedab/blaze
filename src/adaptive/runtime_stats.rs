@@ -4,7 +4,7 @@
 //! during query execution to enable adaptive optimizations.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 /// Statistics for a single partition.

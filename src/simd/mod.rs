@@ -34,7 +34,6 @@ pub use jit::{JitCompiler, JitFunction, JitConfig, CompiledKernel};
 pub use codegen::{CodeGenerator, GeneratedCode, Instruction, Register};
 
 use crate::error::{BlazeError, Result};
-use std::sync::Arc;
 
 /// SIMD instruction set levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

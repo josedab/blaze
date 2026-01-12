@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::planner::{BinaryOp, JoinType, LogicalExpr, LogicalPlan};
+use crate::planner::{JoinType, LogicalExpr, LogicalPlan};
 use crate::types::Schema;
 
 use super::cost_model::{Cost, CostModel};
@@ -187,7 +187,7 @@ impl JoinOrderOptimizer {
             LogicalPlan::TableScan { .. } | LogicalPlan::SubqueryAlias { .. } => {
                 relations.push(plan.clone());
             }
-            LogicalPlan::Filter { input, .. } | LogicalPlan::Projection { input, .. } => {
+            LogicalPlan::Filter { input: _, .. } | LogicalPlan::Projection { input: _, .. } => {
                 // Preserve filter/projection on base relations
                 relations.push(plan.clone());
             }
