@@ -8,10 +8,8 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Float32Array, Int32Array, Int64Array,
     Int16Array, Int8Array, UInt32Array, UInt64Array, Date32Array, Date64Array,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
-    NullArray, RecordBatch, StringArray, new_null_array,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, RecordBatch, StringArray, new_null_array,
 };
-use arrow::buffer::NullBuffer;
 use arrow::compute;
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 
@@ -570,7 +568,7 @@ impl HashJoinOperator {
             return Ok(None);
         }
 
-        let num_rows = left_indices.len();
+        let _num_rows = left_indices.len();
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(output_schema.fields().len());
 
         // For semi/anti joins, only include left columns
@@ -841,6 +839,492 @@ impl HashJoinOperator {
         }
 
         Ok(result)
+    }
+}
+
+/// Sort-merge join operator.
+/// Assumes inputs are already sorted by join keys.
+pub struct SortMergeJoinOperator;
+
+impl SortMergeJoinOperator {
+    /// Execute a sort-merge join between left and right batches.
+    /// Both inputs should already be sorted by their respective join keys.
+    pub fn execute(
+        left_batches: Vec<RecordBatch>,
+        right_batches: Vec<RecordBatch>,
+        join_type: JoinType,
+        left_keys: &[Arc<dyn crate::planner::PhysicalExpr>],
+        right_keys: &[Arc<dyn crate::planner::PhysicalExpr>],
+        output_schema: &Arc<ArrowSchema>,
+    ) -> Result<Vec<RecordBatch>> {
+        // Handle empty inputs
+        if left_batches.is_empty() || right_batches.is_empty() {
+            return HashJoinOperator::execute(
+                left_batches,
+                right_batches,
+                join_type,
+                left_keys,
+                right_keys,
+                output_schema,
+            );
+        }
+
+        // Concatenate all batches for simpler processing
+        let left_combined = Self::concat_batches(&left_batches)?;
+        let right_combined = Self::concat_batches(&right_batches)?;
+
+        // Evaluate key expressions
+        let left_key_arrays: Vec<ArrayRef> = left_keys
+            .iter()
+            .map(|expr| expr.evaluate(&left_combined))
+            .collect::<Result<Vec<_>>>()?;
+
+        let right_key_arrays: Vec<ArrayRef> = right_keys
+            .iter()
+            .map(|expr| expr.evaluate(&right_combined))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Sort indices for both sides by their keys
+        let left_indices = Self::sort_indices(&left_key_arrays)?;
+        let right_indices = Self::sort_indices(&right_key_arrays)?;
+
+        // Perform merge join
+        let (output_left_indices, output_right_indices) = Self::merge_join(
+            &left_key_arrays,
+            &right_key_arrays,
+            &left_indices,
+            &right_indices,
+            join_type,
+        )?;
+
+        // Build output batch
+        Self::build_output(
+            &left_combined,
+            &right_combined,
+            &output_left_indices,
+            &output_right_indices,
+            output_schema,
+        )
+    }
+
+    fn concat_batches(batches: &[RecordBatch]) -> Result<RecordBatch> {
+        if batches.is_empty() {
+            return Err(crate::error::BlazeError::execution("Empty batches"));
+        }
+        if batches.len() == 1 {
+            return Ok(batches[0].clone());
+        }
+        let schema = batches[0].schema();
+        Ok(arrow::compute::concat_batches(&schema, batches)?)
+    }
+
+    fn sort_indices(key_arrays: &[ArrayRef]) -> Result<Vec<usize>> {
+        use arrow::compute::SortColumn;
+
+        let num_rows = key_arrays.first()
+            .map(|a| a.len())
+            .unwrap_or(0);
+
+        if key_arrays.is_empty() || num_rows == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Build sort columns
+        let sort_columns: Vec<SortColumn> = key_arrays
+            .iter()
+            .map(|arr| SortColumn {
+                values: arr.clone(),
+                options: Some(arrow::compute::SortOptions {
+                    descending: false,
+                    nulls_first: true,
+                }),
+            })
+            .collect();
+
+        // Use lexicographic sort
+        let indices = arrow::compute::lexsort_to_indices(&sort_columns, None)?;
+
+        Ok(indices.values().iter().map(|&i| i as usize).collect())
+    }
+
+    fn compare_keys(
+        left_keys: &[ArrayRef],
+        right_keys: &[ArrayRef],
+        left_row: usize,
+        right_row: usize,
+    ) -> Result<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+
+        for (left_arr, right_arr) in left_keys.iter().zip(right_keys.iter()) {
+            let cmp = Self::compare_values(left_arr, right_arr, left_row, right_row)?;
+            if cmp != Ordering::Equal {
+                return Ok(cmp);
+            }
+        }
+        Ok(Ordering::Equal)
+    }
+
+    fn compare_values(
+        left_arr: &ArrayRef,
+        right_arr: &ArrayRef,
+        left_row: usize,
+        right_row: usize,
+    ) -> Result<std::cmp::Ordering> {
+        use arrow::array::*;
+        use std::cmp::Ordering;
+
+        // Handle nulls
+        let left_null = left_arr.is_null(left_row);
+        let right_null = right_arr.is_null(right_row);
+        match (left_null, right_null) {
+            (true, true) => return Ok(Ordering::Equal),
+            (true, false) => return Ok(Ordering::Less),
+            (false, true) => return Ok(Ordering::Greater),
+            (false, false) => {}
+        }
+
+        match left_arr.data_type() {
+            arrow::datatypes::DataType::Int64 => {
+                let left = try_downcast::<Int64Array>(left_arr, "Int64Array")?.value(left_row);
+                let right = try_downcast::<Int64Array>(right_arr, "Int64Array")?.value(right_row);
+                Ok(left.cmp(&right))
+            }
+            arrow::datatypes::DataType::Int32 => {
+                let left = try_downcast::<Int32Array>(left_arr, "Int32Array")?.value(left_row);
+                let right = try_downcast::<Int32Array>(right_arr, "Int32Array")?.value(right_row);
+                Ok(left.cmp(&right))
+            }
+            arrow::datatypes::DataType::Float64 => {
+                let left = try_downcast::<Float64Array>(left_arr, "Float64Array")?.value(left_row);
+                let right = try_downcast::<Float64Array>(right_arr, "Float64Array")?.value(right_row);
+                Ok(left.partial_cmp(&right).unwrap_or(Ordering::Equal))
+            }
+            arrow::datatypes::DataType::Utf8 => {
+                let left = try_downcast::<StringArray>(left_arr, "StringArray")?.value(left_row);
+                let right = try_downcast::<StringArray>(right_arr, "StringArray")?.value(right_row);
+                Ok(left.cmp(right))
+            }
+            arrow::datatypes::DataType::Boolean => {
+                let left = try_downcast::<BooleanArray>(left_arr, "BooleanArray")?.value(left_row);
+                let right = try_downcast::<BooleanArray>(right_arr, "BooleanArray")?.value(right_row);
+                Ok(left.cmp(&right))
+            }
+            arrow::datatypes::DataType::Date32 => {
+                let left = try_downcast::<Date32Array>(left_arr, "Date32Array")?.value(left_row);
+                let right = try_downcast::<Date32Array>(right_arr, "Date32Array")?.value(right_row);
+                Ok(left.cmp(&right))
+            }
+            arrow::datatypes::DataType::Date64 => {
+                let left = try_downcast::<Date64Array>(left_arr, "Date64Array")?.value(left_row);
+                let right = try_downcast::<Date64Array>(right_arr, "Date64Array")?.value(right_row);
+                Ok(left.cmp(&right))
+            }
+            arrow::datatypes::DataType::Timestamp(unit, _) => {
+                use arrow::datatypes::TimeUnit;
+                let (left_val, right_val): (i64, i64) = match unit {
+                    TimeUnit::Second => {
+                        let left = try_downcast::<TimestampSecondArray>(left_arr, "TimestampSecondArray")?.value(left_row);
+                        let right = try_downcast::<TimestampSecondArray>(right_arr, "TimestampSecondArray")?.value(right_row);
+                        (left, right)
+                    }
+                    TimeUnit::Millisecond => {
+                        let left = try_downcast::<TimestampMillisecondArray>(left_arr, "TimestampMillisecondArray")?.value(left_row);
+                        let right = try_downcast::<TimestampMillisecondArray>(right_arr, "TimestampMillisecondArray")?.value(right_row);
+                        (left, right)
+                    }
+                    TimeUnit::Microsecond => {
+                        let left = try_downcast::<TimestampMicrosecondArray>(left_arr, "TimestampMicrosecondArray")?.value(left_row);
+                        let right = try_downcast::<TimestampMicrosecondArray>(right_arr, "TimestampMicrosecondArray")?.value(right_row);
+                        (left, right)
+                    }
+                    TimeUnit::Nanosecond => {
+                        let left = try_downcast::<TimestampNanosecondArray>(left_arr, "TimestampNanosecondArray")?.value(left_row);
+                        let right = try_downcast::<TimestampNanosecondArray>(right_arr, "TimestampNanosecondArray")?.value(right_row);
+                        (left, right)
+                    }
+                };
+                Ok(left_val.cmp(&right_val))
+            }
+            _ => Err(crate::error::BlazeError::type_error(format!(
+                "Sort-merge join does not support key type {:?}. Supported: Int32, Int64, Float64, Utf8, Boolean, Date32, Date64, Timestamp",
+                left_arr.data_type()
+            ))),
+        }
+    }
+
+    fn merge_join(
+        left_keys: &[ArrayRef],
+        right_keys: &[ArrayRef],
+        left_sorted: &[usize],
+        right_sorted: &[usize],
+        join_type: JoinType,
+    ) -> Result<(Vec<Option<usize>>, Vec<Option<usize>>)> {
+        use std::cmp::Ordering;
+        use std::collections::HashSet;
+
+        let mut output_left: Vec<Option<usize>> = Vec::new();
+        let mut output_right: Vec<Option<usize>> = Vec::new();
+
+        let mut left_matched: HashSet<usize> = HashSet::new();
+        let mut right_matched: HashSet<usize> = HashSet::new();
+
+        let mut i = 0;
+        let mut j = 0;
+
+        while i < left_sorted.len() && j < right_sorted.len() {
+            let left_row = left_sorted[i];
+            let right_row = right_sorted[j];
+
+            let cmp = Self::compare_keys(left_keys, right_keys, left_row, right_row)?;
+
+            match cmp {
+                Ordering::Less => {
+                    // Left is smaller, no match for this left row (yet)
+                    i += 1;
+                }
+                Ordering::Greater => {
+                    // Right is smaller, no match for this right row
+                    j += 1;
+                }
+                Ordering::Equal => {
+                    // Found matching keys - need to handle all matches
+                    // Find the range of equal keys on the left
+                    let mut left_end = i + 1;
+                    while left_end < left_sorted.len() {
+                        let cmp = Self::compare_keys(
+                            left_keys, left_keys,
+                            left_sorted[left_end], left_row
+                        )?;
+                        if cmp != Ordering::Equal {
+                            break;
+                        }
+                        left_end += 1;
+                    }
+
+                    // Find the range of equal keys on the right
+                    let mut right_end = j + 1;
+                    while right_end < right_sorted.len() {
+                        let cmp = Self::compare_keys(
+                            right_keys, right_keys,
+                            right_sorted[right_end], right_row
+                        )?;
+                        if cmp != Ordering::Equal {
+                            break;
+                        }
+                        right_end += 1;
+                    }
+
+                    // Output cartesian product of matching ranges
+                    for li in i..left_end {
+                        let l_row = left_sorted[li];
+                        for rj in j..right_end {
+                            let r_row = right_sorted[rj];
+                            match join_type {
+                                JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
+                                    output_left.push(Some(l_row));
+                                    output_right.push(Some(r_row));
+                                }
+                                JoinType::LeftSemi => {
+                                    if !left_matched.contains(&l_row) {
+                                        output_left.push(Some(l_row));
+                                        output_right.push(None);
+                                    }
+                                }
+                                JoinType::RightSemi => {
+                                    if !right_matched.contains(&r_row) {
+                                        output_left.push(None);
+                                        output_right.push(Some(r_row));
+                                    }
+                                }
+                                JoinType::LeftAnti | JoinType::RightAnti => {
+                                    // Don't output matches for anti joins
+                                }
+                                JoinType::Cross => {}
+                            }
+                            left_matched.insert(l_row);
+                            right_matched.insert(r_row);
+                        }
+                    }
+
+                    i = left_end;
+                    j = right_end;
+                }
+            }
+        }
+
+        // Handle unmatched rows for outer/anti joins
+        match join_type {
+            JoinType::Left | JoinType::Full => {
+                for &l_row in left_sorted {
+                    if !left_matched.contains(&l_row) {
+                        output_left.push(Some(l_row));
+                        output_right.push(None);
+                    }
+                }
+            }
+            JoinType::LeftAnti => {
+                for &l_row in left_sorted {
+                    if !left_matched.contains(&l_row) {
+                        output_left.push(Some(l_row));
+                        output_right.push(None);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        match join_type {
+            JoinType::Right | JoinType::Full => {
+                for &r_row in right_sorted {
+                    if !right_matched.contains(&r_row) {
+                        output_left.push(None);
+                        output_right.push(Some(r_row));
+                    }
+                }
+            }
+            JoinType::RightAnti => {
+                for &r_row in right_sorted {
+                    if !right_matched.contains(&r_row) {
+                        output_left.push(None);
+                        output_right.push(Some(r_row));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok((output_left, output_right))
+    }
+
+    fn build_output(
+        left_batch: &RecordBatch,
+        right_batch: &RecordBatch,
+        left_indices: &[Option<usize>],
+        right_indices: &[Option<usize>],
+        output_schema: &Arc<ArrowSchema>,
+    ) -> Result<Vec<RecordBatch>> {
+        use arrow::array::*;
+
+        if left_indices.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let left_num_cols = left_batch.num_columns();
+        let mut columns = Vec::with_capacity(output_schema.fields().len());
+
+        // Build left columns
+        for col_idx in 0..left_num_cols {
+            let col = left_batch.column(col_idx);
+            let output_col = Self::take_with_nulls(col, left_indices)?;
+            columns.push(output_col);
+        }
+
+        // Build right columns
+        for col_idx in 0..right_batch.num_columns() {
+            let col = right_batch.column(col_idx);
+            let output_col = Self::take_with_nulls(col, right_indices)?;
+            columns.push(output_col);
+        }
+
+        let batch = RecordBatch::try_new(output_schema.clone(), columns)?;
+        Ok(vec![batch])
+    }
+
+    fn take_with_nulls(array: &ArrayRef, indices: &[Option<usize>]) -> Result<ArrayRef> {
+        use arrow::array::*;
+
+        match array.data_type() {
+            arrow::datatypes::DataType::Int64 => {
+                let arr = try_downcast::<Int64Array>(array, "Int64Array")?;
+                let result: Int64Array = indices.iter()
+                    .map(|opt| opt.map(|i| arr.value(i)))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            arrow::datatypes::DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(array, "Int32Array")?;
+                let result: Int32Array = indices.iter()
+                    .map(|opt| opt.map(|i| arr.value(i)))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            arrow::datatypes::DataType::Float64 => {
+                let arr = try_downcast::<Float64Array>(array, "Float64Array")?;
+                let result: Float64Array = indices.iter()
+                    .map(|opt| opt.map(|i| arr.value(i)))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            arrow::datatypes::DataType::Utf8 => {
+                let arr = try_downcast::<StringArray>(array, "StringArray")?;
+                let mut builder = StringBuilder::new();
+                for opt in indices {
+                    match opt {
+                        Some(i) if !arr.is_null(*i) => builder.append_value(arr.value(*i)),
+                        _ => builder.append_null(),
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            arrow::datatypes::DataType::Boolean => {
+                let arr = try_downcast::<BooleanArray>(array, "BooleanArray")?;
+                let result: BooleanArray = indices.iter()
+                    .map(|opt| opt.and_then(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            arrow::datatypes::DataType::Date32 => {
+                let arr = try_downcast::<Date32Array>(array, "Date32Array")?;
+                let result: Date32Array = indices.iter()
+                    .map(|opt| opt.and_then(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            arrow::datatypes::DataType::Date64 => {
+                let arr = try_downcast::<Date64Array>(array, "Date64Array")?;
+                let result: Date64Array = indices.iter()
+                    .map(|opt| opt.and_then(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            arrow::datatypes::DataType::Timestamp(unit, tz) => {
+                use arrow::datatypes::TimeUnit;
+                match unit {
+                    TimeUnit::Second => {
+                        let arr = try_downcast::<TimestampSecondArray>(array, "TimestampSecondArray")?;
+                        let result: TimestampSecondArray = indices.iter()
+                            .map(|opt| opt.and_then(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }))
+                            .collect();
+                        Ok(Arc::new(result.with_timezone_opt(tz.clone())))
+                    }
+                    TimeUnit::Millisecond => {
+                        let arr = try_downcast::<TimestampMillisecondArray>(array, "TimestampMillisecondArray")?;
+                        let result: TimestampMillisecondArray = indices.iter()
+                            .map(|opt| opt.and_then(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }))
+                            .collect();
+                        Ok(Arc::new(result.with_timezone_opt(tz.clone())))
+                    }
+                    TimeUnit::Microsecond => {
+                        let arr = try_downcast::<TimestampMicrosecondArray>(array, "TimestampMicrosecondArray")?;
+                        let result: TimestampMicrosecondArray = indices.iter()
+                            .map(|opt| opt.and_then(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }))
+                            .collect();
+                        Ok(Arc::new(result.with_timezone_opt(tz.clone())))
+                    }
+                    TimeUnit::Nanosecond => {
+                        let arr = try_downcast::<TimestampNanosecondArray>(array, "TimestampNanosecondArray")?;
+                        let result: TimestampNanosecondArray = indices.iter()
+                            .map(|opt| opt.and_then(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }))
+                            .collect();
+                        Ok(Arc::new(result.with_timezone_opt(tz.clone())))
+                    }
+                }
+            }
+            dt => Err(crate::error::BlazeError::type_error(format!(
+                "Sort-merge join does not support column type {:?}. Supported: Int32, Int64, Float64, Utf8, Boolean, Date32, Date64, Timestamp",
+                dt
+            ))),
+        }
     }
 }
 
@@ -1507,7 +1991,7 @@ impl HashAggregateOperator {
         output_schema: &Arc<ArrowSchema>,
         input_batches: Vec<RecordBatch>,
     ) -> Result<Vec<RecordBatch>> {
-        use crate::planner::AggregateFunc;
+        
 
         // Handle case with no grouping (global aggregates)
         if group_by.is_empty() {
@@ -1588,7 +2072,7 @@ impl HashAggregateOperator {
         output_schema: &Arc<ArrowSchema>,
         input_batches: Vec<RecordBatch>,
     ) -> Result<Vec<RecordBatch>> {
-        use crate::planner::AggregateFunc;
+        
 
         // Create single set of accumulators
         let mut accumulators: Vec<Box<dyn Accumulator>> = aggr_exprs
@@ -1649,7 +2133,7 @@ impl HashAggregateOperator {
             return Ok(vec![]);
         }
 
-        let num_groups = groups.len();
+        let _num_groups = groups.len();
 
         // Collect group keys and finalized aggregates
         let mut group_col_arrays: Vec<Vec<ArrayRef>> = vec![Vec::new(); num_group_cols];
@@ -1775,7 +2259,7 @@ impl MemoryManager {
     }
 
     /// Reserve memory, returning error if over budget.
-    pub fn reserve(&self, bytes: usize) -> Result<MemoryReservation> {
+    pub fn reserve(&self, bytes: usize) -> Result<MemoryReservation<'_>> {
         if self.try_reserve(bytes) {
             Ok(MemoryReservation {
                 manager: self,
@@ -1867,7 +2351,7 @@ impl WindowOperator {
         schema: &Arc<ArrowSchema>,
         input_batches: Vec<RecordBatch>,
     ) -> Result<Vec<RecordBatch>> {
-        use crate::planner::WindowFunction;
+        
 
         if input_batches.is_empty() {
             return Ok(vec![RecordBatch::new_empty(schema.clone())]);
@@ -1973,7 +2457,7 @@ impl WindowOperator {
     }
 
     /// Compute partition groups - returns actual row indices for each partition.
-    /// This correctly handles non-contiguous partition groups.
+    /// This correctly handles non-contiguous partition groups and hash collisions.
     fn compute_partitions(
         partition_by: &[Arc<dyn crate::planner::PhysicalExpr>],
         batch: &RecordBatch,
@@ -1989,15 +2473,195 @@ impl WindowOperator {
             .map(|expr| expr.evaluate(batch))
             .collect::<Result<Vec<_>>>()?;
 
-        // Group rows by partition key - preserving original row indices
-        let mut partition_map: HashMap<u64, Vec<usize>> = HashMap::new();
+        // Group rows by partition key - use hash as initial bucket, then verify equality
+        // This handles hash collisions correctly
+        let mut partition_map: HashMap<u64, Vec<(usize, Vec<usize>)>> = HashMap::new();
+
         for row in 0..batch.num_rows() {
             let hash = Self::hash_row(&partition_keys, row);
-            partition_map.entry(hash).or_default().push(row);
+            let bucket = partition_map.entry(hash).or_default();
+
+            // Find an existing partition with matching values (handling hash collisions)
+            let mut found = false;
+            for (representative_row, indices) in bucket.iter_mut() {
+                if Self::rows_equal(&partition_keys, *representative_row, row) {
+                    indices.push(row);
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
+                // Start a new partition group
+                bucket.push((row, vec![row]));
+            }
         }
 
-        // Return the actual row indices for each partition
-        Ok(partition_map.into_values().collect())
+        // Flatten the buckets into partition groups
+        let mut result = Vec::new();
+        for (_hash, groups) in partition_map {
+            for (_representative, indices) in groups {
+                result.push(indices);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Check if two rows have equal values for all partition keys.
+    fn rows_equal(arrays: &[ArrayRef], row_a: usize, row_b: usize) -> bool {
+        for array in arrays {
+            if !Self::values_equal(array, row_a, row_b) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check if two values in an array are equal.
+    fn values_equal(array: &ArrayRef, a: usize, b: usize) -> bool {
+        // Handle nulls
+        let a_null = array.is_null(a);
+        let b_null = array.is_null(b);
+        if a_null && b_null {
+            return true;
+        }
+        if a_null != b_null {
+            return false;
+        }
+
+        match array.data_type() {
+            DataType::Boolean => {
+                if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Int8 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Int16 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Int32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Int64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::UInt32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::UInt64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Float32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+                    let va = arr.value(a);
+                    let vb = arr.value(b);
+                    va == vb || (va.is_nan() && vb.is_nan())
+                } else {
+                    false
+                }
+            }
+            DataType::Float64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+                    let va = arr.value(a);
+                    let vb = arr.value(b);
+                    va == vb || (va.is_nan() && vb.is_nan())
+                } else {
+                    false
+                }
+            }
+            DataType::Utf8 => {
+                if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Date32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Date32Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Date64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
+                    arr.value(a) == arr.value(b)
+                } else {
+                    false
+                }
+            }
+            DataType::Timestamp(unit, _) => {
+                use arrow::datatypes::TimeUnit;
+                match unit {
+                    TimeUnit::Second => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
+                            arr.value(a) == arr.value(b)
+                        } else {
+                            false
+                        }
+                    }
+                    TimeUnit::Millisecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                            arr.value(a) == arr.value(b)
+                        } else {
+                            false
+                        }
+                    }
+                    TimeUnit::Microsecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                            arr.value(a) == arr.value(b)
+                        } else {
+                            false
+                        }
+                    }
+                    TimeUnit::Nanosecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                            arr.value(a) == arr.value(b)
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+            // For unsupported types, use string representation comparison as fallback
+            _ => {
+                let str_a = arrow::util::display::array_value_to_string(array, a);
+                let str_b = arrow::util::display::array_value_to_string(array, b);
+                match (str_a, str_b) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => false,
+                }
+            }
+        }
     }
 
     /// Hash a single row from multiple arrays.
@@ -2007,11 +2671,110 @@ impl WindowOperator {
 
         let mut hasher = DefaultHasher::new();
         for array in arrays {
-            // Simple hash based on string representation
-            let value_str = format!("{:?}", arrow::util::display::array_value_to_string(array, row));
-            value_str.hash(&mut hasher);
+            Self::hash_array_value(array, row, &mut hasher);
         }
         hasher.finish()
+    }
+
+    /// Hash a single value from an array.
+    fn hash_array_value<H: Hasher>(array: &ArrayRef, row: usize, hasher: &mut H) {
+        if array.is_null(row) {
+            0xDEADBEEFu64.hash(hasher);
+            return;
+        }
+
+        match array.data_type() {
+            DataType::Boolean => {
+                if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Int8 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Int16 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Int32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Int64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::UInt32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::UInt64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Float32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+                    arr.value(row).to_bits().hash(hasher);
+                }
+            }
+            DataType::Float64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+                    arr.value(row).to_bits().hash(hasher);
+                }
+            }
+            DataType::Utf8 => {
+                if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Date32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Date32Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Date64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
+                    arr.value(row).hash(hasher);
+                }
+            }
+            DataType::Timestamp(unit, _) => {
+                use arrow::datatypes::TimeUnit;
+                match unit {
+                    TimeUnit::Second => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
+                            arr.value(row).hash(hasher);
+                        }
+                    }
+                    TimeUnit::Millisecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                            arr.value(row).hash(hasher);
+                        }
+                    }
+                    TimeUnit::Microsecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                            arr.value(row).hash(hasher);
+                        }
+                    }
+                    TimeUnit::Nanosecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                            arr.value(row).hash(hasher);
+                        }
+                    }
+                }
+            }
+            // For unsupported types, use string representation
+            _ => {
+                let value_str = format!("{:?}", arrow::util::display::array_value_to_string(array, row));
+                value_str.hash(hasher);
+            }
+        }
     }
 
     /// Compute sort indices within partitions.
@@ -2050,34 +2813,147 @@ impl WindowOperator {
         Ok(result)
     }
 
-    /// Compare two values from an array.
+    /// Compare two values from an array for sorting.
     fn compare_values(array: &ArrayRef, a: usize, b: usize) -> std::cmp::Ordering {
-        use arrow::array::{AsArray, Float64Array, Int64Array, StringArray};
+        use std::cmp::Ordering;
 
         if array.is_null(a) && array.is_null(b) {
-            return std::cmp::Ordering::Equal;
+            return Ordering::Equal;
         }
         if array.is_null(a) {
-            return std::cmp::Ordering::Greater; // nulls last
+            return Ordering::Greater; // nulls last
         }
         if array.is_null(b) {
-            return std::cmp::Ordering::Less;
+            return Ordering::Less;
         }
 
         match array.data_type() {
+            DataType::Boolean => {
+                if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::Int8 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::Int16 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::Int32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
             DataType::Int64 => {
-                let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                arr.value(a).cmp(&arr.value(b))
+                if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::UInt32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::UInt64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::Float32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+                    arr.value(a).partial_cmp(&arr.value(b)).unwrap_or(Ordering::Equal)
+                } else {
+                    Ordering::Equal
+                }
             }
             DataType::Float64 => {
-                let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                arr.value(a).partial_cmp(&arr.value(b)).unwrap_or(std::cmp::Ordering::Equal)
+                if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+                    arr.value(a).partial_cmp(&arr.value(b)).unwrap_or(Ordering::Equal)
+                } else {
+                    Ordering::Equal
+                }
             }
             DataType::Utf8 => {
-                let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
-                arr.value(a).cmp(arr.value(b))
+                if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                    arr.value(a).cmp(arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
             }
-            _ => std::cmp::Ordering::Equal,
+            DataType::Date32 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Date32Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::Date64 => {
+                if let Some(arr) = array.as_any().downcast_ref::<Date64Array>() {
+                    arr.value(a).cmp(&arr.value(b))
+                } else {
+                    Ordering::Equal
+                }
+            }
+            DataType::Timestamp(unit, _) => {
+                use arrow::datatypes::TimeUnit;
+                match unit {
+                    TimeUnit::Second => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
+                            arr.value(a).cmp(&arr.value(b))
+                        } else {
+                            Ordering::Equal
+                        }
+                    }
+                    TimeUnit::Millisecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                            arr.value(a).cmp(&arr.value(b))
+                        } else {
+                            Ordering::Equal
+                        }
+                    }
+                    TimeUnit::Microsecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                            arr.value(a).cmp(&arr.value(b))
+                        } else {
+                            Ordering::Equal
+                        }
+                    }
+                    TimeUnit::Nanosecond => {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                            arr.value(a).cmp(&arr.value(b))
+                        } else {
+                            Ordering::Equal
+                        }
+                    }
+                }
+            }
+            // For unsupported types, use string comparison as fallback
+            _ => {
+                let str_a = arrow::util::display::array_value_to_string(array, a);
+                let str_b = arrow::util::display::array_value_to_string(array, b);
+                match (str_a, str_b) {
+                    (Ok(a), Ok(b)) => a.cmp(&b),
+                    _ => Ordering::Equal,
+                }
+            }
         }
     }
 
@@ -2426,7 +3302,7 @@ impl WindowOperator {
                             partition_rows.iter()
                                 .filter(|&&i| !int_arr.is_null(i))
                                 .map(|&i| int_arr.value(i) as f64)
-                                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                                 .unwrap_or(0.0)
                         } else {
                             0.0
@@ -2441,7 +3317,7 @@ impl WindowOperator {
                             partition_rows.iter()
                                 .filter(|&&i| !int_arr.is_null(i))
                                 .map(|&i| int_arr.value(i) as f64)
-                                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                                 .unwrap_or(0.0)
                         } else {
                             0.0
