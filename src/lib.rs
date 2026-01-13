@@ -231,6 +231,15 @@ impl Connection {
                     Err(e) => Err(e),
                 }
             }
+            sql::Statement::Insert(insert) => {
+                self.execute_insert(insert.clone())
+            }
+            sql::Statement::Update(update) => {
+                self.execute_update(update.clone())
+            }
+            sql::Statement::Delete(delete) => {
+                self.execute_delete(delete.clone())
+            }
             _ => {
                 // For other statements, bind and execute through the query path
                 let binder = Binder::new(self.catalog_list.clone());
@@ -242,6 +251,362 @@ impl Connection {
                 let count: usize = results.iter().map(|b| b.num_rows()).sum();
                 Ok(count)
             }
+        }
+    }
+
+    /// Execute an INSERT statement.
+    fn execute_insert(&self, insert: sql::parser::Insert) -> Result<usize> {
+        use arrow::array::*;
+
+        // Get the table name
+        let table_name = insert.table_name.last().cloned().unwrap_or_default();
+
+        // Get the table from the catalog
+        let table = self.catalog_list
+            .catalog("default")
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?
+            .get_table(&table_name)
+            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
+
+        // Get the table as MemoryTable (DML only works on MemoryTable)
+        let memory_table = table.as_any()
+            .downcast_ref::<MemoryTable>()
+            .ok_or_else(|| BlazeError::not_implemented(
+                "INSERT is only supported for in-memory tables"
+            ))?;
+
+        let table_schema = table.schema();
+
+        // Process the insert source
+        let batches = match insert.source {
+            sql::parser::InsertSource::Values(rows) => {
+                // Convert VALUES into RecordBatch
+                let mut columns: Vec<Vec<ScalarValue>> = vec![Vec::new(); table_schema.len()];
+
+                for row in &rows {
+                    if row.len() != table_schema.len() {
+                        return Err(BlazeError::analysis(format!(
+                            "INSERT value count ({}) doesn't match column count ({})",
+                            row.len(),
+                            table_schema.len()
+                        )));
+                    }
+
+                    for (i, value) in row.iter().enumerate() {
+                        let scalar = self.eval_literal(value)?;
+                        columns[i].push(scalar);
+                    }
+                }
+
+                // Convert to arrays
+                let arrow_schema = Arc::new(table_schema.to_arrow());
+                let arrays: Vec<ArrayRef> = columns
+                    .into_iter()
+                    .map(|col| ScalarValue::vec_to_array(&col))
+                    .collect::<Result<Vec<_>>>()?;
+
+                vec![RecordBatch::try_new(arrow_schema, arrays)?]
+            }
+            sql::parser::InsertSource::Query(query) => {
+                // Execute the query
+                let statement = sql::Statement::Query(query);
+                let binder = Binder::new(self.catalog_list.clone());
+                let logical_plan = binder.bind(statement)?;
+                let optimized_plan = self.optimizer.optimize(&logical_plan)?;
+                let physical_planner = PhysicalPlanner::new();
+                let physical_plan = physical_planner.create_physical_plan(&optimized_plan)?;
+                self.execution_context.execute(&physical_plan)?
+            }
+        };
+
+        // Count the rows being inserted
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        // Append to the table
+        memory_table.append(batches);
+
+        Ok(row_count)
+    }
+
+    /// Execute an UPDATE statement.
+    fn execute_update(&self, update: sql::parser::Update) -> Result<usize> {
+        use arrow::compute::filter_record_batch;
+
+        // Get the table name
+        let table_name = update.table_name.last().cloned().unwrap_or_default();
+
+        // Get the table from the catalog
+        let table = self.catalog_list
+            .catalog("default")
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?
+            .get_table(&table_name)
+            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
+
+        // Get the table as MemoryTable
+        let memory_table = table.as_any()
+            .downcast_ref::<MemoryTable>()
+            .ok_or_else(|| BlazeError::not_implemented(
+                "UPDATE is only supported for in-memory tables"
+            ))?;
+
+        // Get current data
+        let batches = memory_table.batches();
+        if batches.is_empty() {
+            return Ok(0);
+        }
+
+        let table_schema = table.schema();
+        let arrow_schema = Arc::new(table_schema.to_arrow());
+
+        // Build the predicate expression
+        let predicate_expr = if let Some(ref selection) = update.selection {
+            let binder = Binder::new(self.catalog_list.clone());
+            let mut ctx = planner::BindContext::new();
+            let logical_expr = binder.bind_expr_public(selection.clone(), &mut ctx)?;
+
+            let physical_planner = PhysicalPlanner::new();
+            Some(physical_planner.create_physical_expr_public(&logical_expr, &arrow_schema)?)
+        } else {
+            None
+        };
+
+        // Process updates
+        let mut updated_count = 0;
+        let mut new_batches = Vec::new();
+
+        for batch in batches {
+            // Find rows to update
+            let mask = if let Some(ref pred) = predicate_expr {
+                let result = pred.evaluate(&batch)?;
+                result.as_any().downcast_ref::<arrow::array::BooleanArray>()
+                    .cloned()
+                    .ok_or_else(|| BlazeError::type_error("Predicate must return boolean"))?
+            } else {
+                // Update all rows
+                arrow::array::BooleanArray::from(vec![true; batch.num_rows()])
+            };
+
+            // Count updated rows
+            updated_count += mask.iter().filter(|v| v.unwrap_or(false)).count();
+
+            // Build updated batch by applying assignments
+            let mut columns: Vec<arrow::array::ArrayRef> = Vec::new();
+
+            for (col_idx, field) in table_schema.fields().iter().enumerate() {
+                // Check if this column has an assignment
+                let updated_col = if let Some((_, expr)) = update.assignments.iter().find(|(col, _)| col == field.name()) {
+                    // Evaluate the assignment expression
+                    let binder = Binder::new(self.catalog_list.clone());
+                    let mut ctx = planner::BindContext::new();
+                    let logical_expr = binder.bind_expr_public(expr.clone(), &mut ctx)?;
+
+                    let physical_planner = PhysicalPlanner::new();
+                    let phys_expr = physical_planner.create_physical_expr_public(&logical_expr, &arrow_schema)?;
+                    let new_values = phys_expr.evaluate(&batch)?;
+
+                    // Merge: use new values where mask is true, old values otherwise
+                    Self::merge_arrays(batch.column(col_idx), &new_values, &mask)?
+                } else {
+                    batch.column(col_idx).clone()
+                };
+
+                columns.push(updated_col);
+            }
+
+            new_batches.push(RecordBatch::try_new(arrow_schema.clone(), columns)?);
+        }
+
+        // Replace table data
+        memory_table.replace(new_batches);
+
+        Ok(updated_count)
+    }
+
+    /// Execute a DELETE statement.
+    fn execute_delete(&self, delete: sql::parser::Delete) -> Result<usize> {
+        use arrow::compute::filter_record_batch;
+
+        // Get the table name
+        let table_name = delete.table_name.last().cloned().unwrap_or_default();
+
+        // Get the table from the catalog
+        let table = self.catalog_list
+            .catalog("default")
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?
+            .get_table(&table_name)
+            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
+
+        // Get the table as MemoryTable
+        let memory_table = table.as_any()
+            .downcast_ref::<MemoryTable>()
+            .ok_or_else(|| BlazeError::not_implemented(
+                "DELETE is only supported for in-memory tables"
+            ))?;
+
+        // Get current data
+        let batches = memory_table.batches();
+        if batches.is_empty() {
+            return Ok(0);
+        }
+
+        let table_schema = table.schema();
+        let arrow_schema = Arc::new(table_schema.to_arrow());
+
+        // Build the predicate expression
+        let predicate_expr = if let Some(ref selection) = delete.selection {
+            let binder = Binder::new(self.catalog_list.clone());
+            let mut ctx = planner::BindContext::new();
+            let logical_expr = binder.bind_expr_public(selection.clone(), &mut ctx)?;
+
+            let physical_planner = PhysicalPlanner::new();
+            Some(physical_planner.create_physical_expr_public(&logical_expr, &arrow_schema)?)
+        } else {
+            // DELETE with no WHERE deletes all rows
+            None
+        };
+
+        // Process deletes
+        let mut deleted_count = 0;
+        let mut new_batches = Vec::new();
+
+        for batch in batches {
+            let keep_mask = if let Some(ref pred) = predicate_expr {
+                // Evaluate predicate
+                let result = pred.evaluate(&batch)?;
+                let delete_mask = result.as_any().downcast_ref::<arrow::array::BooleanArray>()
+                    .ok_or_else(|| BlazeError::type_error("Predicate must return boolean"))?;
+
+                // Count deleted rows
+                deleted_count += delete_mask.iter().filter(|v| v.unwrap_or(false)).count();
+
+                // Invert: keep rows where predicate is false
+                arrow::compute::not(delete_mask)?
+            } else {
+                // Delete all rows
+                deleted_count += batch.num_rows();
+                arrow::array::BooleanArray::from(vec![false; batch.num_rows()])
+            };
+
+            // Filter to keep non-deleted rows
+            let filtered = filter_record_batch(&batch, &keep_mask)?;
+            if filtered.num_rows() > 0 {
+                new_batches.push(filtered);
+            }
+        }
+
+        // Replace table data
+        memory_table.replace(new_batches);
+
+        Ok(deleted_count)
+    }
+
+    /// Merge two arrays based on a boolean mask.
+    fn merge_arrays(
+        old_values: &arrow::array::ArrayRef,
+        new_values: &arrow::array::ArrayRef,
+        mask: &arrow::array::BooleanArray,
+    ) -> Result<arrow::array::ArrayRef> {
+        use arrow::array::*;
+        use arrow::datatypes::DataType as ArrowDataType;
+
+        match old_values.data_type() {
+            ArrowDataType::Int64 => {
+                let old_arr = old_values.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int64Array for old values in merge"))?;
+                let new_arr = new_values.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int64Array for new values in merge"))?;
+                let mut builder = Int64Builder::new();
+
+                for i in 0..old_arr.len() {
+                    if mask.value(i) {
+                        builder.append_value(new_arr.value(i));
+                    } else {
+                        if old_arr.is_null(i) {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(old_arr.value(i));
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ArrowDataType::Utf8 => {
+                let old_arr = old_values.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("Expected StringArray for old values in merge"))?;
+                let new_arr = new_values.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("Expected StringArray for new values in merge"))?;
+                let mut builder = StringBuilder::new();
+
+                for i in 0..old_arr.len() {
+                    if mask.value(i) {
+                        builder.append_value(new_arr.value(i));
+                    } else {
+                        if old_arr.is_null(i) {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(old_arr.value(i));
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ArrowDataType::Float64 => {
+                let old_arr = old_values.as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Float64Array for old values in merge"))?;
+                let new_arr = new_values.as_any().downcast_ref::<Float64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Float64Array for new values in merge"))?;
+                let mut builder = Float64Builder::new();
+
+                for i in 0..old_arr.len() {
+                    if mask.value(i) {
+                        builder.append_value(new_arr.value(i));
+                    } else {
+                        if old_arr.is_null(i) {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(old_arr.value(i));
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            ArrowDataType::Boolean => {
+                let old_arr = old_values.as_any().downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| BlazeError::type_error("Expected BooleanArray for old values in merge"))?;
+                let new_arr = new_values.as_any().downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| BlazeError::type_error("Expected BooleanArray for new values in merge"))?;
+                let mut builder = BooleanBuilder::new();
+
+                for i in 0..old_arr.len() {
+                    if mask.value(i) {
+                        builder.append_value(new_arr.value(i));
+                    } else {
+                        if old_arr.is_null(i) {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(old_arr.value(i));
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            _ => Err(BlazeError::not_implemented(format!(
+                "UPDATE for data type {:?}",
+                old_values.data_type()
+            ))),
+        }
+    }
+
+    /// Evaluate a literal expression to a ScalarValue.
+    fn eval_literal(&self, expr: &sql::parser::Expr) -> Result<ScalarValue> {
+        use sql::parser::Literal;
+        match expr {
+            sql::parser::Expr::Literal(Literal::Integer(n)) => Ok(ScalarValue::Int64(Some(*n))),
+            sql::parser::Expr::Literal(Literal::Float(n)) => Ok(ScalarValue::Float64(Some(*n))),
+            sql::parser::Expr::Literal(Literal::String(s)) => Ok(ScalarValue::Utf8(Some(s.clone()))),
+            sql::parser::Expr::Literal(Literal::Boolean(b)) => Ok(ScalarValue::Boolean(Some(*b))),
+            sql::parser::Expr::Literal(Literal::Null) => Ok(ScalarValue::Null),
+            _ => Err(BlazeError::analysis("Only literal values are supported in INSERT VALUES")),
         }
     }
 
@@ -325,6 +690,14 @@ impl Connection {
         name: &str,
         table: Arc<dyn TableProvider>,
     ) -> Result<()> {
+        // Validate table name
+        if name.is_empty() {
+            return Err(BlazeError::invalid_argument("Table name cannot be empty"));
+        }
+        if name.chars().all(|c| c.is_whitespace()) {
+            return Err(BlazeError::invalid_argument("Table name cannot be only whitespace"));
+        }
+
         // Get the default catalog and schema
         let catalog = self.catalog_list.catalog("default")
             .ok_or_else(|| BlazeError::schema("Default catalog not found"))?;
