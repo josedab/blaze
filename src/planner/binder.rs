@@ -5,26 +5,69 @@ use std::sync::Arc;
 use crate::catalog::{CatalogList, ResolvedTableRef, TableRef};
 use crate::error::{BlazeError, Result};
 use crate::sql::{self, Statement};
+use crate::sql::parser::Expr;
 use crate::types::{DataType, Field, ScalarValue, Schema};
 
 use super::logical_expr::{
     AggregateExpr, AggregateFunc, BinaryOp, Column, LogicalExpr, SortExpr, UnaryOp,
+    WindowExpr, WindowFrame, WindowFrameBound, WindowFrameUnits,
 };
 use super::logical_plan::{JoinType, LogicalPlan, LogicalPlanBuilder, SetOperation};
+
+/// Maximum allowed depth for nested queries/expressions to prevent stack overflow.
+const MAX_PLAN_DEPTH: usize = 128;
 
 /// Context for binding SQL to logical plans.
 pub struct BindContext {
     /// Alias to schema mapping for subqueries
     pub aliases: Vec<(String, Schema)>,
+    /// CTEs stored as (name, plan) for use when referenced
+    pub ctes: Vec<(String, LogicalPlan)>,
+    /// Current nesting depth for depth limiting
+    depth: usize,
 }
 
 impl BindContext {
     pub fn new() -> Self {
-        Self { aliases: vec![] }
+        Self {
+            aliases: vec![],
+            ctes: vec![],
+            depth: 0,
+        }
     }
 
     pub fn with_alias(&mut self, alias: String, schema: Schema) {
         self.aliases.push((alias, schema));
+    }
+
+    pub fn with_cte(&mut self, name: String, plan: LogicalPlan) {
+        self.ctes.push((name, plan));
+    }
+
+    pub fn get_cte(&self, name: &str) -> Option<&LogicalPlan> {
+        self.ctes.iter().rev().find(|(n, _)| n == name).map(|(_, p)| p)
+    }
+
+    /// Increment depth and return error if exceeded.
+    pub fn enter_scope(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_PLAN_DEPTH {
+            return Err(BlazeError::analysis(format!(
+                "Query plan depth limit exceeded (max {}). Simplify your query or reduce nesting.",
+                MAX_PLAN_DEPTH
+            )));
+        }
+        Ok(())
+    }
+
+    /// Decrement depth when leaving a scope.
+    pub fn leave_scope(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    /// Get current depth.
+    pub fn depth(&self) -> usize {
+        self.depth
     }
 }
 
@@ -72,6 +115,12 @@ impl Binder {
         self.bind_statement(stmt, &mut ctx)
     }
 
+    /// Bind a SQL expression to a logical expression.
+    /// This is a public API for binding expressions outside of a query context.
+    pub fn bind_expr_public(&self, expr: Expr, ctx: &mut BindContext) -> Result<LogicalExpr> {
+        self.bind_expr(expr, ctx)
+    }
+
     fn bind_statement(&self, stmt: Statement, ctx: &mut BindContext) -> Result<LogicalPlan> {
         match stmt {
             Statement::Query(query) => self.bind_query(*query, ctx),
@@ -103,11 +152,20 @@ impl Binder {
     }
 
     fn bind_query(&self, query: sql::parser::Query, ctx: &mut BindContext) -> Result<LogicalPlan> {
+        // Track query nesting depth to prevent stack overflow
+        ctx.enter_scope()?;
+        let result = self.bind_query_inner(query, ctx);
+        ctx.leave_scope();
+        result
+    }
+
+    fn bind_query_inner(&self, query: sql::parser::Query, ctx: &mut BindContext) -> Result<LogicalPlan> {
         // Handle CTEs
         if let Some(with) = query.with {
             for cte in with.ctes {
                 let cte_plan = self.bind_query(*cte.query, ctx)?;
-                ctx.with_alias(cte.alias, cte_plan.schema().clone());
+                ctx.with_alias(cte.alias.clone(), cte_plan.schema().clone());
+                ctx.with_cte(cte.alias, cte_plan);
             }
         }
 
@@ -226,6 +284,15 @@ impl Binder {
             }
         });
 
+        // Check for window functions
+        let has_window = select.projection.iter().any(|item| {
+            if let sql::parser::SelectItem::Expr { expr, .. } = item {
+                self.has_window(expr)
+            } else {
+                false
+            }
+        });
+
         let has_group_by = !select.group_by.is_empty();
 
         if has_aggregate || has_group_by {
@@ -238,6 +305,10 @@ impl Binder {
 
             let (projection, aggr_exprs) = self.extract_aggregates(&select.projection, ctx)?;
 
+            // Clone for later use
+            let group_by_clone = group_by.clone();
+            let aggr_exprs_clone = aggr_exprs.clone();
+
             plan = LogicalPlanBuilder::from(plan)
                 .aggregate(group_by, aggr_exprs)?
                 .build();
@@ -248,9 +319,52 @@ impl Binder {
                 plan = LogicalPlanBuilder::from(plan).filter(predicate).build();
             }
 
-            // Apply projection
-            if !projection.is_empty() {
-                plan = LogicalPlanBuilder::from(plan).project(projection)?.build();
+            // Apply projection only if we have expressions that aren't direct aggregate
+            // references or group by columns. For simple "SELECT COUNT(*) FROM t" queries,
+            // the Aggregate node already produces the correct output schema.
+            let needs_projection = projection.iter().any(|e| {
+                !self.is_simple_aggregate_ref(e) && !self.is_group_by_column(e, &group_by_clone)
+            });
+
+            if needs_projection && !projection.is_empty() {
+                // For complex expressions involving aggregates, we need to replace
+                // aggregate expressions with column references to the aggregate output
+                let new_projection = self.rewrite_aggregate_refs(&projection, &aggr_exprs_clone);
+                if !new_projection.is_empty() {
+                    plan = LogicalPlanBuilder::from(plan).project(new_projection)?.build();
+                }
+            }
+        } else if has_window {
+            // Handle window functions
+            let (projection, window_exprs) = self.extract_windows(&select.projection, ctx)?;
+
+            if !window_exprs.is_empty() {
+                // Create the output schema by adding window columns to input schema
+                // Clone the schema so we can still use it after moving plan
+                let input_schema = plan.schema().clone();
+                let mut output_fields = input_schema.fields().to_vec();
+
+                // Add a field for each window function
+                for (i, _window_expr) in window_exprs.iter().enumerate() {
+                    let field_name = format!("window_{}", i);
+                    // Window functions typically return Int64 (for ROW_NUMBER, RANK, etc.)
+                    output_fields.push(Field::new(&field_name, DataType::Int64, true));
+                }
+
+                let output_schema = Schema::new(output_fields);
+
+                plan = LogicalPlan::Window {
+                    window_exprs: window_exprs.clone(),
+                    input: Arc::new(plan),
+                    schema: output_schema.clone(),
+                };
+
+                // Apply final projection to select only the requested columns
+                // Replace window expressions with column references
+                let final_projection = self.rewrite_window_refs(&projection, &window_exprs, &input_schema);
+                if !final_projection.is_empty() {
+                    plan = LogicalPlanBuilder::from(plan).project(final_projection)?.build();
+                }
             }
         } else {
             // Simple projection
@@ -271,6 +385,60 @@ impl Binder {
         }
 
         Ok(plan)
+    }
+
+    fn rewrite_window_refs(
+        &self,
+        projection: &[LogicalExpr],
+        window_exprs: &[LogicalExpr],
+        input_schema: &Schema,
+    ) -> Vec<LogicalExpr> {
+        projection
+            .iter()
+            .map(|expr| self.replace_window_with_column(expr, window_exprs, input_schema))
+            .collect()
+    }
+
+    fn replace_window_with_column(
+        &self,
+        expr: &LogicalExpr,
+        window_exprs: &[LogicalExpr],
+        input_schema: &Schema,
+    ) -> LogicalExpr {
+        // Check if this expression matches any window expression
+        for (i, window_expr) in window_exprs.iter().enumerate() {
+            if format!("{:?}", expr) == format!("{:?}", window_expr) {
+                let col_name = format!("window_{}", i);
+                return LogicalExpr::Column(Column::new(None::<String>, col_name));
+            }
+        }
+
+        // Recursively replace in sub-expressions
+        match expr {
+            LogicalExpr::BinaryExpr { left, op, right } => LogicalExpr::BinaryExpr {
+                left: Box::new(self.replace_window_with_column(left, window_exprs, input_schema)),
+                op: *op,
+                right: Box::new(self.replace_window_with_column(right, window_exprs, input_schema)),
+            },
+            LogicalExpr::Alias { expr, alias } => LogicalExpr::Alias {
+                expr: Box::new(self.replace_window_with_column(expr, window_exprs, input_schema)),
+                alias: alias.clone(),
+            },
+            LogicalExpr::Case { expr, when_then_exprs, else_expr } => LogicalExpr::Case {
+                expr: expr.as_ref().map(|e| Box::new(self.replace_window_with_column(e, window_exprs, input_schema))),
+                when_then_exprs: when_then_exprs
+                    .iter()
+                    .map(|(when, then)| {
+                        (
+                            self.replace_window_with_column(when, window_exprs, input_schema),
+                            self.replace_window_with_column(then, window_exprs, input_schema),
+                        )
+                    })
+                    .collect(),
+                else_expr: else_expr.as_ref().map(|e| Box::new(self.replace_window_with_column(e, window_exprs, input_schema))),
+            },
+            _ => expr.clone(),
+        }
     }
 
     fn bind_from(
@@ -340,6 +508,23 @@ impl Binder {
     ) -> Result<LogicalPlan> {
         match factor {
             sql::parser::TableFactor::Table { name, alias } => {
+                // First check if this is a CTE reference
+                let table_name = name.last().map(|s| s.as_str()).unwrap_or("");
+                if let Some(cte_plan) = ctx.get_cte(table_name) {
+                    // Use the CTE plan, wrapped in a SubqueryAlias
+                    let mut plan = LogicalPlanBuilder::from(cte_plan.clone())
+                        .alias(table_name)
+                        .build();
+
+                    // Apply additional alias if specified
+                    if let Some(a) = alias {
+                        plan = LogicalPlanBuilder::from(plan).alias(&a.name).build();
+                        ctx.with_alias(a.name.clone(), plan.schema().clone());
+                    }
+
+                    return Ok(plan);
+                }
+
                 let table_ref = TableRef::from_parts(name)?;
                 let resolved = table_ref.resolve(&self.default_catalog, &self.default_schema);
 
@@ -378,7 +563,7 @@ impl Binder {
     fn bind_table_function(
         &self,
         name: &str,
-        args: &[sql::parser::Expr],
+        _args: &[sql::parser::Expr],
         alias: Option<&sql::parser::TableAlias>,
         ctx: &mut BindContext,
     ) -> Result<LogicalPlan> {
@@ -455,10 +640,25 @@ impl Binder {
                 distinct,
                 filter,
             } => {
-                let agg_func = self.convert_aggregate_func(function)?;
+                let agg_func = self.convert_aggregate_func(&function)?;
+
+                // Handle COUNT(*) specially - replace wildcard with a literal
+                // COUNT(*) counts all rows, so we use a constant 1 as the argument
                 let bound_args: Vec<LogicalExpr> = args
                     .into_iter()
-                    .map(|a| self.bind_expr(a, ctx))
+                    .map(|a| {
+                        if matches!(a, sql::parser::Expr::Wildcard) {
+                            // For COUNT(*), use a literal 1 instead of wildcard
+                            // This counts all rows including NULLs
+                            if matches!(function, sql::parser::AggregateFunction::Count) {
+                                Ok(LogicalExpr::Literal(ScalarValue::Int64(Some(1))))
+                            } else {
+                                self.bind_expr(a, ctx)
+                            }
+                        } else {
+                            self.bind_expr(a, ctx)
+                        }
+                    })
                     .collect::<Result<Vec<_>>>()?;
 
                 let mut agg = AggregateExpr::new(agg_func, bound_args);
@@ -593,10 +793,87 @@ impl Binder {
             sql::parser::Expr::Nested(inner) => self.bind_expr(*inner, ctx),
             sql::parser::Expr::Wildcard => Ok(LogicalExpr::Wildcard),
             sql::parser::Expr::Parameter(id) => Ok(LogicalExpr::Placeholder { id }),
-            _ => Err(BlazeError::not_implemented(format!(
-                "Expression: {:?}",
-                expr
-            ))),
+            sql::parser::Expr::Window {
+                function,
+                partition_by,
+                order_by,
+                frame,
+            } => {
+                let bound_func = self.bind_expr(*function, ctx)?;
+                let bound_partition_by: Vec<LogicalExpr> = partition_by
+                    .into_iter()
+                    .map(|e| self.bind_expr(e, ctx))
+                    .collect::<Result<Vec<_>>>()?;
+                let bound_order_by: Vec<SortExpr> = order_by
+                    .into_iter()
+                    .map(|ob| {
+                        Ok(SortExpr {
+                            expr: self.bind_expr(ob.expr, ctx)?,
+                            asc: ob.asc,
+                            nulls_first: ob.nulls_first.unwrap_or(false),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let bound_frame = frame.map(|f| self.bind_window_frame(f)).transpose()?;
+
+                Ok(LogicalExpr::Window(Box::new(WindowExpr {
+                    function: bound_func,
+                    partition_by: bound_partition_by,
+                    order_by: bound_order_by,
+                    frame: bound_frame,
+                })))
+            }
+            sql::parser::Expr::Array(_) | sql::parser::Expr::Tuple(_) => {
+                Err(BlazeError::not_implemented("Array and Tuple expressions"))
+            }
+        }
+    }
+
+    fn bind_window_frame(&self, frame: sql::parser::WindowFrame) -> Result<WindowFrame> {
+        let units = match frame.units {
+            sql::parser::WindowFrameUnits::Rows => WindowFrameUnits::Rows,
+            sql::parser::WindowFrameUnits::Range => WindowFrameUnits::Range,
+            sql::parser::WindowFrameUnits::Groups => WindowFrameUnits::Groups,
+        };
+        let start = self.bind_window_frame_bound(frame.start)?;
+        let end = frame
+            .end
+            .map(|b| self.bind_window_frame_bound(b))
+            .transpose()?
+            .unwrap_or(WindowFrameBound::CurrentRow);
+
+        Ok(WindowFrame { units, start, end })
+    }
+
+    fn bind_window_frame_bound(
+        &self,
+        bound: sql::parser::WindowFrameBound,
+    ) -> Result<WindowFrameBound> {
+        match bound {
+            sql::parser::WindowFrameBound::CurrentRow => Ok(WindowFrameBound::CurrentRow),
+            sql::parser::WindowFrameBound::Preceding(expr) => {
+                let value = expr.map(|e| self.extract_literal_u64(*e)).transpose()?;
+                Ok(WindowFrameBound::Preceding(value))
+            }
+            sql::parser::WindowFrameBound::Following(expr) => {
+                let value = expr.map(|e| self.extract_literal_u64(*e)).transpose()?;
+                Ok(WindowFrameBound::Following(value))
+            }
+        }
+    }
+
+    fn extract_literal_u64(&self, expr: sql::parser::Expr) -> Result<u64> {
+        match expr {
+            sql::parser::Expr::Literal(sql::parser::Literal::Integer(i)) => {
+                if i >= 0 {
+                    Ok(i as u64)
+                } else {
+                    Err(BlazeError::analysis("Window frame bound must be non-negative"))
+                }
+            }
+            _ => Err(BlazeError::analysis(
+                "Window frame bound must be a literal integer",
+            )),
         }
     }
 
@@ -797,7 +1074,7 @@ impl Binder {
         }
     }
 
-    fn convert_aggregate_func(&self, func: sql::parser::AggregateFunction) -> Result<AggregateFunc> {
+    fn convert_aggregate_func(&self, func: &sql::parser::AggregateFunction) -> Result<AggregateFunc> {
         match func {
             sql::parser::AggregateFunction::Count => Ok(AggregateFunc::Count),
             sql::parser::AggregateFunction::Sum => Ok(AggregateFunc::Sum),
@@ -863,6 +1140,153 @@ impl Binder {
                 )
             }
             _ => false,
+        }
+    }
+
+    fn has_window(&self, expr: &sql::parser::Expr) -> bool {
+        match expr {
+            sql::parser::Expr::Window { .. } => true,
+            sql::parser::Expr::BinaryOp { left, right, .. } => {
+                self.has_window(left) || self.has_window(right)
+            }
+            sql::parser::Expr::UnaryOp { expr, .. } => self.has_window(expr),
+            sql::parser::Expr::Nested(inner) => self.has_window(inner),
+            sql::parser::Expr::Case { operand, conditions, results, else_result } => {
+                operand.as_ref().map(|e| self.has_window(e)).unwrap_or(false)
+                    || conditions.iter().any(|e| self.has_window(e))
+                    || results.iter().any(|e| self.has_window(e))
+                    || else_result.as_ref().map(|e| self.has_window(e)).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    fn extract_windows(
+        &self,
+        projection: &[sql::parser::SelectItem],
+        ctx: &mut BindContext,
+    ) -> Result<(Vec<LogicalExpr>, Vec<LogicalExpr>)> {
+        let mut exprs = Vec::new();
+        let mut window_exprs = Vec::new();
+
+        for item in projection {
+            if let sql::parser::SelectItem::Expr { expr, alias } = item {
+                let bound = self.bind_expr(expr.clone(), ctx)?;
+
+                // Extract window expressions
+                self.collect_windows(&bound, &mut window_exprs);
+
+                let final_expr = if let Some(a) = alias {
+                    bound.alias(a.clone())
+                } else {
+                    bound
+                };
+                exprs.push(final_expr);
+            } else if let sql::parser::SelectItem::Wildcard = item {
+                exprs.push(LogicalExpr::Wildcard);
+            } else if let sql::parser::SelectItem::QualifiedWildcard(qualifier) = item {
+                exprs.push(LogicalExpr::QualifiedWildcard {
+                    qualifier: qualifier.join("."),
+                });
+            }
+        }
+
+        Ok((exprs, window_exprs))
+    }
+
+    fn collect_windows(&self, expr: &LogicalExpr, windows: &mut Vec<LogicalExpr>) {
+        match expr {
+            LogicalExpr::Window(_) => {
+                if !windows.iter().any(|w| format!("{:?}", w) == format!("{:?}", expr)) {
+                    windows.push(expr.clone());
+                }
+            }
+            LogicalExpr::BinaryExpr { left, right, .. } => {
+                self.collect_windows(left, windows);
+                self.collect_windows(right, windows);
+            }
+            LogicalExpr::UnaryExpr { expr, .. } => {
+                self.collect_windows(expr, windows);
+            }
+            LogicalExpr::Alias { expr, .. } => {
+                self.collect_windows(expr, windows);
+            }
+            LogicalExpr::Case { expr, when_then_exprs, else_expr } => {
+                if let Some(e) = expr {
+                    self.collect_windows(e, windows);
+                }
+                for (when, then) in when_then_exprs {
+                    self.collect_windows(when, windows);
+                    self.collect_windows(then, windows);
+                }
+                if let Some(e) = else_expr {
+                    self.collect_windows(e, windows);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Check if an expression is a direct aggregate reference (possibly with alias).
+    fn is_simple_aggregate_ref(&self, expr: &LogicalExpr) -> bool {
+        match expr {
+            LogicalExpr::Aggregate(_) => true,
+            LogicalExpr::Alias { expr, .. } => self.is_simple_aggregate_ref(expr),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a group by column reference.
+    fn is_group_by_column(&self, expr: &LogicalExpr, group_by: &[LogicalExpr]) -> bool {
+        match expr {
+            LogicalExpr::Column(col) => {
+                group_by.iter().any(|gb| {
+                    if let LogicalExpr::Column(gb_col) = gb {
+                        gb_col.name == col.name
+                    } else {
+                        false
+                    }
+                })
+            }
+            LogicalExpr::Alias { expr, .. } => self.is_group_by_column(expr, group_by),
+            _ => false,
+        }
+    }
+
+    /// Rewrite aggregate expressions in a projection to column references.
+    /// This is used when the projection contains complex expressions that involve
+    /// aggregates (e.g., COUNT(*) + 1).
+    fn rewrite_aggregate_refs(
+        &self,
+        projection: &[LogicalExpr],
+        _aggr_exprs: &[AggregateExpr],
+    ) -> Vec<LogicalExpr> {
+        projection
+            .iter()
+            .map(|expr| self.rewrite_expr_aggregate_refs(expr))
+            .collect()
+    }
+
+    fn rewrite_expr_aggregate_refs(&self, expr: &LogicalExpr) -> LogicalExpr {
+        match expr {
+            LogicalExpr::Aggregate(agg) => {
+                // Replace with column reference to aggregate output
+                LogicalExpr::column(agg.name())
+            }
+            LogicalExpr::Alias { expr, alias } => LogicalExpr::Alias {
+                expr: Box::new(self.rewrite_expr_aggregate_refs(expr)),
+                alias: alias.clone(),
+            },
+            LogicalExpr::BinaryExpr { left, op, right } => LogicalExpr::BinaryExpr {
+                left: Box::new(self.rewrite_expr_aggregate_refs(left)),
+                op: op.clone(),
+                right: Box::new(self.rewrite_expr_aggregate_refs(right)),
+            },
+            LogicalExpr::Cast { expr, data_type } => LogicalExpr::Cast {
+                expr: Box::new(self.rewrite_expr_aggregate_refs(expr)),
+                data_type: data_type.clone(),
+            },
+            _ => expr.clone(),
         }
     }
 

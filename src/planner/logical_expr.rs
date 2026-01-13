@@ -383,6 +383,117 @@ impl LogicalExpr {
             _ => {}
         }
     }
+
+    /// Infer the data type of this expression given the input schema.
+    pub fn data_type(&self, schema: &Schema) -> DataType {
+        match self {
+            Self::Column(col) => {
+                // Look up column in schema
+                for field in schema.fields() {
+                    if field.name() == &col.name {
+                        return field.data_type().clone();
+                    }
+                }
+                // Column not found, return Utf8 as fallback
+                DataType::Utf8
+            }
+            Self::Literal(val) => val.data_type(),
+            Self::BinaryExpr { left, op, right: _ } => {
+                // For comparison operators, result is Boolean
+                match op {
+                    BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::LtEq |
+                    BinaryOp::Gt | BinaryOp::GtEq | BinaryOp::And | BinaryOp::Or => {
+                        DataType::Boolean
+                    }
+                    // For arithmetic, use the type of the left operand (simplified)
+                    BinaryOp::Plus | BinaryOp::Minus | BinaryOp::Multiply |
+                    BinaryOp::Divide | BinaryOp::Modulo => {
+                        left.data_type(schema)
+                    }
+                    // Bitwise operations preserve type
+                    BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor => {
+                        left.data_type(schema)
+                    }
+                    // Concat returns string
+                    BinaryOp::Concat => DataType::Utf8,
+                }
+            }
+            Self::UnaryExpr { op, expr } => {
+                match op {
+                    UnaryOp::Not => DataType::Boolean,
+                    UnaryOp::Negative | UnaryOp::BitwiseNot => expr.data_type(schema),
+                }
+            }
+            Self::IsNull(_) | Self::IsNotNull(_) | Self::Not(_) => DataType::Boolean,
+            Self::Negative(expr) => expr.data_type(schema),
+            Self::Cast { data_type, .. } | Self::TryCast { data_type, .. } => data_type.clone(),
+            Self::Alias { expr, .. } => expr.data_type(schema),
+            Self::Case { when_then_exprs, else_expr, .. } => {
+                // Type is the type of the THEN expressions
+                if let Some((_, then_expr)) = when_then_exprs.first() {
+                    then_expr.data_type(schema)
+                } else if let Some(e) = else_expr {
+                    e.data_type(schema)
+                } else {
+                    DataType::Null
+                }
+            }
+            Self::Between { .. } | Self::Like { .. } | Self::InList { .. } => DataType::Boolean,
+            Self::Aggregate(agg) => {
+                // Aggregate types depend on function
+                match agg.func {
+                    AggregateFunc::Count | AggregateFunc::CountDistinct |
+                    AggregateFunc::ApproxCountDistinct => DataType::Int64,
+                    AggregateFunc::Sum | AggregateFunc::Avg |
+                    AggregateFunc::ApproxPercentile | AggregateFunc::ApproxMedian => DataType::Float64,
+                    AggregateFunc::Min | AggregateFunc::Max |
+                    AggregateFunc::First | AggregateFunc::Last => {
+                        if let Some(arg) = agg.args.first() {
+                            arg.data_type(schema)
+                        } else {
+                            DataType::Null
+                        }
+                    }
+                    AggregateFunc::ArrayAgg => DataType::Utf8, // Simplified - should be List
+                    AggregateFunc::StringAgg => DataType::Utf8,
+                }
+            }
+            Self::ScalarFunction { name, args } => {
+                // Return types for common scalar functions
+                match name.to_uppercase().as_str() {
+                    "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "CONCAT" |
+                    "SUBSTRING" | "REPLACE" => DataType::Utf8,
+                    "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::Int64,
+                    "ABS" | "CEIL" | "FLOOR" | "ROUND" => {
+                        if let Some(arg) = args.first() {
+                            arg.data_type(schema)
+                        } else {
+                            DataType::Float64
+                        }
+                    }
+                    "COALESCE" | "NULLIF" | "NVL" => {
+                        if let Some(arg) = args.first() {
+                            arg.data_type(schema)
+                        } else {
+                            DataType::Null
+                        }
+                    }
+                    _ => DataType::Utf8, // Default fallback
+                }
+            }
+            Self::Window(w) => {
+                // Window function type depends on inner function expression
+                // The function field is a LogicalExpr (often a ScalarFunction name or aggregate)
+                w.function.data_type(schema)
+            }
+            Self::ScalarSubquery(_) | Self::Exists { .. } | Self::InSubquery { .. } => {
+                DataType::Boolean
+            }
+            Self::Wildcard | Self::QualifiedWildcard { .. } | Self::Placeholder { .. } => {
+                DataType::Utf8 // Placeholder
+            }
+        }
+    }
 }
 
 impl fmt::Display for LogicalExpr {
