@@ -2,7 +2,6 @@
 //!
 //! Estimates the number of rows produced by query operators using statistics.
 
-use std::sync::Arc;
 
 use crate::error::Result;
 use crate::planner::{BinaryOp, LogicalExpr, LogicalPlan, JoinType};
@@ -346,6 +345,7 @@ impl CardinalityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::catalog::ResolvedTableRef;
     use crate::types::{DataType, Field, Schema};
 

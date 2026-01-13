@@ -7,7 +7,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, AsArray, BooleanArray, Float32Array, Float64Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
     UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
@@ -202,7 +202,7 @@ impl JsonSerializer {
         // Build arrays
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
-        for (col_idx, field) in schema.fields().iter().enumerate() {
+        for (_col_idx, field) in schema.fields().iter().enumerate() {
             let col_name = field.name();
             let col_type = field.data_type();
 

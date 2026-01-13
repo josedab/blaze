@@ -12,7 +12,6 @@ use parking_lot::RwLock;
 pub use table::{Table, TableProvider, TableType, TableStatistics, ColumnStatistics};
 
 use crate::error::{BlazeError, Result};
-use crate::types::Schema;
 
 /// A catalog that manages schemas and tables.
 #[derive(Debug)]
@@ -354,6 +353,7 @@ impl TableRef {
 mod tests {
     use super::*;
     use crate::storage::MemoryTable;
+    use crate::types::Schema;
 
     #[test]
     fn test_catalog_list() {

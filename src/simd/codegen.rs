@@ -361,7 +361,7 @@ impl CodeGenerator {
     }
 
     /// Generate code for a vector operation.
-    pub fn generate_op(&mut self, op: VectorOp, data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_op(&mut self, op: VectorOp, _data_type: VectorDataType) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 
@@ -419,7 +419,7 @@ impl CodeGenerator {
     }
 
     /// Generate code for a filter operation.
-    pub fn generate_filter(&mut self, comparison: VectorOp, data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_filter(&mut self, comparison: VectorOp, _data_type: VectorDataType) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 
@@ -473,7 +473,7 @@ impl CodeGenerator {
     }
 
     /// Generate code for an aggregate operation.
-    pub fn generate_aggregate(&mut self, agg_op: VectorOp, data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_aggregate(&mut self, agg_op: VectorOp, _data_type: VectorDataType) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 
@@ -542,7 +542,7 @@ impl CodeGenerator {
     }
 
     /// Generate code for fused operations.
-    pub fn generate_fused(&mut self, ops: &[VectorOp], data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_fused(&mut self, ops: &[VectorOp], _data_type: VectorDataType) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 

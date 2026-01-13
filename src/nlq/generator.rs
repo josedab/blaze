@@ -3,7 +3,7 @@
 //! This module generates SQL from parsed natural language queries.
 
 use crate::error::{BlazeError, Result};
-use super::parser::{ParsedQuery, ParsedFilter};
+use super::parser::ParsedQuery;
 use super::intent::{QueryIntent, AggregateType, FilterOperator};
 use super::SchemaContext;
 
@@ -83,7 +83,7 @@ impl SqlGenerator {
     /// Generate SQL from a parsed query and intent.
     pub fn generate(
         &self,
-        parsed: &ParsedQuery,
+        _parsed: &ParsedQuery,
         intent: &QueryIntent,
         schema_context: Option<&SchemaContext>,
     ) -> Result<String> {

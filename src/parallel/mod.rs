@@ -33,7 +33,7 @@ use std::thread;
 
 use arrow::record_batch::RecordBatch;
 
-use crate::error::{BlazeError, Result};
+use crate::error::Result;
 use crate::planner::PhysicalPlan;
 use crate::executor::ExecutionContext;
 
@@ -195,7 +195,7 @@ impl ParallelExecutor {
         let task_fn = Arc::new(task_fn);
         let tasks: Vec<WorkerTask> = (0..task_count)
             .map(|i| {
-                let task_fn = task_fn.clone();
+                let _task_fn = task_fn.clone();
                 WorkerTask::new(i, move |_ctx| {
                     // We need to convert T to Vec<RecordBatch> for the worker interface
                     // For now, return empty - the actual parallelism is handled differently

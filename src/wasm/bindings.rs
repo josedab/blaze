@@ -3,12 +3,11 @@
 //! This module provides the JavaScript-callable bindings for the Blaze query engine.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use arrow::record_batch::RecordBatch;
 
 use crate::error::{BlazeError, Result};
-use crate::types::Schema;
 use crate::Connection;
 use super::{WasmConfig, WasmQueryOptions, WasmStats, ResultFormat};
 use super::serialization::{JsonSerializer, ArrowIpcSerializer};
@@ -301,7 +300,7 @@ impl WasmConnection {
         batches: &[RecordBatch],
         options: &WasmQueryOptions,
     ) -> Result<(Vec<u8>, usize, usize, Option<WasmSchema>)> {
-        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        let _total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         let column_count = batches.first().map(|b| b.num_columns()).unwrap_or(0);
         let schema = batches
             .first()

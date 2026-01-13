@@ -833,7 +833,7 @@ impl Parser {
                 subquery: Box::new(Self::convert_query(*subquery)?),
                 alias: alias.map(Self::convert_table_alias),
             }),
-            sql_ast::TableFactor::TableFunction { expr, alias } => {
+            sql_ast::TableFactor::TableFunction { expr: _, alias: _ } => {
                 // TableFunction in newer sqlparser has an expr field, not name/args
                 // For now, we'll extract what we can from the expression
                 Err(BlazeError::not_implemented("Table functions are not yet supported"))

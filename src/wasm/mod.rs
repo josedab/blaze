@@ -32,9 +32,6 @@ pub use bindings::{WasmConnection, WasmQueryResult, WasmError};
 pub use memory::{WasmMemoryManager, WasmBuffer};
 pub use serialization::{JsonSerializer, ArrowIpcSerializer};
 
-use std::sync::Arc;
-use arrow::record_batch::RecordBatch;
-use crate::error::{BlazeError, Result};
 
 /// Configuration for the WASM runtime.
 #[derive(Debug, Clone)]

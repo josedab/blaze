@@ -6,11 +6,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
-use arrow::record_batch::RecordBatch;
 
 use crate::error::{BlazeError, Result};
-use super::memory::{GpuBuffer, GpuRecordBatch, GpuMemoryPool};
+use super::memory::{GpuBuffer, GpuRecordBatch};
 
 /// Trait for GPU compute kernels.
 pub trait GpuKernel: Send + Sync + std::fmt::Debug {

@@ -4,12 +4,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
-    Int32Array, Int64Array, Int8Array, LargeBinaryArray, LargeStringArray, StringArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
-};
+use arrow::array::ArrayRef;
 
 use super::{DataType, TimeUnit};
 use crate::error::{BlazeError, Result};
@@ -358,6 +353,148 @@ impl ScalarValue {
                 )))
             }
         })
+    }
+
+    /// Extract a scalar value from an array at the given index.
+    pub fn try_from_array(array: &ArrayRef, index: usize) -> Result<Self> {
+        use arrow::array::*;
+        use arrow::datatypes::DataType as ArrowDataType;
+
+        if array.is_null(index) {
+            return Ok(ScalarValue::Null);
+        }
+
+        match array.data_type() {
+            ArrowDataType::Boolean => {
+                let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+                Ok(ScalarValue::Boolean(Some(arr.value(index))))
+            }
+            ArrowDataType::Int8 => {
+                let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
+                Ok(ScalarValue::Int8(Some(arr.value(index))))
+            }
+            ArrowDataType::Int16 => {
+                let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
+                Ok(ScalarValue::Int16(Some(arr.value(index))))
+            }
+            ArrowDataType::Int32 => {
+                let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+                Ok(ScalarValue::Int32(Some(arr.value(index))))
+            }
+            ArrowDataType::Int64 => {
+                let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+                Ok(ScalarValue::Int64(Some(arr.value(index))))
+            }
+            ArrowDataType::UInt8 => {
+                let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+                Ok(ScalarValue::UInt8(Some(arr.value(index))))
+            }
+            ArrowDataType::UInt16 => {
+                let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+                Ok(ScalarValue::UInt16(Some(arr.value(index))))
+            }
+            ArrowDataType::UInt32 => {
+                let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+                Ok(ScalarValue::UInt32(Some(arr.value(index))))
+            }
+            ArrowDataType::UInt64 => {
+                let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                Ok(ScalarValue::UInt64(Some(arr.value(index))))
+            }
+            ArrowDataType::Float32 => {
+                let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+                Ok(ScalarValue::Float32(Some(arr.value(index))))
+            }
+            ArrowDataType::Float64 => {
+                let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                Ok(ScalarValue::Float64(Some(arr.value(index))))
+            }
+            ArrowDataType::Utf8 => {
+                let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+                Ok(ScalarValue::Utf8(Some(arr.value(index).to_string())))
+            }
+            ArrowDataType::LargeUtf8 => {
+                let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
+                Ok(ScalarValue::LargeUtf8(Some(arr.value(index).to_string())))
+            }
+            ArrowDataType::Date32 => {
+                let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
+                Ok(ScalarValue::Date32(Some(arr.value(index))))
+            }
+            ArrowDataType::Date64 => {
+                let arr = array.as_any().downcast_ref::<Date64Array>().unwrap();
+                Ok(ScalarValue::Date64(Some(arr.value(index))))
+            }
+            _ => Err(BlazeError::not_implemented(format!(
+                "try_from_array for {:?}",
+                array.data_type()
+            ))),
+        }
+    }
+
+    /// Convert a vector of ScalarValues to an Arrow array.
+    pub fn vec_to_array(values: &[ScalarValue]) -> Result<ArrayRef> {
+        use arrow::array::*;
+
+        if values.is_empty() {
+            return Ok(Arc::new(NullArray::new(0)));
+        }
+
+        // Determine the data type from the first non-null value
+        let first_non_null = values.iter().find(|v| !matches!(v, ScalarValue::Null));
+        let data_type = first_non_null.map(|v| v.data_type()).unwrap_or(DataType::Null);
+
+        match data_type {
+            DataType::Null => Ok(Arc::new(NullArray::new(values.len()))),
+            DataType::Boolean => {
+                let arr: BooleanArray = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Boolean(b) => *b,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Int64 => {
+                let arr: Int64Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Int64(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Float64 => {
+                let arr: Float64Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Float64(f) => *f,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Utf8 => {
+                let arr: StringArray = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Utf8(s) => s.as_deref(),
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            _ => Err(BlazeError::not_implemented(format!(
+                "vec_to_array for {:?}",
+                data_type
+            ))),
+        }
     }
 }
 

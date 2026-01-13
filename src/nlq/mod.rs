@@ -29,9 +29,8 @@ pub use intent::{QueryIntent, IntentClassifier, AggregateType, FilterOperator};
 pub use generator::{SqlGenerator, GeneratorConfig};
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use crate::error::{BlazeError, Result};
+use crate::error::Result;
 use crate::types::Schema;
 
 /// Natural Language Query Processor.

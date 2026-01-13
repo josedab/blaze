@@ -80,7 +80,6 @@ fn test_select_all_from_orders() {
 }
 
 #[test]
-#[ignore = "Literal-only queries need a VALUES clause"]
 fn test_select_string_literal() {
     let conn = Connection::in_memory().unwrap();
     let results = conn.query("SELECT 'hello' AS greeting").unwrap();
@@ -281,7 +280,6 @@ fn test_empty_table_with_limit() {
 // ============================================================================
 
 #[test]
-#[ignore = "Projection has index bounds issue"]
 fn test_select_columns() {
     let conn = create_test_connection();
     let results = conn.query("SELECT name, age FROM users").unwrap();
@@ -289,7 +287,6 @@ fn test_select_columns() {
 }
 
 #[test]
-#[ignore = "Projection has index bounds issue"]
 fn test_select_with_alias() {
     let conn = create_test_connection();
     let results = conn.query("SELECT name AS user_name, age AS user_age FROM users").unwrap();
@@ -297,7 +294,6 @@ fn test_select_with_alias() {
 }
 
 #[test]
-#[ignore = "Literal type inference issue"]
 fn test_select_literal() {
     let conn = Connection::in_memory().unwrap();
     let results = conn.query("SELECT 1 + 2 AS result").unwrap();
@@ -305,7 +301,6 @@ fn test_select_literal() {
 }
 
 #[test]
-#[ignore = "WHERE clause has projection issues"]
 fn test_where_equals() {
     let conn = create_test_connection();
     let results = conn.query("SELECT * FROM users WHERE name = 'Alice'").unwrap();
@@ -314,7 +309,6 @@ fn test_where_equals() {
 }
 
 #[test]
-#[ignore = "ORDER BY has projection issues"]
 fn test_order_by_asc() {
     let conn = create_test_connection();
     let results = conn.query("SELECT name, age FROM users ORDER BY age ASC").unwrap();
@@ -323,7 +317,6 @@ fn test_order_by_asc() {
 }
 
 #[test]
-#[ignore = "Aggregate queries have issues"]
 fn test_count() {
     let conn = create_test_connection();
     let results = conn.query("SELECT COUNT(*) FROM users").unwrap();
@@ -332,7 +325,6 @@ fn test_count() {
 }
 
 #[test]
-#[ignore = "JOIN queries have issues"]
 fn test_inner_join() {
     let conn = create_test_connection();
     let results = conn.query(
@@ -343,7 +335,6 @@ fn test_inner_join() {
 }
 
 #[test]
-#[ignore = "Window functions have issues"]
 fn test_row_number() {
     let conn = create_test_connection();
     let results = conn.query(
@@ -356,7 +347,6 @@ fn test_row_number() {
 }
 
 #[test]
-#[ignore = "CTE queries have issues"]
 fn test_cte_basic() {
     let conn = create_test_connection();
     let results = conn.query(
@@ -368,7 +358,6 @@ fn test_cte_basic() {
 }
 
 #[test]
-#[ignore = "UNION queries have type issues"]
 fn test_union_all() {
     let conn = create_test_connection();
     let results = conn.query(
@@ -379,7 +368,6 @@ fn test_union_all() {
 }
 
 #[test]
-#[ignore = "GROUP BY has issues"]
 fn test_group_by() {
     let conn = create_test_connection();
     let results = conn.query("SELECT user_id, COUNT(*) FROM orders GROUP BY user_id").unwrap();
@@ -388,7 +376,6 @@ fn test_group_by() {
 }
 
 #[test]
-#[ignore = "CASE WHEN has issues"]
 fn test_case_when() {
     let conn = create_test_connection();
     let results = conn.query(
@@ -398,7 +385,6 @@ fn test_case_when() {
 }
 
 #[test]
-#[ignore = "Scalar functions have issues"]
 fn test_upper() {
     let conn = create_test_connection();
     let results = conn.query("SELECT UPPER(name) FROM users WHERE name = 'Alice'").unwrap();

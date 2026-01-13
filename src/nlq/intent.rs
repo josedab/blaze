@@ -2,7 +2,7 @@
 //!
 //! This module provides intent classification for natural language queries.
 
-use crate::error::{BlazeError, Result};
+use crate::error::Result;
 use super::parser::{ParsedQuery, ParsedFilter, FilterOp, AggregateType as ParsedAggType};
 
 /// Query intent.
@@ -327,7 +327,7 @@ impl IntentValidation {
 /// Validate an intent.
 pub fn validate_intent(intent: &QueryIntent) -> IntentValidation {
     match intent {
-        QueryIntent::Select { table, columns, .. } => {
+        QueryIntent::Select { table, columns: _, .. } => {
             if table.is_empty() {
                 return IntentValidation::invalid("No table specified")
                     .with_suggestion("Try specifying a table name");
