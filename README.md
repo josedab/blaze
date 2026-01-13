@@ -73,6 +73,14 @@ cargo test             # Run tests
 cargo clippy           # Linting
 ```
 
+## Examples
+
+See the `examples/` directory for usage examples:
+
+```bash
+cargo run --example basic_queries
+```
+
 ## Supported SQL Features
 
 ### Queries
@@ -99,17 +107,18 @@ cargo clippy           # Linting
 
 ## Known Limitations
 
-### Not Yet Implemented
+See [LIMITATIONS.md](LIMITATIONS.md) for a detailed list.
 
-The following features are planned but not yet functional:
+### Summary
 
-- **Subqueries**: Scalar subqueries, EXISTS, and IN subqueries return errors
-- **DML Operations**: INSERT, UPDATE, DELETE are not implemented
-- **SortMergeJoin**: Only HashJoin is currently supported
+- **Query placeholders** ($1, $2) are not supported; use string formatting instead
+- **Cross join cardinality** limited to 10 million rows
+- **Query nesting depth** limited to 128 levels
+- Only the first statement in multi-statement queries is executed
 
 ### Type Support
 
-Hash joins and comparisons support these types:
+Hash joins, sort-merge joins, and comparisons support these types:
 - Boolean
 - Int8, Int16, Int32, Int64
 - UInt32, UInt64
@@ -125,10 +134,6 @@ Decimal types are not yet supported as join keys.
 - Filter pushdown is implemented for in-memory tables; CSV/Parquet apply filters post-scan
 - Table statistics include row counts, byte sizes, and null counts per column
 - Memory limits are enforced when configured via `ConnectionConfig::with_memory_limit()`
-
-### Other Limitations
-
-- Only the first statement in multi-statement queries is executed
 
 ## Project Structure
 
