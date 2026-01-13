@@ -212,10 +212,17 @@ impl Executor {
             PhysicalPlan::ExplainAnalyze { input, verbose, schema } => {
                 self.execute_explain_analyze(input, *verbose, schema)
             }
-            PhysicalPlan::SortMergeJoin { .. } => {
-                Err(crate::error::BlazeError::not_implemented(
-                    "SortMergeJoin execution is not yet implemented. Use HashJoin instead."
-                ))
+            PhysicalPlan::SortMergeJoin { left, right, join_type, left_keys, right_keys, schema } => {
+                let left_batches = self.execute_plan(left)?;
+                let right_batches = self.execute_plan(right)?;
+                operators::SortMergeJoinOperator::execute(
+                    left_batches,
+                    right_batches,
+                    *join_type,
+                    left_keys,
+                    right_keys,
+                    schema,
+                )
             }
         }
     }
@@ -321,10 +328,25 @@ impl Executor {
             PhysicalPlan::ExplainAnalyze { input, verbose, schema } => {
                 self.execute_explain_analyze(input, *verbose, schema)?
             }
-            PhysicalPlan::SortMergeJoin { .. } => {
-                return Err(crate::error::BlazeError::not_implemented(
-                    "SortMergeJoin execution is not yet implemented. Use HashJoin instead."
-                ));
+            PhysicalPlan::SortMergeJoin { left, right, join_type, left_keys, right_keys, schema } => {
+                let (left_batches, left_stats) = self.execute_with_stats(left)?;
+                let (right_batches, right_stats) = self.execute_with_stats(right)?;
+                stats.children.push(left_stats);
+                stats.children.push(right_stats);
+                let left_rows: usize = left_batches.iter().map(|b| b.num_rows()).sum();
+                let right_rows: usize = right_batches.iter().map(|b| b.num_rows()).sum();
+                stats.rows_processed = left_rows + right_rows;
+                stats.add_metric("join_type", &format!("{:?}", join_type));
+                stats.add_metric("left_rows", &left_rows.to_string());
+                stats.add_metric("right_rows", &right_rows.to_string());
+                operators::SortMergeJoinOperator::execute(
+                    left_batches,
+                    right_batches,
+                    *join_type,
+                    left_keys,
+                    right_keys,
+                    schema,
+                )?
             }
         };
 
@@ -531,9 +553,13 @@ impl Executor {
         produce_one_row: bool,
         schema: &Arc<arrow::datatypes::Schema>,
     ) -> Result<Vec<RecordBatch>> {
-        if produce_one_row && schema.fields().is_empty() {
-            // Produce one row with no columns
-            Ok(vec![RecordBatch::new_empty(schema.clone())])
+        if produce_one_row {
+            // Produce one row - for empty schema we use try_new_with_options
+            // which allows creating a batch with 0 columns but a row count
+            let options = arrow::record_batch::RecordBatchOptions::default()
+                .with_row_count(Some(1));
+            let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)?;
+            Ok(vec![batch])
         } else {
             Ok(vec![])
         }
@@ -917,25 +943,267 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_merge_join_not_implemented() {
+    fn test_sort_merge_join() {
+        use crate::planner::{ColumnExpr, PhysicalExpr};
+
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let mut executor = Executor::new(8192, None, memory_manager);
+
+        // Left table schema: id, name
+        let left_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        // Right table schema: id, value
+        let right_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        // Output schema: all columns from both
+        let output_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        // Left data: (1, "a"), (2, "b"), (3, "c")
+        let left_batch = RecordBatch::try_new(
+            left_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        ).unwrap();
+
+        // Right data: (2, 20), (3, 30), (4, 40)
+        let right_batch = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![2, 3, 4])),
+                Arc::new(Int64Array::from(vec![20, 30, 40])),
+            ],
+        ).unwrap();
+
+        let left_key: Arc<dyn PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
+        let right_key: Arc<dyn PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
+
+        let plan = PhysicalPlan::SortMergeJoin {
+            left: Box::new(PhysicalPlan::Values {
+                schema: left_schema,
+                data: vec![left_batch]
+            }),
+            right: Box::new(PhysicalPlan::Values {
+                schema: right_schema,
+                data: vec![right_batch]
+            }),
+            join_type: JoinType::Inner,
+            left_keys: vec![left_key],
+            right_keys: vec![right_key],
+            schema: output_schema,
+        };
+
+        let result = executor.execute(&plan).unwrap();
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+
+        // Inner join should match rows with id 2 and 3
+        assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn test_execute_filter() {
+        use crate::planner::{BinaryExpr, ColumnExpr, LiteralExpr, PhysicalExpr};
+
+        let memory_manager = Arc::new(MemoryManager::default_budget());
+        let executor = Executor::new(8192, None, memory_manager);
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])),
+            ],
+        ).unwrap();
+
+        // Create filter predicate: id > 2
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            Arc::new(ColumnExpr::new("id", 0)),
+            "gt",
+            Arc::new(LiteralExpr::new(crate::types::ScalarValue::Int64(Some(2)))),
+        ));
+
+        let result = executor.execute_filter(&predicate, vec![batch]).unwrap();
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3); // rows with id 3, 4, 5
+    }
+
+    #[test]
+    fn test_execute_projection() {
+        use crate::planner::{ColumnExpr, PhysicalExpr};
+
+        let memory_manager = Arc::new(MemoryManager::default_budget());
+        let executor = Executor::new(8192, None, memory_manager);
+
+        let input_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        let output_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            input_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Int64Array::from(vec![100, 200, 300])),
+            ],
+        ).unwrap();
+
+        // Project columns 0 and 2 (id and value)
+        let exprs: Vec<Arc<dyn PhysicalExpr>> = vec![
+            Arc::new(ColumnExpr::new("id", 0)),
+            Arc::new(ColumnExpr::new("value", 2)),
+        ];
+
+        let result = executor.execute_projection(&exprs, &output_schema, vec![batch]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_columns(), 2);
+        assert_eq!(result[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_execute_hash_join() {
+        use crate::planner::{ColumnExpr, PhysicalExpr};
+
+        let memory_manager = Arc::new(MemoryManager::default_budget());
+        let executor = Executor::new(8192, None, memory_manager);
+
+        let left_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let right_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("user_id", DataType::Int64, false),
+            Field::new("order", DataType::Utf8, false),
+        ]));
+
+        let join_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("user_id", DataType::Int64, false),
+            Field::new("order", DataType::Utf8, false),
+        ]));
+
+        let left_batch = RecordBatch::try_new(
+            left_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob", "Carol"])),
+            ],
+        ).unwrap();
+
+        let right_batch = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 2])),
+                Arc::new(StringArray::from(vec!["Order1", "Order2", "Order3"])),
+            ],
+        ).unwrap();
+
+        let left_keys: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(ColumnExpr::new("id", 0))];
+        let right_keys: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(ColumnExpr::new("user_id", 0))];
+
+        let result = executor.execute_hash_join(
+            vec![left_batch],
+            vec![right_batch],
+            JoinType::Inner,
+            &left_keys,
+            &right_keys,
+            &join_schema,
+        ).unwrap();
+
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3); // id=1 matches once, id=2 matches twice
+    }
+
+    #[test]
+    fn test_execute_sort() {
+        use crate::planner::{ColumnExpr, SortExpr, PhysicalExpr};
+
+        let memory_manager = Arc::new(MemoryManager::default_budget());
+        let executor = Executor::new(8192, None, memory_manager);
 
         let schema = Arc::new(ArrowSchema::new(vec![
             Field::new("id", DataType::Int64, false),
         ]));
 
-        let plan = PhysicalPlan::SortMergeJoin {
-            left: Box::new(PhysicalPlan::Empty { produce_one_row: false, schema: schema.clone() }),
-            right: Box::new(PhysicalPlan::Empty { produce_one_row: false, schema: schema.clone() }),
-            join_type: JoinType::Inner,
-            left_keys: vec![],
-            right_keys: vec![],
-            schema,
-        };
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![3, 1, 4, 1, 5, 9, 2, 6]))],
+        ).unwrap();
 
-        let result = executor.execute(&plan);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not yet implemented"));
+        let sort_exprs = vec![SortExpr {
+            expr: Arc::new(ColumnExpr::new("id", 0)) as Arc<dyn PhysicalExpr>,
+            ascending: true,
+            nulls_first: true,
+        }];
+
+        let result = executor.execute_sort(&sort_exprs, vec![batch]).unwrap();
+        assert_eq!(result.len(), 1);
+
+        let sorted_col = result[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let values: Vec<i64> = (0..sorted_col.len()).map(|i| sorted_col.value(i)).collect();
+        assert_eq!(values, vec![1, 1, 2, 3, 4, 5, 6, 9]);
+    }
+
+    #[test]
+    fn test_execute_hash_aggregate() {
+        use crate::planner::{ColumnExpr, AggregateExpr, AggregateFunc, PhysicalExpr};
+
+        let memory_manager = Arc::new(MemoryManager::default_budget());
+        let executor = Executor::new(8192, None, memory_manager);
+
+        let input_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        let output_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("category", DataType::Utf8, false),
+            Field::new("count", DataType::Int64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            input_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["A", "B", "A", "B", "A"])),
+                Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])),
+            ],
+        ).unwrap();
+
+        let group_by: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(ColumnExpr::new("category", 0))];
+        let aggr_exprs = vec![AggregateExpr {
+            func: AggregateFunc::Count,
+            args: vec![Arc::new(ColumnExpr::new("value", 1)) as Arc<dyn PhysicalExpr>],
+            distinct: false,
+            alias: None,
+        }];
+
+        let result = executor.execute_hash_aggregate(&group_by, &aggr_exprs, &output_schema, vec![batch]).unwrap();
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2); // Two categories: A and B
     }
 }
