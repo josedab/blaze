@@ -1,17 +1,19 @@
 //! CSV file table implementation.
 
 use std::any::Any;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use arrow::array::{Array, Int64Array, Float64Array, StringArray};
 use arrow::csv::{Reader as CsvReader, ReaderBuilder};
-use arrow::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::{Schema as ArrowSchema, DataType};
 use arrow::record_batch::RecordBatch;
 
 use crate::catalog::{ColumnStatistics, TableProvider, TableStatistics, TableType};
-use crate::error::{BlazeError, Result};
+use crate::error::Result;
 use crate::types::Schema;
 
 /// A table backed by a CSV file.
@@ -119,6 +121,78 @@ impl CsvTable {
         Ok(csv_reader)
     }
 
+    /// Internal scan implementation that handles both regular scan and filter pushdown
+    fn scan_internal(
+        &self,
+        projection: Option<&[usize]>,
+        filters: &[Arc<dyn crate::planner::PhysicalExpr>],
+        limit: Option<usize>,
+    ) -> Result<Vec<RecordBatch>> {
+        use arrow::array::BooleanArray;
+        use arrow::compute::filter_record_batch;
+
+        let mut reader = self.create_reader()?;
+        let mut result = Vec::new();
+        let mut rows_collected = 0;
+
+        while let Some(batch_result) = reader.next() {
+            let batch = batch_result?;
+
+            // Apply filters first (before projection) since filters may reference
+            // columns that aren't in the projection
+            let filtered_batch = if filters.is_empty() {
+                batch
+            } else {
+                let mut current_batch = batch;
+                for filter_expr in filters {
+                    let filter_result = filter_expr.evaluate(&current_batch)?;
+                    if let Some(bool_array) = filter_result.as_any().downcast_ref::<BooleanArray>() {
+                        current_batch = filter_record_batch(&current_batch, bool_array)?;
+                    }
+                    // If filter result is not boolean, skip it (shouldn't happen with valid filters)
+                }
+                current_batch
+            };
+
+            // Skip empty batches after filtering
+            if filtered_batch.num_rows() == 0 {
+                continue;
+            }
+
+            // Apply projection
+            let projected = match projection {
+                Some(indices) => {
+                    let columns: Vec<_> = indices.iter().map(|&i| filtered_batch.column(i).clone()).collect();
+                    let fields: Vec<_> = indices
+                        .iter()
+                        .map(|&i| filtered_batch.schema().field(i).clone())
+                        .collect();
+                    let schema = Arc::new(ArrowSchema::new(fields));
+                    RecordBatch::try_new(schema, columns)?
+                }
+                None => filtered_batch,
+            };
+
+            if let Some(limit) = limit {
+                let remaining = limit - rows_collected;
+                if remaining == 0 {
+                    break;
+                }
+                if projected.num_rows() <= remaining {
+                    rows_collected += projected.num_rows();
+                    result.push(projected);
+                } else {
+                    result.push(projected.slice(0, remaining));
+                    break;
+                }
+            } else {
+                result.push(projected);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Compute statistics by reading the file
     fn compute_statistics(&self) -> Result<TableStatistics> {
         let mut reader = self.create_reader()?;
@@ -126,28 +200,119 @@ impl CsvTable {
         let mut total_bytes = 0usize;
         let num_columns = self.schema.len();
 
-        // Track null counts per column
+        // Track statistics per column
         let mut null_counts: Vec<usize> = vec![0; num_columns];
+        let mut min_values: Vec<Option<String>> = vec![None; num_columns];
+        let mut max_values: Vec<Option<String>> = vec![None; num_columns];
+        let mut distinct_sets: Vec<HashSet<String>> = vec![HashSet::new(); num_columns];
 
         while let Some(batch_result) = reader.next() {
             let batch = batch_result?;
             total_rows += batch.num_rows();
             total_bytes += batch.get_array_memory_size();
 
-            // Count nulls in each column
+            // Compute statistics for each column
             for (col_idx, col) in batch.columns().iter().enumerate() {
                 null_counts[col_idx] += col.null_count();
+
+                let data_type = col.data_type();
+
+                // Extract min/max/distinct based on data type
+                match data_type {
+                    DataType::Int64 => {
+                        if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+                            for i in 0..arr.len() {
+                                if !arr.is_null(i) {
+                                    let val = arr.value(i);
+                                    let val_str = val.to_string();
+                                    distinct_sets[col_idx].insert(val_str.clone());
+
+                                    let update_min = min_values[col_idx]
+                                        .as_ref()
+                                        .map(|m| val < m.parse::<i64>().unwrap_or(i64::MAX))
+                                        .unwrap_or(true);
+                                    if update_min {
+                                        min_values[col_idx] = Some(val_str.clone());
+                                    }
+
+                                    let update_max = max_values[col_idx]
+                                        .as_ref()
+                                        .map(|m| val > m.parse::<i64>().unwrap_or(i64::MIN))
+                                        .unwrap_or(true);
+                                    if update_max {
+                                        max_values[col_idx] = Some(val_str);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    DataType::Float64 => {
+                        if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
+                            for i in 0..arr.len() {
+                                if !arr.is_null(i) {
+                                    let val = arr.value(i);
+                                    let val_str = val.to_string();
+                                    distinct_sets[col_idx].insert(val_str.clone());
+
+                                    let update_min = min_values[col_idx]
+                                        .as_ref()
+                                        .map(|m| val < m.parse::<f64>().unwrap_or(f64::MAX))
+                                        .unwrap_or(true);
+                                    if update_min {
+                                        min_values[col_idx] = Some(val_str.clone());
+                                    }
+
+                                    let update_max = max_values[col_idx]
+                                        .as_ref()
+                                        .map(|m| val > m.parse::<f64>().unwrap_or(f64::MIN))
+                                        .unwrap_or(true);
+                                    if update_max {
+                                        max_values[col_idx] = Some(val_str);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    DataType::Utf8 => {
+                        if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                            for i in 0..arr.len() {
+                                if !arr.is_null(i) {
+                                    let val = arr.value(i).to_string();
+                                    distinct_sets[col_idx].insert(val.clone());
+
+                                    let update_min = min_values[col_idx]
+                                        .as_ref()
+                                        .map(|m| val < *m)
+                                        .unwrap_or(true);
+                                    if update_min {
+                                        min_values[col_idx] = Some(val.clone());
+                                    }
+
+                                    let update_max = max_values[col_idx]
+                                        .as_ref()
+                                        .map(|m| val > *m)
+                                        .unwrap_or(true);
+                                    if update_max {
+                                        max_values[col_idx] = Some(val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // For other types, just track null counts
+                    }
+                }
             }
         }
 
         // Build column statistics
-        let column_statistics: Vec<ColumnStatistics> = null_counts
-            .into_iter()
-            .map(|null_count| ColumnStatistics {
-                null_count: Some(null_count),
-                distinct_count: None,
-                min_value: None,
-                max_value: None,
+        let column_statistics: Vec<ColumnStatistics> = (0..num_columns)
+            .map(|col_idx| ColumnStatistics {
+                null_count: Some(null_counts[col_idx]),
+                distinct_count: Some(distinct_sets[col_idx].len()),
+                min_value: min_values[col_idx].clone(),
+                max_value: max_values[col_idx].clone(),
             })
             .collect();
 
@@ -193,52 +358,24 @@ impl TableProvider for CsvTable {
         _filters: &[()],
         limit: Option<usize>,
     ) -> Result<Vec<RecordBatch>> {
-        let mut reader = self.create_reader()?;
-        let mut result = Vec::new();
-        let mut rows_collected = 0;
-
-        while let Some(batch_result) = reader.next() {
-            let batch = batch_result?;
-
-            let projected = match projection {
-                Some(indices) => {
-                    let columns: Vec<_> = indices.iter().map(|&i| batch.column(i).clone()).collect();
-                    let fields: Vec<_> = indices
-                        .iter()
-                        .map(|&i| batch.schema().field(i).clone())
-                        .collect();
-                    let schema = Arc::new(ArrowSchema::new(fields));
-                    RecordBatch::try_new(schema, columns)?
-                }
-                None => batch,
-            };
-
-            if let Some(limit) = limit {
-                let remaining = limit - rows_collected;
-                if remaining == 0 {
-                    break;
-                }
-                if projected.num_rows() <= remaining {
-                    rows_collected += projected.num_rows();
-                    result.push(projected);
-                } else {
-                    result.push(projected.slice(0, remaining));
-                    break;
-                }
-            } else {
-                result.push(projected);
-            }
-        }
-
-        Ok(result)
+        self.scan_internal(projection, &[], limit)
     }
 
     fn supports_filter_pushdown(&self) -> bool {
-        false
+        true
     }
 
     fn supports_limit_pushdown(&self) -> bool {
         true
+    }
+
+    fn scan_with_filters(
+        &self,
+        projection: Option<&[usize]>,
+        filters: &[Arc<dyn crate::planner::PhysicalExpr>],
+        limit: Option<usize>,
+    ) -> Result<Vec<RecordBatch>> {
+        self.scan_internal(projection, filters, limit)
     }
 }
 
