@@ -196,7 +196,7 @@ impl PredicatePushdown {
     fn push_down_filter(&self, predicate: LogicalExpr, input: LogicalPlan) -> Result<LogicalPlan> {
         match input {
             // Push filter into table scan
-            LogicalPlan::TableScan { table_ref, projection, mut filters, schema } => {
+            LogicalPlan::TableScan { table_ref, projection, mut filters, schema, time_travel } => {
                 // Add the predicate to the scan's filters
                 filters.push(predicate);
                 Ok(LogicalPlan::TableScan {
@@ -204,6 +204,7 @@ impl PredicatePushdown {
                     projection,
                     filters,
                     schema,
+                    time_travel,
                 })
             }
 
@@ -643,7 +644,7 @@ impl ProjectionPushdown {
 
     fn optimize_with_required(&self, plan: &LogicalPlan, required: &[String]) -> Result<LogicalPlan> {
         match plan {
-            LogicalPlan::TableScan { table_ref, projection, filters, schema } => {
+            LogicalPlan::TableScan { table_ref, projection, filters, schema, time_travel } => {
                 // Create projection based on required columns
                 if projection.is_some() {
                     // Already has projection, don't modify
@@ -674,6 +675,7 @@ impl ProjectionPushdown {
                     projection: Some(indices),
                     filters: filters.clone(),
                     schema: projected_schema,
+                    time_travel: time_travel.clone(),
                 })
             }
 
@@ -1268,6 +1270,7 @@ mod tests {
             projection: None,
             filters: vec![],
             schema,
+            time_travel: None,
         }
     }
 

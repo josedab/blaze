@@ -9,6 +9,15 @@ use crate::types::Schema;
 
 use super::logical_expr::{AggregateExpr, AggregateFunc, LogicalExpr, SortExpr};
 
+/// Time travel specification for Delta Lake tables.
+#[derive(Debug, Clone)]
+pub enum TimeTravelSpec {
+    /// Travel to a specific version number
+    Version(i64),
+    /// Travel to a specific timestamp
+    Timestamp(chrono::DateTime<chrono::Utc>),
+}
+
 /// Static empty schema for plans that don't produce rows.
 static EMPTY_SCHEMA: LazyLock<Schema> = LazyLock::new(Schema::empty);
 
@@ -63,6 +72,8 @@ pub enum LogicalPlan {
         filters: Vec<LogicalExpr>,
         /// Output schema
         schema: Schema,
+        /// Time travel specification (for Delta Lake)
+        time_travel: Option<TimeTravelSpec>,
     },
 
     /// Projection (SELECT expressions)
@@ -513,12 +524,22 @@ impl LogicalPlanBuilder {
 
     /// Create a table scan.
     pub fn scan(table_ref: ResolvedTableRef, schema: Schema) -> Self {
+        Self::scan_with_time_travel(table_ref, schema, None)
+    }
+
+    /// Create a table scan with time travel specification.
+    pub fn scan_with_time_travel(
+        table_ref: ResolvedTableRef,
+        schema: Schema,
+        time_travel: Option<TimeTravelSpec>,
+    ) -> Self {
         Self {
             plan: LogicalPlan::TableScan {
                 table_ref,
                 projection: None,
                 filters: vec![],
                 schema,
+                time_travel,
             },
         }
     }

@@ -139,6 +139,17 @@ pub struct TableWithJoins {
     pub joins: Vec<Join>,
 }
 
+/// Time travel specification for Delta Lake tables.
+#[derive(Debug, Clone)]
+pub enum TimeTravelSpec {
+    /// Travel to a specific version number
+    Version(i64),
+    /// Travel to a specific timestamp
+    Timestamp(Expr),
+    /// FOR SYSTEM_TIME AS OF expression (SQL standard)
+    SystemTimeAsOf(Expr),
+}
+
 /// A table factor (table, subquery, or table function).
 #[derive(Debug, Clone)]
 pub enum TableFactor {
@@ -146,6 +157,8 @@ pub enum TableFactor {
     Table {
         name: Vec<String>,
         alias: Option<TableAlias>,
+        /// Optional time travel specification for Delta Lake tables
+        time_travel: Option<TimeTravelSpec>,
     },
     /// A subquery
     Derived {
@@ -823,10 +836,15 @@ impl Parser {
 
     fn convert_table_factor(factor: sql_ast::TableFactor) -> Result<TableFactor> {
         match factor {
-            sql_ast::TableFactor::Table { name, alias, .. } => Ok(TableFactor::Table {
-                name: Self::convert_object_name(&name),
-                alias: alias.map(Self::convert_table_alias),
-            }),
+            sql_ast::TableFactor::Table { name, alias, version, .. } => {
+                // Convert time travel specification
+                let time_travel = version.map(|v| Self::convert_table_version(v)).transpose()?;
+                Ok(TableFactor::Table {
+                    name: Self::convert_object_name(&name),
+                    alias: alias.map(Self::convert_table_alias),
+                    time_travel,
+                })
+            }
             sql_ast::TableFactor::Derived {
                 subquery, alias, ..
             } => Ok(TableFactor::Derived {
@@ -854,6 +872,15 @@ impl Parser {
         match factor {
             sql_ast::TableFactor::Table { name, .. } => Ok(Self::convert_object_name(name)),
             _ => Err(BlazeError::parse("Expected table name")),
+        }
+    }
+
+    fn convert_table_version(version: sql_ast::TableVersion) -> Result<TimeTravelSpec> {
+        match version {
+            sql_ast::TableVersion::ForSystemTimeAsOf(expr) => {
+                let converted_expr = Self::convert_expr(expr)?;
+                Ok(TimeTravelSpec::SystemTimeAsOf(converted_expr))
+            }
         }
     }
 
@@ -1409,4 +1436,8 @@ mod tests {
             panic!("Expected CreateTable");
         }
     }
+
+    // Note: FOR SYSTEM_TIME AS OF syntax requires BigQuery or MsSql dialect.
+    // The GenericDialect doesn't support it. Time travel can be used via API
+    // with DeltaTable::open_at_version() or DeltaTable::open_at_timestamp().
 }
