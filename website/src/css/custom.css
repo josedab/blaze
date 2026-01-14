@@ -1,0 +1,331 @@
+/**
+ * Blaze Query Engine - Custom CSS
+ * Based on modern documentation design patterns
+ */
+
+/* Color palette */
+:root {
+  /* Primary - Vibrant Orange (represents speed/fire) */
+  --ifm-color-primary: #ff6b35;
+  --ifm-color-primary-dark: #e85a24;
+  --ifm-color-primary-darker: #d95420;
+  --ifm-color-primary-darkest: #b3451a;
+  --ifm-color-primary-light: #ff8051;
+  --ifm-color-primary-lighter: #ff8d61;
+  --ifm-color-primary-lightest: #ffa889;
+
+  /* Secondary - Deep Blue (represents reliability/tech) */
+  --ifm-color-secondary: #1a365d;
+
+  /* Accent colors */
+  --blaze-accent-rust: #dea584;
+  --blaze-accent-arrow: #00b4d8;
+  --blaze-accent-success: #06d6a0;
+  --blaze-accent-warning: #ffd166;
+
+  /* Typography */
+  --ifm-font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'Fira Code', 'SF Mono', Monaco, Consolas, monospace;
+  --ifm-code-font-size: 90%;
+
+  /* Spacing */
+  --ifm-spacing-horizontal: 1.5rem;
+  --doc-sidebar-width: 280px;
+
+  /* Code blocks */
+  --ifm-code-background: #f6f8fa;
+  --ifm-code-border-radius: 6px;
+  --ifm-code-padding-horizontal: 0.4rem;
+  --ifm-code-padding-vertical: 0.2rem;
+
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+/* Dark mode */
+[data-theme='dark'] {
+  --ifm-color-primary: #ff8051;
+  --ifm-color-primary-dark: #ff6b35;
+  --ifm-color-primary-darker: #e85a24;
+  --ifm-color-primary-darkest: #d95420;
+  --ifm-color-primary-light: #ff9670;
+  --ifm-color-primary-lighter: #ffa889;
+  --ifm-color-primary-lightest: #ffbfa3;
+
+  --ifm-background-color: #0d1117;
+  --ifm-background-surface-color: #161b22;
+  --ifm-code-background: #1e2430;
+
+  --ifm-navbar-background-color: #161b22;
+  --ifm-footer-background-color: #0d1117;
+
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Navbar styling */
+.navbar {
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  backdrop-filter: blur(8px);
+}
+
+.navbar__title {
+  font-weight: 700;
+  font-size: 1.25rem;
+}
+
+.navbar__link {
+  font-weight: 500;
+}
+
+/* Hero section */
+.hero {
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, #ff8051 50%, #ffa889 100%);
+  padding: 4rem 0;
+}
+
+[data-theme='dark'] .hero {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+}
+
+.hero__title {
+  font-size: 3.5rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.hero__subtitle {
+  font-size: 1.5rem;
+  font-weight: 400;
+  opacity: 0.9;
+}
+
+/* Feature cards */
+.feature-card {
+  background: var(--ifm-background-surface-color);
+  border-radius: 12px;
+  padding: 2rem;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.feature-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.15);
+}
+
+.feature-icon {
+  font-size: 2.5rem;
+  margin-bottom: 1rem;
+}
+
+/* Code blocks */
+.prism-code {
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+pre {
+  border-radius: 8px;
+}
+
+code {
+  border-radius: 4px;
+  padding: 0.2em 0.4em;
+  font-weight: 500;
+}
+
+/* Sidebar */
+.menu__link {
+  font-size: 0.95rem;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+
+.menu__link--active {
+  background: var(--ifm-color-primary-lightest);
+  color: var(--ifm-color-primary-darkest);
+  font-weight: 600;
+}
+
+[data-theme='dark'] .menu__link--active {
+  background: rgba(255, 107, 53, 0.15);
+  color: var(--ifm-color-primary);
+}
+
+/* Tables */
+table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+}
+
+th {
+  background: var(--ifm-color-emphasis-100);
+  font-weight: 600;
+}
+
+[data-theme='dark'] th {
+  background: var(--ifm-color-emphasis-200);
+}
+
+/* Admonitions */
+.admonition {
+  border-radius: 8px;
+  border-left-width: 4px;
+}
+
+/* Tabs */
+.tabs__item {
+  border-radius: 6px 6px 0 0;
+  font-weight: 500;
+}
+
+.tabs__item--active {
+  border-bottom-color: var(--ifm-color-primary);
+}
+
+/* Search */
+.navbar__search-input {
+  border-radius: 20px;
+  padding-left: 2.5rem;
+}
+
+/* Breadcrumbs */
+.breadcrumbs__link {
+  font-size: 0.875rem;
+}
+
+/* TOC */
+.table-of-contents__link {
+  font-size: 0.875rem;
+}
+
+.table-of-contents__link--active {
+  color: var(--ifm-color-primary);
+  font-weight: 600;
+}
+
+/* Doc page */
+.markdown h1:first-child {
+  font-size: 2.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.markdown h2 {
+  font-size: 1.5rem;
+  margin-top: 2.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+}
+
+.markdown h3 {
+  font-size: 1.25rem;
+  margin-top: 2rem;
+}
+
+/* Install command styling */
+.install-command {
+  background: linear-gradient(135deg, #1e2430 0%, #2d3748 100%);
+  border-radius: 12px;
+  padding: 1.5rem;
+  font-family: var(--ifm-font-family-monospace);
+  position: relative;
+  overflow: hidden;
+}
+
+.install-command::before {
+  content: '$';
+  color: var(--ifm-color-primary);
+  margin-right: 0.75rem;
+  font-weight: 600;
+}
+
+/* Badge styles */
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge--primary {
+  background: var(--ifm-color-primary);
+  color: white;
+}
+
+.badge--success {
+  background: var(--blaze-accent-success);
+  color: #1a1a2e;
+}
+
+.badge--warning {
+  background: var(--blaze-accent-warning);
+  color: #1a1a2e;
+}
+
+/* Mermaid diagrams */
+.mermaid {
+  background: transparent !important;
+}
+
+/* Responsive */
+@media (max-width: 996px) {
+  .hero__title {
+    font-size: 2.5rem;
+  }
+
+  .hero__subtitle {
+    font-size: 1.25rem;
+  }
+}
+
+/* Animation for feature cards */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.feature-card {
+  animation: fadeInUp 0.5s ease-out forwards;
+}
+
+.feature-card:nth-child(1) { animation-delay: 0.1s; }
+.feature-card:nth-child(2) { animation-delay: 0.2s; }
+.feature-card:nth-child(3) { animation-delay: 0.3s; }
+.feature-card:nth-child(4) { animation-delay: 0.4s; }
+.feature-card:nth-child(5) { animation-delay: 0.5s; }
+.feature-card:nth-child(6) { animation-delay: 0.6s; }
+
+/* Footer */
+.footer__title {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.footer__link-item {
+  font-size: 0.9rem;
+}
+
+/* Anchor links */
+.hash-link {
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+h2:hover .hash-link,
+h3:hover .hash-link,
+h4:hover .hash-link {
+  opacity: 1;
+}

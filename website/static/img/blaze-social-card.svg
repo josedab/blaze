@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="flame-outer" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" style="stop-color:#e85d04"/>
+      <stop offset="50%" style="stop-color:#f48c06"/>
+      <stop offset="100%" style="stop-color:#ffba08"/>
+    </linearGradient>
+    <linearGradient id="flame-inner" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" style="stop-color:#ff6b35"/>
+      <stop offset="100%" style="stop-color:#ffd166"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg-gradient)"/>
+
+  <!-- Grid pattern -->
+  <g opacity="0.05">
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="white" stroke-width="1"/>
+    </pattern>
+    <rect width="1200" height="630" fill="url(#grid)"/>
+  </g>
+
+  <!-- Logo flame (larger) -->
+  <g transform="translate(100, 165) scale(2.5)">
+    <path fill="url(#flame-outer)" filter="url(#glow)" d="
+      M60 8
+      C72 24 92 40 92 68
+      C92 92 78 108 60 116
+      C42 108 28 92 28 68
+      C28 40 48 24 60 8
+      Z
+    "/>
+    <path fill="url(#flame-inner)" d="
+      M60 32
+      C68 44 80 56 80 76
+      C80 92 70 100 60 104
+      C50 100 40 92 40 76
+      C40 56 52 44 60 32
+      Z
+    "/>
+    <ellipse fill="#fff8e7" cx="60" cy="84" rx="8" ry="12" opacity="0.8"/>
+  </g>
+
+  <!-- Text -->
+  <text x="420" y="280" font-family="system-ui, -apple-system, sans-serif" font-size="96" font-weight="bold" fill="white">Blaze</text>
+  <text x="420" y="360" font-family="system-ui, -apple-system, sans-serif" font-size="32" fill="#a0a0a0">High-performance embedded OLAP query engine</text>
+  <text x="420" y="410" font-family="system-ui, -apple-system, sans-serif" font-size="28" fill="#ff8c42">Written in Rust | SQL:2016 | Apache Arrow</text>
+
+  <!-- Feature pills -->
+  <g transform="translate(420, 450)">
+    <rect x="0" y="0" width="140" height="40" rx="20" fill="#ff6b35" opacity="0.2"/>
+    <text x="70" y="27" font-family="system-ui, sans-serif" font-size="16" fill="#ff8c42" text-anchor="middle">Memory Safe</text>
+
+    <rect x="160" y="0" width="140" height="40" rx="20" fill="#ff6b35" opacity="0.2"/>
+    <text x="230" y="27" font-family="system-ui, sans-serif" font-size="16" fill="#ff8c42" text-anchor="middle">Vectorized</text>
+
+    <rect x="320" y="0" width="160" height="40" rx="20" fill="#ff6b35" opacity="0.2"/>
+    <text x="400" y="27" font-family="system-ui, sans-serif" font-size="16" fill="#ff8c42" text-anchor="middle">Arrow Native</text>
+
+    <rect x="500" y="0" width="140" height="40" rx="20" fill="#ff6b35" opacity="0.2"/>
+    <text x="570" y="27" font-family="system-ui, sans-serif" font-size="16" fill="#ff8c42" text-anchor="middle">Embeddable</text>
+  </g>
+
+  <!-- URL -->
+  <text x="1100" y="590" font-family="monospace" font-size="20" fill="#666" text-anchor="end">github.com/blaze-db/blaze</text>
+</svg>
