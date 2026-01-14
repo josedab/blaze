@@ -73,6 +73,7 @@ pub mod nlq;
 pub mod optimizer;
 pub mod parallel;
 pub mod planner;
+pub mod prepared;
 pub mod simd;
 pub mod sql;
 pub mod storage;
@@ -81,8 +82,13 @@ pub mod timeseries;
 pub mod types;
 pub mod wasm;
 
+// Python bindings (conditional on feature)
+#[cfg(feature = "python")]
+pub mod python;
+
 // Re-export commonly used types
 pub use error::{BlazeError, Result};
+pub use prepared::{PreparedStatement, PreparedStatementCache, ParameterInfo};
 pub use types::{DataType, Field, ScalarValue, Schema};
 
 use std::path::Path;
@@ -741,6 +747,107 @@ impl Connection {
     /// Set the batch size for query execution.
     pub fn set_batch_size(&mut self, batch_size: usize) {
         self.execution_context = ExecutionContext::new().with_batch_size(batch_size);
+    }
+
+    /// Prepare a SQL statement for repeated execution with parameters.
+    ///
+    /// This method parses the SQL and creates a logical plan that can be
+    /// executed multiple times with different parameter values. Parameters
+    /// are specified using the `$1`, `$2`, etc. syntax.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use blaze::{Connection, ScalarValue};
+    ///
+    /// let conn = Connection::in_memory().unwrap();
+    /// conn.execute("CREATE TABLE users (id INT, name VARCHAR)").unwrap();
+    ///
+    /// // Prepare a query with parameters
+    /// let stmt = conn.prepare("SELECT * FROM users WHERE id = $1").unwrap();
+    ///
+    /// // Execute with different parameter values
+    /// let results1 = stmt.execute(&[ScalarValue::Int64(Some(1))]).unwrap();
+    /// let results2 = stmt.execute(&[ScalarValue::Int64(Some(2))]).unwrap();
+    /// ```
+    pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
+        // Parse SQL
+        let statements = Parser::parse(sql)?;
+
+        let Some(statement) = statements.into_iter().next() else {
+            return Err(BlazeError::analysis("Empty SQL statement"));
+        };
+
+        // Bind and create logical plan
+        let binder = Binder::new(self.catalog_list.clone());
+        let logical_plan = binder.bind(statement)?;
+
+        // Extract parameter placeholders
+        let parameters = prepared::extract_parameters(&logical_plan);
+
+        // Create the prepared statement
+        Ok(PreparedStatement::new(
+            sql.to_string(),
+            logical_plan,
+            parameters,
+            self.catalog_list.clone(),
+            self.execution_context.clone(),
+        ))
+    }
+
+    /// Prepare a SQL statement using the statement cache.
+    ///
+    /// This method uses a cache to avoid re-parsing and re-binding
+    /// frequently used queries. If the query is already in the cache,
+    /// the cached logical plan is reused.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use blaze::{Connection, PreparedStatementCache, ScalarValue};
+    ///
+    /// let conn = Connection::in_memory().unwrap();
+    /// let cache = PreparedStatementCache::new(100);
+    ///
+    /// // First call parses and caches the plan
+    /// let stmt1 = conn.prepare_cached("SELECT $1 + $2", &cache).unwrap();
+    ///
+    /// // Second call reuses the cached plan
+    /// let stmt2 = conn.prepare_cached("SELECT $1 + $2", &cache).unwrap();
+    /// ```
+    pub fn prepare_cached(
+        &self,
+        sql: &str,
+        cache: &PreparedStatementCache,
+    ) -> Result<PreparedStatement> {
+        let catalog_list = self.catalog_list.clone();
+
+        let (logical_plan, parameters) = cache.get_or_create(sql, || {
+            // Parse SQL
+            let statements = Parser::parse(sql)?;
+
+            let Some(statement) = statements.into_iter().next() else {
+                return Err(BlazeError::analysis("Empty SQL statement"));
+            };
+
+            // Bind and create logical plan
+            let binder = Binder::new(catalog_list.clone());
+            let logical_plan = binder.bind(statement)?;
+
+            // Extract parameter placeholders
+            let parameters = prepared::extract_parameters(&logical_plan);
+
+            Ok((logical_plan, parameters))
+        })?;
+
+        // Create the prepared statement
+        Ok(PreparedStatement::new(
+            sql.to_string(),
+            logical_plan,
+            parameters,
+            self.catalog_list.clone(),
+            self.execution_context.clone(),
+        ))
     }
 }
 
