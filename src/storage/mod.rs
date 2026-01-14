@@ -1,14 +1,16 @@
 //! Storage layer for Blaze.
 //!
 //! This module provides readers and writers for various data formats
-//! including CSV, Parquet, JSON, and Arrow IPC.
+//! including CSV, Parquet, JSON, Arrow IPC, and Delta Lake.
 
 mod memory;
 mod csv;
 mod parquet;
+mod delta;
 
 pub use self::csv::{CsvTable, CsvOptions, write_csv};
 pub use self::parquet::{ParquetTable, ParquetOptions, write_parquet, write_parquet_with_options};
+pub use self::delta::{DeltaTable, DeltaTableOptions, DeltaVersionInfo, DeltaWriteResult, DeltaWriteMode};
 pub use memory::MemoryTable;
 
 use std::path::Path;
@@ -23,6 +25,12 @@ use crate::types::Schema;
 /// Read a file and return a table provider.
 pub fn read_file(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvider>> {
     let path = path.as_ref();
+
+    // Check if it's a Delta table (directory with _delta_log)
+    if path.is_dir() && path.join("_delta_log").exists() {
+        return Ok(Arc::new(DeltaTable::open(path)?));
+    }
+
     let extension = path
         .extension()
         .and_then(|e| e.to_str())
@@ -55,4 +63,22 @@ pub fn memory_table(batches: Vec<RecordBatch>) -> Result<Arc<dyn TableProvider>>
     }
     let schema = Schema::from_arrow(batches[0].schema().as_ref())?;
     Ok(Arc::new(MemoryTable::new(schema, batches)))
+}
+
+/// Read a Delta Lake table.
+pub fn read_delta(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvider>> {
+    Ok(Arc::new(DeltaTable::open(path)?))
+}
+
+/// Read a Delta Lake table at a specific version (time travel).
+pub fn read_delta_version(path: impl AsRef<Path>, version: i64) -> Result<Arc<dyn TableProvider>> {
+    Ok(Arc::new(DeltaTable::open_at_version(path, version)?))
+}
+
+/// Read a Delta Lake table as of a specific timestamp (time travel).
+pub fn read_delta_timestamp(
+    path: impl AsRef<Path>,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<Arc<dyn TableProvider>> {
+    Ok(Arc::new(DeltaTable::open_at_timestamp(path, timestamp)?))
 }
