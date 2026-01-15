@@ -247,17 +247,19 @@ ConnectionConfig::new().with_batch_size(20_000_000);
 
 ### DDL Statements
 
-Data Definition Language is limited:
+Data Definition Language is supported for in-memory tables:
 
 ```sql
--- Not supported
+-- Supported
 CREATE TABLE users (id INT, name VARCHAR);
 DROP TABLE users;
+
+-- Not supported
 ALTER TABLE users ADD COLUMN email VARCHAR;
 CREATE INDEX idx ON users(id);
 ```
 
-**Alternative:** Use programmatic table registration:
+You can also use programmatic table registration for file-based tables:
 
 ```rust
 conn.register_csv("users", "users.csv")?;
@@ -267,14 +269,37 @@ conn.register_batches("data", record_batches)?;
 
 ### DML Statements
 
-Data Manipulation Language is not supported:
+Data Manipulation Language is supported **only for in-memory tables** created via `CREATE TABLE`:
 
 ```sql
--- Not supported
+-- Supported for in-memory tables
+CREATE TABLE users (id INT, name VARCHAR);
 INSERT INTO users VALUES (1, 'Alice');
 UPDATE users SET name = 'Bob' WHERE id = 1;
 DELETE FROM users WHERE id = 1;
 ```
+
+DML is **not supported** for external data sources (CSV, Parquet, Delta Lake files):
+
+```rust
+// This won't work - CSV files are read-only
+conn.register_csv("users", "users.csv")?;
+conn.execute("INSERT INTO users VALUES (2, 'Carol')")?;  // Error!
+```
+
+### Prepared Statements
+
+Prepared statements support positional parameters (`$1`, `$2`, etc.):
+
+```rust
+let stmt = conn.prepare("SELECT * FROM users WHERE id = $1")?;
+let results = stmt.execute(&[ScalarValue::Int64(Some(42))])?;
+```
+
+Limitations:
+- Named parameters (`:name`, `@name`) are not supported
+- The `?` placeholder syntax is not supported
+- Type inference for parameters is limited; explicit casts may be needed
 
 ### Transactions
 
@@ -306,7 +331,7 @@ The CLI (`cargo run`) is a simple REPL for testing and development. It is **not 
 | Decimal join keys | Cast to Float64 |
 | Missing functions | Implement custom expressions |
 | Thread safety | One connection per thread |
-| DDL statements | Programmatic registration |
+| DML on external files | Use in-memory tables, then export |
 | Persistence | Export to Parquet, reload |
 
 ## Roadmap
@@ -314,11 +339,13 @@ The CLI (`cargo run`) is a simple REPL for testing and development. It is **not 
 The following features are planned for future releases:
 
 - [ ] Decimal type support in joins and GROUP BY
-- [ ] Additional window functions (NTILE, PERCENT_RANK)
+- [ ] Additional window functions (NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST)
 - [ ] Parquet write support
 - [ ] Transaction support
 - [ ] Thread-safe connection pool
-- [ ] More date/time functions
-- [ ] Regex functions
+- [ ] More date/time functions (DATE_ADD, DATE_SUB, TO_DATE, TO_TIMESTAMP)
+- [ ] Additional scalar functions (REPLACE, SPLIT, REGEXP_*, GREATEST, LEAST)
+- [ ] Filter pushdown for CSV and Parquet files
+- [ ] Named parameters in prepared statements
 
 See [GitHub Issues](https://github.com/blaze-db/blaze/issues) for the latest roadmap.
