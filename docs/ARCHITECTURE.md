@@ -254,9 +254,29 @@ classDiagram
 | `in_memory()` | Create in-memory database |
 | `query(sql)` | Execute SELECT, return results |
 | `execute(sql)` | Execute DDL/DML, return row count |
-| `prepare(sql)` | Compile query for reuse |
+| `prepare(sql)` | Compile query for reuse with parameters |
+| `prepare_cached(sql, cache)` | Prepare with statement caching |
 | `register_csv(name, path)` | Register CSV as table |
 | `register_parquet(name, path)` | Register Parquet as table |
+| `register_batches(name, batches)` | Register Arrow data as table |
+
+**Prepared Statements**:
+
+Blaze supports parameterized queries with `$1`, `$2`, etc. placeholders:
+
+```rust
+// Basic prepared statement
+let stmt = conn.prepare("SELECT * FROM users WHERE id = $1")?;
+let results = stmt.execute(&[ScalarValue::Int64(Some(42))])?;
+
+// With statement caching for frequently-used queries
+let cache = PreparedStatementCache::new(100);
+let stmt = conn.prepare_cached("SELECT * FROM users WHERE id = $1", &cache)?;
+```
+
+**DML Limitations**:
+
+`INSERT`, `UPDATE`, and `DELETE` statements only work with in-memory tables created via `CREATE TABLE`. External data sources (CSV, Parquet) are read-only.
 
 ---
 
