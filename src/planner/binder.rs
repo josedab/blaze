@@ -144,11 +144,91 @@ impl Binder {
                 })
             }
             Statement::ShowTables => self.bind_show_tables(),
+            Statement::Copy(copy) => self.bind_copy(copy, ctx),
             _ => Err(BlazeError::not_implemented(format!(
                 "Statement type: {:?}",
                 stmt
             ))),
         }
+    }
+
+    fn bind_copy(&self, copy: sql::parser::Copy, ctx: &mut BindContext) -> Result<LogicalPlan> {
+        use super::logical_plan::{CopyFormat, CopyOptions};
+
+        // Only COPY TO is supported for now
+        if copy.direction != sql::parser::CopyDirection::To {
+            return Err(BlazeError::not_implemented("Only COPY TO is supported"));
+        }
+
+        // Determine the target path
+        let target = match copy.target {
+            sql::parser::CopyTarget::File(filename) => filename,
+            sql::parser::CopyTarget::Stdout => return Err(BlazeError::not_implemented("COPY TO STDOUT not supported")),
+            sql::parser::CopyTarget::Stdin => return Err(BlazeError::analysis("COPY TO STDIN is invalid")),
+        };
+
+        // Build a scan from the table
+        let table_ref = TableRef::from_parts(&copy.table_name)?;
+        let resolved = table_ref.resolve(&self.default_catalog, &self.default_schema);
+        let schema = self.get_table_schema(&resolved)?;
+
+        let input = if copy.columns.is_empty() {
+            LogicalPlan::TableScan {
+                table_ref: resolved,
+                projection: None,
+                filters: vec![],
+                schema,
+                time_travel: None,
+            }
+        } else {
+            // Project specific columns
+            let projection: Vec<usize> = copy.columns
+                .iter()
+                .filter_map(|c| schema.index_of(c.as_str()))
+                .collect();
+            let proj_schema = schema.project(&projection)?;
+            LogicalPlan::TableScan {
+                table_ref: resolved,
+                projection: Some(projection),
+                filters: vec![],
+                schema: proj_schema,
+                time_travel: None,
+            }
+        };
+
+        // Determine format from file extension or explicit format option
+        let format = if let Some(ref fmt) = copy.format {
+            CopyFormat::from_str(fmt).unwrap_or(CopyFormat::Parquet)
+        } else if let Some(ext) = std::path::Path::new(&target).extension() {
+            match ext.to_str().unwrap_or("").to_lowercase().as_str() {
+                "parquet" | "pq" => CopyFormat::Parquet,
+                "csv" => CopyFormat::Csv,
+                "json" | "jsonl" | "ndjson" => CopyFormat::Json,
+                _ => CopyFormat::Parquet, // Default
+            }
+        } else {
+            CopyFormat::Parquet
+        };
+
+        // Parse options
+        let mut options = CopyOptions::default();
+        options.header = true; // Default to include header for CSV
+
+        for (key, value) in &copy.options {
+            match key.to_lowercase().as_str() {
+                "header" => options.header = value.to_lowercase() == "true",
+                "delimiter" => options.delimiter = value.chars().next(),
+                _ => {} // Ignore unknown options
+            }
+        }
+
+        Ok(LogicalPlan::Copy {
+            input: Arc::new(input),
+            target,
+            format,
+            options,
+            schema: Schema::empty(),
+        })
     }
 
     fn bind_query(&self, query: sql::parser::Query, ctx: &mut BindContext) -> Result<LogicalPlan> {

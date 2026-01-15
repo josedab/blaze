@@ -394,6 +394,16 @@ fn substitute_parameters(
         LogicalPlan::EmptyRelation { .. } => Ok(plan.clone()),
         LogicalPlan::CreateTable { .. } => Ok(plan.clone()),
         LogicalPlan::DropTable { .. } => Ok(plan.clone()),
+        LogicalPlan::Copy { input, target, format, options, schema } => {
+            let new_input = substitute_parameters(input, params)?;
+            Ok(LogicalPlan::Copy {
+                input: Arc::new(new_input),
+                target: target.clone(),
+                format: format.clone(),
+                options: options.clone(),
+                schema: schema.clone(),
+            })
+        }
     }
 }
 
@@ -719,6 +729,9 @@ fn extract_parameters_from_plan(plan: &LogicalPlan, params: &mut Vec<ParameterIn
         LogicalPlan::EmptyRelation { .. } |
         LogicalPlan::CreateTable { .. } |
         LogicalPlan::DropTable { .. } => {}
+        LogicalPlan::Copy { input, .. } => {
+            extract_parameters_from_plan(input, params);
+        }
     }
 }
 

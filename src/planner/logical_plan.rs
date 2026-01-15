@@ -271,6 +271,70 @@ pub enum LogicalPlan {
         /// Schema
         schema: Schema,
     },
+
+    /// COPY TO - export query results to a file
+    Copy {
+        /// Input query plan
+        input: Arc<LogicalPlan>,
+        /// Target file path
+        target: String,
+        /// Output format
+        format: CopyFormat,
+        /// Copy options
+        options: CopyOptions,
+        /// Schema (empty since COPY TO doesn't return rows)
+        schema: Schema,
+    },
+}
+
+/// Output format for COPY TO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFormat {
+    /// Parquet format
+    Parquet,
+    /// CSV format
+    Csv,
+    /// JSON Lines format
+    Json,
+}
+
+impl CopyFormat {
+    /// Parse format from string.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "parquet" | "pq" => Some(Self::Parquet),
+            "csv" => Some(Self::Csv),
+            "json" | "jsonl" | "ndjson" => Some(Self::Json),
+            _ => None,
+        }
+    }
+}
+
+impl Default for CopyFormat {
+    fn default() -> Self {
+        Self::Parquet
+    }
+}
+
+impl fmt::Display for CopyFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CopyFormat::Parquet => write!(f, "PARQUET"),
+            CopyFormat::Csv => write!(f, "CSV"),
+            CopyFormat::Json => write!(f, "JSON"),
+        }
+    }
+}
+
+/// Options for COPY TO operation.
+#[derive(Debug, Clone, Default)]
+pub struct CopyOptions {
+    /// Include header for CSV
+    pub header: bool,
+    /// Delimiter for CSV
+    pub delimiter: Option<char>,
+    /// Compression (for future use)
+    pub compression: Option<String>,
 }
 
 impl LogicalPlan {
@@ -298,6 +362,7 @@ impl LogicalPlan {
             LogicalPlan::Insert { schema, .. } => schema,
             LogicalPlan::Delete { schema, .. } => schema,
             LogicalPlan::Update { schema, .. } => schema,
+            LogicalPlan::Copy { schema, .. } => schema,
         }
     }
 
@@ -325,6 +390,7 @@ impl LogicalPlan {
             LogicalPlan::Insert { input, .. } => vec![input.as_ref()],
             LogicalPlan::Delete { .. } => vec![],
             LogicalPlan::Update { .. } => vec![],
+            LogicalPlan::Copy { input, .. } => vec![input.as_ref()],
         }
     }
 
@@ -500,6 +566,13 @@ impl LogicalPlan {
                     f.push_str(&format!(" where={}", p));
                 }
                 f.push('\n');
+            }
+            LogicalPlan::Copy { input, target, format, .. } => {
+                f.push_str(&format!(
+                    "{}Copy: target='{}' format={}\n",
+                    prefix, target, format
+                ));
+                input.format_indent(f, indent + 1);
             }
         }
     }

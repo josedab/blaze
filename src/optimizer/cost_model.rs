@@ -374,6 +374,12 @@ impl CostModel {
             LogicalPlan::Insert { input, .. } => self.estimate(input),
             LogicalPlan::Delete { .. } => Ok(Cost::zero()),
             LogicalPlan::Update { .. } => Ok(Cost::zero()),
+            LogicalPlan::Copy { input, .. } => {
+                let input_cost = self.estimate(input)?;
+                // Add IO cost for writing to file
+                let io_cost = Cost::io(1000.0 * self.io_cost_factor);
+                Ok(input_cost + io_cost)
+            }
         }
     }
 }
