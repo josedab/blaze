@@ -726,8 +726,12 @@ impl PhysicalExpr for ScalarFunctionExpr {
 
     fn data_type(&self) -> ArrowDataType {
         match self.name.to_uppercase().as_str() {
-            "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "CONCAT" => ArrowDataType::Utf8,
+            // String functions
+            "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "CONCAT"
+            | "REPLACE" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT"
+            | "LPAD" | "RPAD" | "REVERSE" | "SPLIT_PART" | "REGEXP_REPLACE" => ArrowDataType::Utf8,
             "LENGTH" | "CHAR_LENGTH" => ArrowDataType::Int64,
+            "REGEXP_MATCH" => ArrowDataType::Boolean,
             "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" => {
                 if !self.args.is_empty() {
                     self.args[0].data_type()
@@ -735,7 +739,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                     ArrowDataType::Float64
                 }
             }
-            "COALESCE" | "NULLIF" => {
+            "COALESCE" | "NULLIF" | "IFNULL" | "NVL" | "GREATEST" | "LEAST" => {
                 if !self.args.is_empty() {
                     self.args[0].data_type()
                 } else {
@@ -743,9 +747,17 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 }
             }
             // Date/Time functions
-            "CURRENT_DATE" => ArrowDataType::Date32,
-            "CURRENT_TIMESTAMP" | "NOW" | "DATE_TRUNC" => ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
-            "EXTRACT" | "DATE_PART" => ArrowDataType::Int64,
+            "CURRENT_DATE" | "TO_DATE" => ArrowDataType::Date32,
+            "CURRENT_TIMESTAMP" | "NOW" | "DATE_TRUNC" | "TO_TIMESTAMP"
+            | "DATE_ADD" | "DATEADD" | "DATE_SUB" | "DATESUB" => {
+                if !self.args.is_empty() {
+                    self.args[0].data_type()
+                } else {
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
+                }
+            }
+            "EXTRACT" | "DATE_PART" | "YEAR" | "MONTH" | "DAY" | "HOUR" | "MINUTE" | "SECOND"
+            | "DATE_DIFF" | "DATEDIFF" => ArrowDataType::Int64,
             // JSON functions
             "JSON_EXTRACT" | "JSON_VALUE" | "JSON_OBJECT" | "JSON_ARRAY"
             | "JSON_TYPE" | "JSON_KEYS" => ArrowDataType::Utf8,
@@ -1348,12 +1360,798 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 Ok(Arc::new(builder.finish()))
             }
 
+            // New String Functions
+            "REPLACE" => {
+                if self.args.len() < 3 {
+                    return Err(BlazeError::analysis("REPLACE requires 3 arguments (str, from, to)"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let from_arg = self.args[1].evaluate(batch)?;
+                let to_arg = self.args[2].evaluate(batch)?;
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REPLACE requires string argument"))?;
+                let from_arr = from_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REPLACE from must be string"))?;
+                let to_arr = to_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REPLACE to must be string"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || from_arr.is_null(i) || to_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let result = str_arr.value(i).replace(from_arr.value(i), to_arr.value(i));
+                        builder.append_value(&result);
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "SUBSTRING" | "SUBSTR" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("SUBSTRING requires at least 2 arguments (str, start[, length])"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let start_arg = self.args[1].evaluate(batch)?;
+                let len_arg = if self.args.len() > 2 {
+                    Some(self.args[2].evaluate(batch)?)
+                } else {
+                    None
+                };
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("SUBSTRING requires string argument"))?;
+                let start_arr = start_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("SUBSTRING start must be integer"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || start_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let start = (start_arr.value(i).max(1) - 1) as usize; // SQL is 1-indexed
+                        let chars: Vec<char> = s.chars().collect();
+
+                        let result = if let Some(ref len_arr_ref) = len_arg {
+                            let len_arr = len_arr_ref.as_any().downcast_ref::<Int64Array>()
+                                .ok_or_else(|| BlazeError::type_error("SUBSTRING length must be integer"))?;
+                            if len_arr.is_null(i) {
+                                builder.append_null();
+                                continue;
+                            }
+                            let len = len_arr.value(i).max(0) as usize;
+                            chars.iter().skip(start).take(len).collect::<String>()
+                        } else {
+                            chars.iter().skip(start).collect::<String>()
+                        };
+                        builder.append_value(&result);
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "LEFT" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("LEFT requires 2 arguments (str, n)"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let n_arg = self.args[1].evaluate(batch)?;
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("LEFT requires string argument"))?;
+                let n_arr = n_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("LEFT n must be integer"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || n_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let n = n_arr.value(i).max(0) as usize;
+                        let result: String = s.chars().take(n).collect();
+                        builder.append_value(&result);
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "RIGHT" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("RIGHT requires 2 arguments (str, n)"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let n_arg = self.args[1].evaluate(batch)?;
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("RIGHT requires string argument"))?;
+                let n_arr = n_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("RIGHT n must be integer"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || n_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let n = n_arr.value(i).max(0) as usize;
+                        let chars: Vec<char> = s.chars().collect();
+                        let start = chars.len().saturating_sub(n);
+                        let result: String = chars.into_iter().skip(start).collect();
+                        builder.append_value(&result);
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "LPAD" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("LPAD requires at least 2 arguments (str, len[, pad])"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let len_arg = self.args[1].evaluate(batch)?;
+                let pad_arg = if self.args.len() > 2 {
+                    Some(self.args[2].evaluate(batch)?)
+                } else {
+                    None
+                };
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("LPAD requires string argument"))?;
+                let len_arr = len_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("LPAD length must be integer"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || len_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let target_len = len_arr.value(i).max(0) as usize;
+                        let pad_char = if let Some(ref pad_arr_ref) = pad_arg {
+                            let pad_arr = pad_arr_ref.as_any().downcast_ref::<StringArray>()
+                                .ok_or_else(|| BlazeError::type_error("LPAD pad must be string"))?;
+                            if pad_arr.is_null(i) || pad_arr.value(i).is_empty() {
+                                " ".to_string()
+                            } else {
+                                pad_arr.value(i).to_string()
+                            }
+                        } else {
+                            " ".to_string()
+                        };
+
+                        let s_len = s.chars().count();
+                        let result = if s_len >= target_len {
+                            s.chars().take(target_len).collect::<String>()
+                        } else {
+                            let pad_needed = target_len - s_len;
+                            let pad_chars: Vec<char> = pad_char.chars().collect();
+                            let mut padding = String::new();
+                            for j in 0..pad_needed {
+                                padding.push(pad_chars[j % pad_chars.len()]);
+                            }
+                            format!("{}{}", padding, s)
+                        };
+                        builder.append_value(&result);
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "RPAD" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("RPAD requires at least 2 arguments (str, len[, pad])"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let len_arg = self.args[1].evaluate(batch)?;
+                let pad_arg = if self.args.len() > 2 {
+                    Some(self.args[2].evaluate(batch)?)
+                } else {
+                    None
+                };
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("RPAD requires string argument"))?;
+                let len_arr = len_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("RPAD length must be integer"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || len_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let target_len = len_arr.value(i).max(0) as usize;
+                        let pad_char = if let Some(ref pad_arr_ref) = pad_arg {
+                            let pad_arr = pad_arr_ref.as_any().downcast_ref::<StringArray>()
+                                .ok_or_else(|| BlazeError::type_error("RPAD pad must be string"))?;
+                            if pad_arr.is_null(i) || pad_arr.value(i).is_empty() {
+                                " ".to_string()
+                            } else {
+                                pad_arr.value(i).to_string()
+                            }
+                        } else {
+                            " ".to_string()
+                        };
+
+                        let s_len = s.chars().count();
+                        let result = if s_len >= target_len {
+                            s.chars().take(target_len).collect::<String>()
+                        } else {
+                            let pad_needed = target_len - s_len;
+                            let pad_chars: Vec<char> = pad_char.chars().collect();
+                            let mut padding = String::new();
+                            for j in 0..pad_needed {
+                                padding.push(pad_chars[j % pad_chars.len()]);
+                            }
+                            format!("{}{}", s, padding)
+                        };
+                        builder.append_value(&result);
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "REVERSE" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("REVERSE requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                let str_arr = arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REVERSE requires string argument"))?;
+
+                let result: StringArray = str_arr.iter()
+                    .map(|opt| opt.map(|s| s.chars().rev().collect::<String>()))
+                    .collect();
+                Ok(Arc::new(result))
+            }
+
+            "SPLIT_PART" => {
+                if self.args.len() < 3 {
+                    return Err(BlazeError::analysis("SPLIT_PART requires 3 arguments (str, delimiter, index)"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let delim_arg = self.args[1].evaluate(batch)?;
+                let idx_arg = self.args[2].evaluate(batch)?;
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("SPLIT_PART requires string argument"))?;
+                let delim_arr = delim_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("SPLIT_PART delimiter must be string"))?;
+                let idx_arr = idx_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("SPLIT_PART index must be integer"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || delim_arr.is_null(i) || idx_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let delim = delim_arr.value(i);
+                        let idx = idx_arr.value(i);
+
+                        // SQL SPLIT_PART is 1-indexed
+                        if idx < 1 {
+                            builder.append_value("");
+                        } else {
+                            let parts: Vec<&str> = s.split(delim).collect();
+                            let result = parts.get((idx - 1) as usize).unwrap_or(&"");
+                            builder.append_value(result);
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "REGEXP_MATCH" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("REGEXP_MATCH requires 2 arguments (str, pattern)"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let pattern_arg = self.args[1].evaluate(batch)?;
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REGEXP_MATCH requires string argument"))?;
+                let pattern_arr = pattern_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REGEXP_MATCH pattern must be string"))?;
+
+                let mut builder = BooleanBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || pattern_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let pattern = pattern_arr.value(i);
+                        match regex::Regex::new(pattern) {
+                            Ok(re) => builder.append_value(re.is_match(s)),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "REGEXP_REPLACE" => {
+                if self.args.len() < 3 {
+                    return Err(BlazeError::analysis("REGEXP_REPLACE requires 3 arguments (str, pattern, replacement)"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let pattern_arg = self.args[1].evaluate(batch)?;
+                let replacement_arg = self.args[2].evaluate(batch)?;
+
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REGEXP_REPLACE requires string argument"))?;
+                let pattern_arr = pattern_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REGEXP_REPLACE pattern must be string"))?;
+                let replacement_arr = replacement_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("REGEXP_REPLACE replacement must be string"))?;
+
+                let mut builder = StringBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) || pattern_arr.is_null(i) || replacement_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let pattern = pattern_arr.value(i);
+                        let replacement = replacement_arr.value(i);
+                        match regex::Regex::new(pattern) {
+                            Ok(re) => {
+                                let result = re.replace_all(s, replacement);
+                                builder.append_value(&result);
+                            }
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            // Date/Time extraction functions
+            "YEAR" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("YEAR requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                self.extract_date_part(&arg, "YEAR", batch.num_rows())
+            }
+
+            "MONTH" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("MONTH requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                self.extract_date_part(&arg, "MONTH", batch.num_rows())
+            }
+
+            "DAY" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("DAY requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                self.extract_date_part(&arg, "DAY", batch.num_rows())
+            }
+
+            "HOUR" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("HOUR requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                self.extract_date_part(&arg, "HOUR", batch.num_rows())
+            }
+
+            "MINUTE" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("MINUTE requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                self.extract_date_part(&arg, "MINUTE", batch.num_rows())
+            }
+
+            "SECOND" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("SECOND requires 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                self.extract_date_part(&arg, "SECOND", batch.num_rows())
+            }
+
+            "TO_DATE" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("TO_DATE requires at least 1 argument"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("TO_DATE requires string argument"))?;
+
+                let format = if self.args.len() > 1 {
+                    let fmt_arg = self.args[1].evaluate(batch)?;
+                    let fmt_arr = fmt_arg.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| BlazeError::type_error("TO_DATE format must be string"))?;
+                    if !fmt_arr.is_null(0) {
+                        Some(fmt_arr.value(0).to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                use chrono::{NaiveDate, Datelike};
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+
+                let mut builder = arrow::array::Date32Builder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let parsed = if let Some(ref fmt) = format {
+                            NaiveDate::parse_from_str(s, fmt).ok()
+                        } else {
+                            // Try common formats
+                            NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+                                .or_else(|| NaiveDate::parse_from_str(s, "%Y/%m/%d").ok())
+                                .or_else(|| NaiveDate::parse_from_str(s, "%d-%m-%Y").ok())
+                        };
+
+                        match parsed {
+                            Some(date) => {
+                                let days = date.num_days_from_ce() - epoch.num_days_from_ce();
+                                builder.append_value(days);
+                            }
+                            None => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "TO_TIMESTAMP" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("TO_TIMESTAMP requires at least 1 argument"));
+                }
+                let str_arg = self.args[0].evaluate(batch)?;
+                let str_arr = str_arg.as_any().downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("TO_TIMESTAMP requires string argument"))?;
+
+                let format = if self.args.len() > 1 {
+                    let fmt_arg = self.args[1].evaluate(batch)?;
+                    let fmt_arr = fmt_arg.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| BlazeError::type_error("TO_TIMESTAMP format must be string"))?;
+                    if !fmt_arr.is_null(0) {
+                        Some(fmt_arr.value(0).to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                use chrono::NaiveDateTime;
+
+                let mut builder = arrow::array::TimestampMicrosecondBuilder::new();
+                for i in 0..batch.num_rows() {
+                    if str_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let s = str_arr.value(i);
+                        let parsed = if let Some(ref fmt) = format {
+                            NaiveDateTime::parse_from_str(s, fmt).ok()
+                        } else {
+                            // Try common formats
+                            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()
+                                .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
+                                .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").ok())
+                        };
+
+                        match parsed {
+                            Some(dt) => builder.append_value(dt.and_utc().timestamp_micros()),
+                            None => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+
+            "DATE_ADD" | "DATEADD" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("DATE_ADD requires 2 arguments (date, days)"));
+                }
+                let date_arg = self.args[0].evaluate(batch)?;
+                let days_arg = self.args[1].evaluate(batch)?;
+
+                let days_arr = days_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("DATE_ADD days must be integer"))?;
+
+                match date_arg.data_type() {
+                    ArrowDataType::Date32 => {
+                        let date_arr = date_arg.as_any().downcast_ref::<arrow::array::Date32Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
+                        let result: arrow::array::Date32Array = date_arr.iter()
+                            .zip(days_arr.iter())
+                            .map(|(d, days)| {
+                                match (d, days) {
+                                    (Some(d), Some(days)) => Some(d + days as i32),
+                                    _ => None,
+                                }
+                            })
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    ArrowDataType::Timestamp(_, _) => {
+                        let ts_arr = date_arg.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Timestamp"))?;
+                        let micros_per_day = 24 * 60 * 60 * 1_000_000i64;
+                        let result: arrow::array::TimestampMicrosecondArray = ts_arr.iter()
+                            .zip(days_arr.iter())
+                            .map(|(ts, days)| {
+                                match (ts, days) {
+                                    (Some(ts), Some(days)) => Some(ts + days * micros_per_day),
+                                    _ => None,
+                                }
+                            })
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    _ => Err(BlazeError::type_error("DATE_ADD requires date or timestamp argument")),
+                }
+            }
+
+            "DATE_SUB" | "DATESUB" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("DATE_SUB requires 2 arguments (date, days)"));
+                }
+                let date_arg = self.args[0].evaluate(batch)?;
+                let days_arg = self.args[1].evaluate(batch)?;
+
+                let days_arr = days_arg.as_any().downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("DATE_SUB days must be integer"))?;
+
+                match date_arg.data_type() {
+                    ArrowDataType::Date32 => {
+                        let date_arr = date_arg.as_any().downcast_ref::<arrow::array::Date32Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
+                        let result: arrow::array::Date32Array = date_arr.iter()
+                            .zip(days_arr.iter())
+                            .map(|(d, days)| {
+                                match (d, days) {
+                                    (Some(d), Some(days)) => Some(d - days as i32),
+                                    _ => None,
+                                }
+                            })
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    ArrowDataType::Timestamp(_, _) => {
+                        let ts_arr = date_arg.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Timestamp"))?;
+                        let micros_per_day = 24 * 60 * 60 * 1_000_000i64;
+                        let result: arrow::array::TimestampMicrosecondArray = ts_arr.iter()
+                            .zip(days_arr.iter())
+                            .map(|(ts, days)| {
+                                match (ts, days) {
+                                    (Some(ts), Some(days)) => Some(ts - days * micros_per_day),
+                                    _ => None,
+                                }
+                            })
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    _ => Err(BlazeError::type_error("DATE_SUB requires date or timestamp argument")),
+                }
+            }
+
+            "DATE_DIFF" | "DATEDIFF" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("DATE_DIFF requires at least 2 arguments (date1, date2[, unit])"));
+                }
+                let date1_arg = self.args[0].evaluate(batch)?;
+                let date2_arg = self.args[1].evaluate(batch)?;
+
+                let unit = if self.args.len() > 2 {
+                    let unit_arg = self.args[2].evaluate(batch)?;
+                    let unit_arr = unit_arg.as_any().downcast_ref::<StringArray>()
+                        .ok_or_else(|| BlazeError::type_error("DATE_DIFF unit must be string"))?;
+                    if !unit_arr.is_null(0) {
+                        unit_arr.value(0).to_uppercase()
+                    } else {
+                        "DAY".to_string()
+                    }
+                } else {
+                    "DAY".to_string()
+                };
+
+                match (date1_arg.data_type(), date2_arg.data_type()) {
+                    (ArrowDataType::Date32, ArrowDataType::Date32) => {
+                        let date1_arr = date1_arg.as_any().downcast_ref::<arrow::array::Date32Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
+                        let date2_arr = date2_arg.as_any().downcast_ref::<arrow::array::Date32Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
+
+                        let result: Int64Array = date1_arr.iter()
+                            .zip(date2_arr.iter())
+                            .map(|(d1, d2)| {
+                                match (d1, d2) {
+                                    (Some(d1), Some(d2)) => {
+                                        let diff_days = (d1 - d2) as i64;
+                                        match unit.as_str() {
+                                            "DAY" | "DAYS" => Some(diff_days),
+                                            "WEEK" | "WEEKS" => Some(diff_days / 7),
+                                            "MONTH" | "MONTHS" => Some(diff_days / 30),
+                                            "YEAR" | "YEARS" => Some(diff_days / 365),
+                                            _ => Some(diff_days),
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            })
+                            .collect();
+                        Ok(Arc::new(result))
+                    }
+                    _ => Err(BlazeError::type_error("DATE_DIFF requires date arguments")),
+                }
+            }
+
+            // Utility Functions
+            "GREATEST" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("GREATEST requires at least 1 argument"));
+                }
+
+                let first = self.args[0].evaluate(batch)?;
+                let mut result = first;
+
+                for arg_expr in self.args.iter().skip(1) {
+                    let arg = arg_expr.evaluate(batch)?;
+                    // Element-wise maximum using downcast
+                    if let (Some(r), Some(a)) = (
+                        result.as_any().downcast_ref::<Int64Array>(),
+                        arg.as_any().downcast_ref::<Int64Array>()
+                    ) {
+                        let max_arr: Int64Array = r.iter().zip(a.iter())
+                            .map(|(rv, av)| match (rv, av) {
+                                (Some(x), Some(y)) => Some(x.max(y)),
+                                (Some(x), None) => Some(x),
+                                (None, Some(y)) => Some(y),
+                                (None, None) => None,
+                            })
+                            .collect();
+                        result = Arc::new(max_arr);
+                    } else if let (Some(r), Some(a)) = (
+                        result.as_any().downcast_ref::<Float64Array>(),
+                        arg.as_any().downcast_ref::<Float64Array>()
+                    ) {
+                        let max_arr: Float64Array = r.iter().zip(a.iter())
+                            .map(|(rv, av)| match (rv, av) {
+                                (Some(x), Some(y)) => Some(x.max(y)),
+                                (Some(x), None) => Some(x),
+                                (None, Some(y)) => Some(y),
+                                (None, None) => None,
+                            })
+                            .collect();
+                        result = Arc::new(max_arr);
+                    }
+                }
+                Ok(result)
+            }
+
+            "LEAST" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("LEAST requires at least 1 argument"));
+                }
+
+                let first = self.args[0].evaluate(batch)?;
+                let mut result = first;
+
+                for arg_expr in self.args.iter().skip(1) {
+                    let arg = arg_expr.evaluate(batch)?;
+                    // Element-wise minimum using downcast
+                    if let (Some(r), Some(a)) = (
+                        result.as_any().downcast_ref::<Int64Array>(),
+                        arg.as_any().downcast_ref::<Int64Array>()
+                    ) {
+                        let min_arr: Int64Array = r.iter().zip(a.iter())
+                            .map(|(rv, av)| match (rv, av) {
+                                (Some(x), Some(y)) => Some(x.min(y)),
+                                (Some(x), None) => Some(x),
+                                (None, Some(y)) => Some(y),
+                                (None, None) => None,
+                            })
+                            .collect();
+                        result = Arc::new(min_arr);
+                    } else if let (Some(r), Some(a)) = (
+                        result.as_any().downcast_ref::<Float64Array>(),
+                        arg.as_any().downcast_ref::<Float64Array>()
+                    ) {
+                        let min_arr: Float64Array = r.iter().zip(a.iter())
+                            .map(|(rv, av)| match (rv, av) {
+                                (Some(x), Some(y)) => Some(x.min(y)),
+                                (Some(x), None) => Some(x),
+                                (None, Some(y)) => Some(y),
+                                (None, None) => None,
+                            })
+                            .collect();
+                        result = Arc::new(min_arr);
+                    }
+                }
+                Ok(result)
+            }
+
+            "IFNULL" | "NVL" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("IFNULL/NVL requires 2 arguments"));
+                }
+                let val = self.args[0].evaluate(batch)?;
+                let default = self.args[1].evaluate(batch)?;
+
+                let is_null = arrow::compute::is_null(&val)?;
+                let result = arrow::compute::kernels::zip::zip(&is_null, &default, &val)?;
+                Ok(result)
+            }
+
             _ => Err(BlazeError::not_implemented(format!("Function: {}", self.name))),
         }
     }
 
     fn name(&self) -> &str {
         &self.name
+    }
+}
+
+impl ScalarFunctionExpr {
+    /// Helper function to extract date parts from date/timestamp arrays
+    fn extract_date_part(&self, arr: &ArrayRef, part: &str, num_rows: usize) -> Result<ArrayRef> {
+        use chrono::{Datelike, Timelike};
+
+        match arr.data_type() {
+            ArrowDataType::Date32 => {
+                let date_arr = arr.as_any().downcast_ref::<arrow::array::Date32Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+
+                let result: Int64Array = date_arr.iter()
+                    .map(|opt| {
+                        opt.map(|days| {
+                            let date = epoch + chrono::Duration::days(days as i64);
+                            match part {
+                                "YEAR" => date.year() as i64,
+                                "MONTH" => date.month() as i64,
+                                "DAY" => date.day() as i64,
+                                _ => 0,
+                            }
+                        })
+                    })
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            ArrowDataType::Timestamp(_, _) => {
+                let ts_arr = arr.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Timestamp"))?;
+
+                let result: Int64Array = ts_arr.iter()
+                    .map(|opt| {
+                        opt.map(|micros| {
+                            let dt = chrono::DateTime::from_timestamp_micros(micros)
+                                .map(|dt| dt.naive_utc())
+                                .unwrap_or_else(chrono::NaiveDateTime::default);
+                            match part {
+                                "YEAR" => dt.year() as i64,
+                                "MONTH" => dt.month() as i64,
+                                "DAY" => dt.day() as i64,
+                                "HOUR" => dt.hour() as i64,
+                                "MINUTE" => dt.minute() as i64,
+                                "SECOND" => dt.second() as i64,
+                                _ => 0,
+                            }
+                        })
+                    })
+                    .collect();
+                Ok(Arc::new(result))
+            }
+            _ => Err(BlazeError::type_error(format!("{} requires date or timestamp argument", part))),
+        }
     }
 }
 
