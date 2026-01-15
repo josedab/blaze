@@ -2432,6 +2432,15 @@ impl WindowOperator {
             WindowFunction::DenseRank => {
                 Self::compute_dense_rank(&partitions, order_by, batch, sorted_indices.as_ref(), num_rows)
             }
+            WindowFunction::Ntile => {
+                Self::compute_ntile(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
+            }
+            WindowFunction::PercentRank => {
+                Self::compute_percent_rank(&partitions, order_by, batch, sorted_indices.as_ref(), num_rows)
+            }
+            WindowFunction::CumeDist => {
+                Self::compute_cume_dist(&partitions, order_by, batch, sorted_indices.as_ref(), num_rows)
+            }
             WindowFunction::Lead => {
                 let offset = Self::get_offset_arg(args, batch, 1)?;
                 Self::compute_lead_lag(args, batch, &partitions, sorted_indices.as_ref(), offset, num_rows)
@@ -2446,13 +2455,12 @@ impl WindowOperator {
             WindowFunction::LastValue => {
                 Self::compute_last_value(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
             }
+            WindowFunction::NthValue => {
+                Self::compute_nth_value(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
+            }
             WindowFunction::Aggregate(agg_func) => {
                 Self::compute_window_aggregate(agg_func, args, batch, &partitions, num_rows)
             }
-            _ => Err(BlazeError::not_implemented(format!(
-                "Window function: {:?}",
-                func
-            ))),
         }
     }
 
@@ -3220,6 +3228,248 @@ impl WindowOperator {
 
             for &idx in &indices {
                 result_values[idx] = last_value;
+            }
+        }
+
+        Ok(Arc::new(Int64Array::from(result_values)))
+    }
+
+    /// Compute NTILE(n) - divides rows into n buckets.
+    fn compute_ntile(
+        args: &[Arc<dyn crate::planner::PhysicalExpr>],
+        batch: &RecordBatch,
+        partitions: &[Vec<usize>],
+        sorted_indices: Option<&Vec<Vec<usize>>>,
+        num_rows: usize,
+    ) -> Result<ArrayRef> {
+        // Get the number of buckets from the argument
+        let n_buckets = if !args.is_empty() {
+            let n_array = args[0].evaluate(batch)?;
+            if let Some(int_arr) = n_array.as_any().downcast_ref::<Int64Array>() {
+                if int_arr.len() > 0 && !int_arr.is_null(0) {
+                    int_arr.value(0).max(1) as usize
+                } else {
+                    1
+                }
+            } else {
+                1
+            }
+        } else {
+            return Err(BlazeError::analysis("NTILE requires one argument"));
+        };
+
+        let mut result = vec![0i64; num_rows];
+
+        for (part_idx, partition_rows) in partitions.iter().enumerate() {
+            let indices = sorted_indices
+                .as_ref()
+                .map(|si| si[part_idx].clone())
+                .unwrap_or_else(|| partition_rows.clone());
+
+            let partition_size = indices.len();
+            if partition_size == 0 {
+                continue;
+            }
+
+            // Calculate bucket sizes
+            // Each bucket gets at least partition_size / n_buckets rows
+            // The first (partition_size % n_buckets) buckets get one extra row
+            let base_size = partition_size / n_buckets;
+            let extra = partition_size % n_buckets;
+
+            let mut row_pos = 0;
+            for bucket in 0..n_buckets {
+                let bucket_size = base_size + if bucket < extra { 1 } else { 0 };
+                for _ in 0..bucket_size {
+                    if row_pos < indices.len() {
+                        result[indices[row_pos]] = (bucket + 1) as i64;
+                        row_pos += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(Arc::new(Int64Array::from(result)))
+    }
+
+    /// Compute PERCENT_RANK() - relative rank from 0 to 1.
+    /// Formula: (rank - 1) / (partition_size - 1)
+    fn compute_percent_rank(
+        partitions: &[Vec<usize>],
+        order_by: &[crate::planner::SortExpr],
+        batch: &RecordBatch,
+        sorted_indices: Option<&Vec<Vec<usize>>>,
+        num_rows: usize,
+    ) -> Result<ArrayRef> {
+        let mut result = vec![0.0f64; num_rows];
+
+        if order_by.is_empty() {
+            // Without ORDER BY, all rows have percent_rank 0
+            return Ok(Arc::new(Float64Array::from(result)));
+        }
+
+        let sort_keys: Vec<ArrayRef> = order_by
+            .iter()
+            .map(|sort_expr| sort_expr.expr.evaluate(batch))
+            .collect::<Result<Vec<_>>>()?;
+
+        for (part_idx, partition_rows) in partitions.iter().enumerate() {
+            let indices = sorted_indices
+                .as_ref()
+                .map(|si| si[part_idx].clone())
+                .unwrap_or_else(|| partition_rows.clone());
+
+            let partition_size = indices.len();
+            if partition_size <= 1 {
+                // Single row or empty partition has percent_rank 0
+                for &idx in &indices {
+                    result[idx] = 0.0;
+                }
+                continue;
+            }
+
+            // Calculate rank (with gaps) first
+            let mut ranks = vec![1i64; partition_size];
+            for i in 1..indices.len() {
+                let prev_idx = indices[i - 1];
+                let curr_idx = indices[i];
+
+                let same = sort_keys.iter().all(|key| {
+                    Self::compare_values(key, prev_idx, curr_idx) == std::cmp::Ordering::Equal
+                });
+
+                if same {
+                    ranks[i] = ranks[i - 1];
+                } else {
+                    ranks[i] = (i + 1) as i64;
+                }
+            }
+
+            // Convert to percent_rank
+            for (i, &idx) in indices.iter().enumerate() {
+                result[idx] = (ranks[i] - 1) as f64 / (partition_size - 1) as f64;
+            }
+        }
+
+        Ok(Arc::new(Float64Array::from(result)))
+    }
+
+    /// Compute CUME_DIST() - cumulative distribution.
+    /// Formula: count of rows <= current row / partition_size
+    fn compute_cume_dist(
+        partitions: &[Vec<usize>],
+        order_by: &[crate::planner::SortExpr],
+        batch: &RecordBatch,
+        sorted_indices: Option<&Vec<Vec<usize>>>,
+        num_rows: usize,
+    ) -> Result<ArrayRef> {
+        let mut result = vec![1.0f64; num_rows];
+
+        if order_by.is_empty() {
+            // Without ORDER BY, all rows have cume_dist 1
+            return Ok(Arc::new(Float64Array::from(result)));
+        }
+
+        let sort_keys: Vec<ArrayRef> = order_by
+            .iter()
+            .map(|sort_expr| sort_expr.expr.evaluate(batch))
+            .collect::<Result<Vec<_>>>()?;
+
+        for (part_idx, partition_rows) in partitions.iter().enumerate() {
+            let indices = sorted_indices
+                .as_ref()
+                .map(|si| si[part_idx].clone())
+                .unwrap_or_else(|| partition_rows.clone());
+
+            let partition_size = indices.len();
+            if partition_size == 0 {
+                continue;
+            }
+
+            // Group rows by their sort key values (count rows <= current)
+            let mut i = 0;
+            while i < indices.len() {
+                // Find all rows with the same sort key value
+                let mut j = i + 1;
+                while j < indices.len() {
+                    let same = sort_keys.iter().all(|key| {
+                        Self::compare_values(key, indices[i], indices[j]) == std::cmp::Ordering::Equal
+                    });
+                    if !same {
+                        break;
+                    }
+                    j += 1;
+                }
+
+                // All rows from i to j-1 have the same cume_dist = j / partition_size
+                let cume_dist = j as f64 / partition_size as f64;
+                for k in i..j {
+                    result[indices[k]] = cume_dist;
+                }
+
+                i = j;
+            }
+        }
+
+        Ok(Arc::new(Float64Array::from(result)))
+    }
+
+    /// Compute NTH_VALUE(expr, n) - returns the nth value in the window.
+    fn compute_nth_value(
+        args: &[Arc<dyn crate::planner::PhysicalExpr>],
+        batch: &RecordBatch,
+        partitions: &[Vec<usize>],
+        sorted_indices: Option<&Vec<Vec<usize>>>,
+        num_rows: usize,
+    ) -> Result<ArrayRef> {
+        if args.len() < 2 {
+            return Err(BlazeError::analysis("NTH_VALUE requires two arguments"));
+        }
+
+        let value_array = args[0].evaluate(batch)?;
+
+        // Get the n value (1-indexed position)
+        let n_array = args[1].evaluate(batch)?;
+        let n = if let Some(int_arr) = n_array.as_any().downcast_ref::<Int64Array>() {
+            if int_arr.len() > 0 && !int_arr.is_null(0) {
+                int_arr.value(0) as usize
+            } else {
+                1
+            }
+        } else {
+            1
+        };
+
+        if n == 0 {
+            return Err(BlazeError::analysis("NTH_VALUE position must be >= 1"));
+        }
+
+        let mut result_values: Vec<Option<i64>> = vec![None; num_rows];
+
+        for (part_idx, partition_rows) in partitions.iter().enumerate() {
+            let indices = sorted_indices
+                .as_ref()
+                .map(|si| si[part_idx].clone())
+                .unwrap_or_else(|| partition_rows.clone());
+
+            if indices.len() < n {
+                // Not enough rows in partition
+                continue;
+            }
+
+            // Get the nth value (1-indexed, so n-1 for 0-indexed)
+            let nth_idx = indices[n - 1];
+            let nth_value = if !value_array.is_null(nth_idx) {
+                value_array.as_any().downcast_ref::<Int64Array>()
+                    .map(|arr| Some(arr.value(nth_idx)))
+                    .unwrap_or(None)
+            } else {
+                None
+            };
+
+            // Apply to all rows in partition
+            for &idx in &indices {
+                result_values[idx] = nth_value;
             }
         }
 

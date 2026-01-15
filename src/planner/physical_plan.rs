@@ -169,6 +169,29 @@ pub enum PhysicalPlan {
         /// Schema
         schema: Arc<ArrowSchema>,
     },
+
+    /// Copy query results to a file
+    Copy {
+        /// Input plan
+        input: Box<PhysicalPlan>,
+        /// Target file path
+        target: String,
+        /// Output format
+        format: CopyFormat,
+        /// Output schema
+        schema: Arc<ArrowSchema>,
+    },
+}
+
+/// Output format for COPY TO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFormat {
+    /// Parquet format
+    Parquet,
+    /// CSV format
+    Csv,
+    /// JSON Lines format
+    Json,
 }
 
 impl PhysicalPlan {
@@ -190,6 +213,7 @@ impl PhysicalPlan {
             PhysicalPlan::Explain { schema, .. } => schema.clone(),
             PhysicalPlan::Window { schema, .. } => schema.clone(),
             PhysicalPlan::ExplainAnalyze { schema, .. } => schema.clone(),
+            PhysicalPlan::Copy { schema, .. } => schema.clone(),
         }
     }
 
@@ -211,6 +235,7 @@ impl PhysicalPlan {
             PhysicalPlan::Explain { input, .. } => vec![input.as_ref()],
             PhysicalPlan::Window { input, .. } => vec![input.as_ref()],
             PhysicalPlan::ExplainAnalyze { input, .. } => vec![input.as_ref()],
+            PhysicalPlan::Copy { input, .. } => vec![input.as_ref()],
         }
     }
 
@@ -303,6 +328,10 @@ impl PhysicalPlan {
                 f.push_str(&format!("{}ExplainAnalyze: verbose={}\n", prefix, verbose));
                 input.format_indent(f, indent + 1);
             }
+            PhysicalPlan::Copy { input, target, format, .. } => {
+                f.push_str(&format!("{}Copy: target='{}' format={:?}\n", prefix, target, format));
+                input.format_indent(f, indent + 1);
+            }
         }
     }
 }
@@ -365,6 +394,10 @@ pub enum WindowFunction {
     DenseRank,
     /// NTILE(n) - divide into n buckets
     Ntile,
+    /// PERCENT_RANK() - relative rank (0 to 1)
+    PercentRank,
+    /// CUME_DIST() - cumulative distribution
+    CumeDist,
     /// LAG(expr, offset, default) - value at offset before current row
     Lag,
     /// LEAD(expr, offset, default) - value at offset after current row
@@ -386,6 +419,8 @@ impl std::fmt::Display for WindowFunction {
             WindowFunction::Rank => write!(f, "RANK"),
             WindowFunction::DenseRank => write!(f, "DENSE_RANK"),
             WindowFunction::Ntile => write!(f, "NTILE"),
+            WindowFunction::PercentRank => write!(f, "PERCENT_RANK"),
+            WindowFunction::CumeDist => write!(f, "CUME_DIST"),
             WindowFunction::Lag => write!(f, "LAG"),
             WindowFunction::Lead => write!(f, "LEAD"),
             WindowFunction::FirstValue => write!(f, "FIRST_VALUE"),
