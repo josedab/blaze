@@ -1,1 +1,29 @@
+# Rust build artifacts
 /target
+
+# WASM build artifacts
+/pkg
+/wasm/pkg
+/wasm/node_modules
+/wasm/dist
+
+# Node.js build artifacts
+/node/node_modules
+/node/dist
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Benchmark reports
+/target/criterion
+
+# Temporary files
+*.tmp
+*.log

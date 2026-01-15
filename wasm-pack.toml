@@ -1,0 +1,17 @@
+# wasm-pack configuration for Blaze SQL WASM build
+# See: https://rustwasm.github.io/docs/wasm-pack/
+
+[package]
+# Package name for npm
+name = "@blaze-sql/wasm"
+
+[package.metadata.wasm-pack.profile.release]
+# Optimize for size
+wasm-opt = ["-Os"]
+
+[package.metadata.wasm-pack.profile.dev]
+# Skip optimization in dev mode
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = ["-O4"]
