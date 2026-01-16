@@ -288,9 +288,10 @@ pub enum LogicalPlan {
 }
 
 /// Output format for COPY TO.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CopyFormat {
     /// Parquet format
+    #[default]
     Parquet,
     /// CSV format
     Csv,
@@ -310,12 +311,6 @@ impl CopyFormat {
     }
 }
 
-impl Default for CopyFormat {
-    fn default() -> Self {
-        Self::Parquet
-    }
-}
-
 impl fmt::Display for CopyFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -331,9 +326,9 @@ impl fmt::Display for CopyFormat {
 pub struct CopyOptions {
     /// Include header for CSV
     pub header: bool,
-    /// Delimiter for CSV
-    pub delimiter: Option<char>,
-    /// Compression (for future use)
+    /// Delimiter for CSV (as byte, e.g. b',')
+    pub delimiter: Option<u8>,
+    /// Compression codec (snappy, zstd, gzip, lz4, none)
     pub compression: Option<String>,
 }
 
@@ -444,8 +439,16 @@ impl LogicalPlan {
                 f.push_str(&format!(
                     "{}Aggregate: groupBy=[{}], aggrs=[{}]\n",
                     prefix,
-                    group_by.iter().map(|e| e.name()).collect::<Vec<_>>().join(", "),
-                    aggr_exprs.iter().map(|a| a.name()).collect::<Vec<_>>().join(", ")
+                    group_by
+                        .iter()
+                        .map(|e| e.name())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    aggr_exprs
+                        .iter()
+                        .map(|a| a.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
                 input.format_indent(f, indent + 1);
             }
@@ -453,12 +456,19 @@ impl LogicalPlan {
                 f.push_str(&format!(
                     "{}Sort: [{}]\n",
                     prefix,
-                    exprs.iter().map(|s| format!("{}", s)).collect::<Vec<_>>().join(", ")
+                    exprs
+                        .iter()
+                        .map(|s| format!("{}", s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
                 input.format_indent(f, indent + 1);
             }
             LogicalPlan::Limit { skip, fetch, input } => {
-                f.push_str(&format!("{}Limit: skip={}, fetch={:?}\n", prefix, skip, fetch));
+                f.push_str(&format!(
+                    "{}Limit: skip={}, fetch={:?}\n",
+                    prefix, skip, fetch
+                ));
                 input.format_indent(f, indent + 1);
             }
             LogicalPlan::Join {
@@ -485,7 +495,13 @@ impl LogicalPlan {
                 left.format_indent(f, indent + 1);
                 right.format_indent(f, indent + 1);
             }
-            LogicalPlan::SetOperation { left, right, op, all, .. } => {
+            LogicalPlan::SetOperation {
+                left,
+                right,
+                op,
+                all,
+                ..
+            } => {
                 f.push_str(&format!(
                     "{}{:?}{}\n",
                     prefix,
@@ -503,18 +519,28 @@ impl LogicalPlan {
                 f.push_str(&format!("{}Distinct\n", prefix));
                 input.format_indent(f, indent + 1);
             }
-            LogicalPlan::Window { window_exprs, input, .. } => {
+            LogicalPlan::Window {
+                window_exprs,
+                input,
+                ..
+            } => {
                 f.push_str(&format!(
                     "{}Window: [{}]\n",
                     prefix,
-                    window_exprs.iter().map(|e| e.name()).collect::<Vec<_>>().join(", ")
+                    window_exprs
+                        .iter()
+                        .map(|e| e.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
                 input.format_indent(f, indent + 1);
             }
             LogicalPlan::Values { values, .. } => {
                 f.push_str(&format!("{}Values: {} row(s)\n", prefix, values.len()));
             }
-            LogicalPlan::EmptyRelation { produce_one_row, .. } => {
+            LogicalPlan::EmptyRelation {
+                produce_one_row, ..
+            } => {
                 f.push_str(&format!(
                     "{}EmptyRelation: produce_one_row={}\n",
                     prefix, produce_one_row
@@ -528,7 +554,11 @@ impl LogicalPlan {
                 f.push_str(&format!("{}ExplainAnalyze: verbose={}\n", prefix, verbose));
                 plan.format_indent(f, indent + 1);
             }
-            LogicalPlan::CreateTable { name, if_not_exists, .. } => {
+            LogicalPlan::CreateTable {
+                name,
+                if_not_exists,
+                ..
+            } => {
                 f.push_str(&format!(
                     "{}CreateTable: {} if_not_exists={}\n",
                     prefix, name, if_not_exists
@@ -540,18 +570,29 @@ impl LogicalPlan {
                     prefix, name, if_exists
                 ));
             }
-            LogicalPlan::Insert { table_ref, input, .. } => {
+            LogicalPlan::Insert {
+                table_ref, input, ..
+            } => {
                 f.push_str(&format!("{}Insert: {}\n", prefix, table_ref));
                 input.format_indent(f, indent + 1);
             }
-            LogicalPlan::Delete { table_ref, predicate, .. } => {
+            LogicalPlan::Delete {
+                table_ref,
+                predicate,
+                ..
+            } => {
                 f.push_str(&format!("{}Delete: {}", prefix, table_ref));
                 if let Some(p) = predicate {
                     f.push_str(&format!(" where={}", p));
                 }
                 f.push('\n');
             }
-            LogicalPlan::Update { table_ref, assignments, predicate, .. } => {
+            LogicalPlan::Update {
+                table_ref,
+                assignments,
+                predicate,
+                ..
+            } => {
                 f.push_str(&format!(
                     "{}Update: {} set=[{}]",
                     prefix,
@@ -567,7 +608,12 @@ impl LogicalPlan {
                 }
                 f.push('\n');
             }
-            LogicalPlan::Copy { input, target, format, .. } => {
+            LogicalPlan::Copy {
+                input,
+                target,
+                format,
+                ..
+            } => {
                 f.push_str(&format!(
                     "{}Copy: target='{}' format={}\n",
                     prefix, target, format
@@ -787,12 +833,17 @@ impl LogicalPlanBuilder {
         for agg in aggr_exprs {
             // Determine type based on aggregate function
             let data_type = match agg.func {
-                AggregateFunc::Count | AggregateFunc::CountDistinct |
-                AggregateFunc::ApproxCountDistinct => DataType::Int64,
-                AggregateFunc::Sum | AggregateFunc::Avg |
-                AggregateFunc::ApproxPercentile | AggregateFunc::ApproxMedian => DataType::Float64,
-                AggregateFunc::Min | AggregateFunc::Max |
-                AggregateFunc::First | AggregateFunc::Last => {
+                AggregateFunc::Count
+                | AggregateFunc::CountDistinct
+                | AggregateFunc::ApproxCountDistinct => DataType::Int64,
+                AggregateFunc::Sum
+                | AggregateFunc::Avg
+                | AggregateFunc::ApproxPercentile
+                | AggregateFunc::ApproxMedian => DataType::Float64,
+                AggregateFunc::Min
+                | AggregateFunc::Max
+                | AggregateFunc::First
+                | AggregateFunc::Last => {
                     if let Some(arg) = agg.args.first() {
                         arg.data_type(input_schema)
                     } else {

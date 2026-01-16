@@ -81,10 +81,7 @@ pub enum LogicalExpr {
     },
 
     /// Unary operation
-    UnaryExpr {
-        op: UnaryOp,
-        expr: Box<LogicalExpr>,
-    },
+    UnaryExpr { op: UnaryOp, expr: Box<LogicalExpr> },
 
     /// IS NULL check
     IsNull(Box<LogicalExpr>),
@@ -342,12 +339,19 @@ impl LogicalExpr {
                     e.collect_columns(cols);
                 }
             }
-            Self::Between { expr, low, high, .. } => {
+            Self::Between {
+                expr, low, high, ..
+            } => {
                 expr.collect_columns(cols);
                 low.collect_columns(cols);
                 high.collect_columns(cols);
             }
-            Self::Like { expr, pattern, escape, .. } => {
+            Self::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
                 expr.collect_columns(cols);
                 pattern.collect_columns(cols);
                 if let Some(e) = escape {
@@ -390,7 +394,7 @@ impl LogicalExpr {
             Self::Column(col) => {
                 // Look up column in schema
                 for field in schema.fields() {
-                    if field.name() == &col.name {
+                    if field.name() == col.name {
                         return field.data_type().clone();
                     }
                 }
@@ -401,15 +405,20 @@ impl LogicalExpr {
             Self::BinaryExpr { left, op, right: _ } => {
                 // For comparison operators, result is Boolean
                 match op {
-                    BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::LtEq |
-                    BinaryOp::Gt | BinaryOp::GtEq | BinaryOp::And | BinaryOp::Or => {
-                        DataType::Boolean
-                    }
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq
+                    | BinaryOp::And
+                    | BinaryOp::Or => DataType::Boolean,
                     // For arithmetic, use the type of the left operand (simplified)
-                    BinaryOp::Plus | BinaryOp::Minus | BinaryOp::Multiply |
-                    BinaryOp::Divide | BinaryOp::Modulo => {
-                        left.data_type(schema)
-                    }
+                    BinaryOp::Plus
+                    | BinaryOp::Minus
+                    | BinaryOp::Multiply
+                    | BinaryOp::Divide
+                    | BinaryOp::Modulo => left.data_type(schema),
                     // Bitwise operations preserve type
                     BinaryOp::BitwiseAnd | BinaryOp::BitwiseOr | BinaryOp::BitwiseXor => {
                         left.data_type(schema)
@@ -418,17 +427,19 @@ impl LogicalExpr {
                     BinaryOp::Concat => DataType::Utf8,
                 }
             }
-            Self::UnaryExpr { op, expr } => {
-                match op {
-                    UnaryOp::Not => DataType::Boolean,
-                    UnaryOp::Negative | UnaryOp::BitwiseNot => expr.data_type(schema),
-                }
-            }
+            Self::UnaryExpr { op, expr } => match op {
+                UnaryOp::Not => DataType::Boolean,
+                UnaryOp::Negative | UnaryOp::BitwiseNot => expr.data_type(schema),
+            },
             Self::IsNull(_) | Self::IsNotNull(_) | Self::Not(_) => DataType::Boolean,
             Self::Negative(expr) => expr.data_type(schema),
             Self::Cast { data_type, .. } | Self::TryCast { data_type, .. } => data_type.clone(),
             Self::Alias { expr, .. } => expr.data_type(schema),
-            Self::Case { when_then_exprs, else_expr, .. } => {
+            Self::Case {
+                when_then_exprs,
+                else_expr,
+                ..
+            } => {
                 // Type is the type of the THEN expressions
                 if let Some((_, then_expr)) = when_then_exprs.first() {
                     then_expr.data_type(schema)
@@ -442,12 +453,17 @@ impl LogicalExpr {
             Self::Aggregate(agg) => {
                 // Aggregate types depend on function
                 match agg.func {
-                    AggregateFunc::Count | AggregateFunc::CountDistinct |
-                    AggregateFunc::ApproxCountDistinct => DataType::Int64,
-                    AggregateFunc::Sum | AggregateFunc::Avg |
-                    AggregateFunc::ApproxPercentile | AggregateFunc::ApproxMedian => DataType::Float64,
-                    AggregateFunc::Min | AggregateFunc::Max |
-                    AggregateFunc::First | AggregateFunc::Last => {
+                    AggregateFunc::Count
+                    | AggregateFunc::CountDistinct
+                    | AggregateFunc::ApproxCountDistinct => DataType::Int64,
+                    AggregateFunc::Sum
+                    | AggregateFunc::Avg
+                    | AggregateFunc::ApproxPercentile
+                    | AggregateFunc::ApproxMedian => DataType::Float64,
+                    AggregateFunc::Min
+                    | AggregateFunc::Max
+                    | AggregateFunc::First
+                    | AggregateFunc::Last => {
                         if let Some(arg) = agg.args.first() {
                             arg.data_type(schema)
                         } else {
@@ -461,8 +477,8 @@ impl LogicalExpr {
             Self::ScalarFunction { name, args } => {
                 // Return types for common scalar functions
                 match name.to_uppercase().as_str() {
-                    "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "CONCAT" |
-                    "SUBSTRING" | "REPLACE" => DataType::Utf8,
+                    "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "CONCAT" | "SUBSTRING"
+                    | "REPLACE" => DataType::Utf8,
                     "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::Int64,
                     "ABS" | "CEIL" | "FLOOR" | "ROUND" => {
                         if let Some(arg) = args.first() {

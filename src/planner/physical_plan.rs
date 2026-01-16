@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 
-use super::physical_expr::PhysicalExpr;
 use super::logical_expr::AggregateFunc;
 use super::logical_plan::{JoinType, TimeTravelSpec};
+use super::physical_expr::PhysicalExpr;
 
 /// A physical plan node that can be executed.
 #[derive(Debug)]
@@ -178,6 +178,8 @@ pub enum PhysicalPlan {
         target: String,
         /// Output format
         format: CopyFormat,
+        /// Copy options
+        options: super::logical_plan::CopyOptions,
         /// Output schema
         schema: Arc<ArrowSchema>,
     },
@@ -249,7 +251,12 @@ impl PhysicalPlan {
     fn format_indent(&self, f: &mut String, indent: usize) {
         let prefix = "  ".repeat(indent);
         match self {
-            PhysicalPlan::Scan { table_name, projection, filters, .. } => {
+            PhysicalPlan::Scan {
+                table_name,
+                projection,
+                filters,
+                ..
+            } => {
                 f.push_str(&format!("{}Scan: {}", prefix, table_name));
                 if let Some(proj) = projection {
                     f.push_str(&format!(" projection=[{:?}]", proj));
@@ -265,10 +272,19 @@ impl PhysicalPlan {
             }
             PhysicalPlan::Projection { exprs, input, .. } => {
                 let expr_names: Vec<_> = exprs.iter().map(|e| e.name().to_string()).collect();
-                f.push_str(&format!("{}Projection: [{}]\n", prefix, expr_names.join(", ")));
+                f.push_str(&format!(
+                    "{}Projection: [{}]\n",
+                    prefix,
+                    expr_names.join(", ")
+                ));
                 input.format_indent(f, indent + 1);
             }
-            PhysicalPlan::HashAggregate { group_by, aggr_exprs, input, .. } => {
+            PhysicalPlan::HashAggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                ..
+            } => {
                 let group_names: Vec<_> = group_by.iter().map(|e| e.name().to_string()).collect();
                 let aggr_names: Vec<_> = aggr_exprs.iter().map(|e| e.name()).collect();
                 f.push_str(&format!(
@@ -285,10 +301,18 @@ impl PhysicalPlan {
                 input.format_indent(f, indent + 1);
             }
             PhysicalPlan::Limit { skip, fetch, input } => {
-                f.push_str(&format!("{}Limit: skip={}, fetch={:?}\n", prefix, skip, fetch));
+                f.push_str(&format!(
+                    "{}Limit: skip={}, fetch={:?}\n",
+                    prefix, skip, fetch
+                ));
                 input.format_indent(f, indent + 1);
             }
-            PhysicalPlan::HashJoin { left, right, join_type, .. } => {
+            PhysicalPlan::HashJoin {
+                left,
+                right,
+                join_type,
+                ..
+            } => {
                 f.push_str(&format!("{}HashJoin: {:?}\n", prefix, join_type));
                 left.format_indent(f, indent + 1);
                 right.format_indent(f, indent + 1);
@@ -298,7 +322,12 @@ impl PhysicalPlan {
                 left.format_indent(f, indent + 1);
                 right.format_indent(f, indent + 1);
             }
-            PhysicalPlan::SortMergeJoin { left, right, join_type, .. } => {
+            PhysicalPlan::SortMergeJoin {
+                left,
+                right,
+                join_type,
+                ..
+            } => {
                 f.push_str(&format!("{}SortMergeJoin: {:?}\n", prefix, join_type));
                 left.format_indent(f, indent + 1);
                 right.format_indent(f, indent + 1);
@@ -312,24 +341,45 @@ impl PhysicalPlan {
             PhysicalPlan::Values { data, .. } => {
                 f.push_str(&format!("{}Values: {} batch(es)\n", prefix, data.len()));
             }
-            PhysicalPlan::Empty { produce_one_row, .. } => {
-                f.push_str(&format!("{}Empty: produce_one_row={}\n", prefix, produce_one_row));
+            PhysicalPlan::Empty {
+                produce_one_row, ..
+            } => {
+                f.push_str(&format!(
+                    "{}Empty: produce_one_row={}\n",
+                    prefix, produce_one_row
+                ));
             }
             PhysicalPlan::Explain { input, verbose, .. } => {
                 f.push_str(&format!("{}Explain: verbose={}\n", prefix, verbose));
                 input.format_indent(f, indent + 1);
             }
-            PhysicalPlan::Window { window_exprs, input, .. } => {
+            PhysicalPlan::Window {
+                window_exprs,
+                input,
+                ..
+            } => {
                 let window_names: Vec<_> = window_exprs.iter().map(|e| e.name()).collect();
-                f.push_str(&format!("{}Window: [{}]\n", prefix, window_names.join(", ")));
+                f.push_str(&format!(
+                    "{}Window: [{}]\n",
+                    prefix,
+                    window_names.join(", ")
+                ));
                 input.format_indent(f, indent + 1);
             }
             PhysicalPlan::ExplainAnalyze { input, verbose, .. } => {
                 f.push_str(&format!("{}ExplainAnalyze: verbose={}\n", prefix, verbose));
                 input.format_indent(f, indent + 1);
             }
-            PhysicalPlan::Copy { input, target, format, .. } => {
-                f.push_str(&format!("{}Copy: target='{}' format={:?}\n", prefix, target, format));
+            PhysicalPlan::Copy {
+                input,
+                target,
+                format,
+                ..
+            } => {
+                f.push_str(&format!(
+                    "{}Copy: target='{}' format={:?}\n",
+                    prefix, target, format
+                ));
                 input.format_indent(f, indent + 1);
             }
         }
@@ -379,7 +429,11 @@ pub struct SortExpr {
 
 impl SortExpr {
     pub fn new(expr: Arc<dyn PhysicalExpr>, ascending: bool, nulls_first: bool) -> Self {
-        Self { expr, ascending, nulls_first }
+        Self {
+            expr,
+            ascending,
+            nulls_first,
+        }
     }
 }
 
@@ -518,12 +572,18 @@ impl ExecutionStats {
 
     /// Add an extra metric
     pub fn add_metric(&mut self, name: &str, value: &str) {
-        self.extra_metrics.push((name.to_string(), value.to_string()));
+        self.extra_metrics
+            .push((name.to_string(), value.to_string()));
     }
 
     /// Get total elapsed time including children
     pub fn total_elapsed_nanos(&self) -> u64 {
-        self.elapsed_nanos + self.children.iter().map(|c| c.total_elapsed_nanos()).sum::<u64>()
+        self.elapsed_nanos
+            + self
+                .children
+                .iter()
+                .map(|c| c.total_elapsed_nanos())
+                .sum::<u64>()
     }
 
     /// Format as a tree for display
@@ -543,7 +603,10 @@ impl ExecutionStats {
 
         // Format memory nicely
         let memory_str = if self.peak_memory_bytes >= 1024 * 1024 * 1024 {
-            format!("{:.2}GB", self.peak_memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+            format!(
+                "{:.2}GB",
+                self.peak_memory_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            )
         } else if self.peak_memory_bytes >= 1024 * 1024 {
             format!("{:.2}MB", self.peak_memory_bytes as f64 / (1024.0 * 1024.0))
         } else if self.peak_memory_bytes >= 1024 {

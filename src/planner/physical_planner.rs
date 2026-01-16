@@ -10,11 +10,14 @@ use crate::error::{BlazeError, Result};
 use crate::planner::logical_expr::{BinaryOp, LogicalExpr, UnaryOp};
 use crate::planner::logical_plan::LogicalPlan;
 use crate::planner::physical_expr::{
-    BinaryExpr, BitwiseNotExpr, CastExpr, ColumnExpr, IsNotNullExpr, IsNullExpr, LiteralExpr, NotExpr, PhysicalExpr,
-    CaseExpr, BetweenExpr, LikeExpr, InListExpr, ScalarFunctionExpr,
-    ScalarSubqueryExpr, ExistsExpr, InSubqueryExpr,
+    BetweenExpr, BinaryExpr, BitwiseNotExpr, CaseExpr, CastExpr, ColumnExpr, ExistsExpr,
+    InListExpr, InSubqueryExpr, IsNotNullExpr, IsNullExpr, LikeExpr, LiteralExpr, NotExpr,
+    PhysicalExpr, ScalarFunctionExpr, ScalarSubqueryExpr,
 };
-use crate::planner::physical_plan::{AggregateExpr, CopyFormat as PhysicalCopyFormat, PhysicalPlan, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction};
+use crate::planner::physical_plan::{
+    AggregateExpr, CopyFormat as PhysicalCopyFormat, PhysicalPlan, SortExpr,
+    WindowExpr as PhysicalWindowExpr, WindowFunction,
+};
 use crate::types::ScalarValue;
 
 use arrow::record_batch::RecordBatch;
@@ -70,7 +73,11 @@ impl PhysicalPlanner {
                     .map(|f| {
                         if let Some(proj) = projection {
                             // Create a mapping from column name to original index
-                            self.create_physical_expr_with_projection_mapping(f, &output_schema, proj)
+                            self.create_physical_expr_with_projection_mapping(
+                                f,
+                                &output_schema,
+                                proj,
+                            )
                         } else {
                             self.create_physical_expr(f, &output_schema)
                         }
@@ -144,7 +151,7 @@ impl PhysicalPlanner {
                             .collect::<Result<Vec<_>>>()?;
 
                         Ok(AggregateExpr {
-                            func: a.func.clone(),
+                            func: a.func,
                             args,
                             distinct: a.distinct,
                             alias: None,
@@ -286,7 +293,11 @@ impl PhysicalPlanner {
                 })
             }
 
-            LogicalPlan::Window { window_exprs, input, schema } => {
+            LogicalPlan::Window {
+                window_exprs,
+                input,
+                schema,
+            } => {
                 let input_plan = self.create_physical_plan(input)?;
                 let input_schema = input_plan.schema();
 
@@ -337,9 +348,11 @@ impl PhysicalPlanner {
             LogicalPlan::Explain { plan, verbose } => {
                 let input_plan = self.create_physical_plan(plan)?;
                 // Explain output is a single column with the plan description
-                let explain_schema = ArrowSchema::new(vec![
-                    arrow::datatypes::Field::new("plan", arrow::datatypes::DataType::Utf8, false),
-                ]);
+                let explain_schema = ArrowSchema::new(vec![arrow::datatypes::Field::new(
+                    "plan",
+                    arrow::datatypes::DataType::Utf8,
+                    false,
+                )]);
                 Ok(PhysicalPlan::Explain {
                     input: Box::new(input_plan),
                     verbose: *verbose,
@@ -350,9 +363,11 @@ impl PhysicalPlanner {
             LogicalPlan::ExplainAnalyze { plan, verbose } => {
                 let input_plan = self.create_physical_plan(plan)?;
                 // ExplainAnalyze output is a single column with the plan and statistics
-                let explain_schema = ArrowSchema::new(vec![
-                    arrow::datatypes::Field::new("plan", arrow::datatypes::DataType::Utf8, false),
-                ]);
+                let explain_schema = ArrowSchema::new(vec![arrow::datatypes::Field::new(
+                    "plan",
+                    arrow::datatypes::DataType::Utf8,
+                    false,
+                )]);
                 Ok(PhysicalPlan::ExplainAnalyze {
                     input: Box::new(input_plan),
                     verbose: *verbose,
@@ -371,10 +386,18 @@ impl PhysicalPlanner {
                 ))
             }
 
-            LogicalPlan::Copy { input, target, format, .. } => {
+            LogicalPlan::Copy {
+                input,
+                target,
+                format,
+                options,
+                ..
+            } => {
                 let physical_input = self.create_physical_plan(input)?;
                 let physical_format = match format {
-                    crate::planner::logical_plan::CopyFormat::Parquet => PhysicalCopyFormat::Parquet,
+                    crate::planner::logical_plan::CopyFormat::Parquet => {
+                        PhysicalCopyFormat::Parquet
+                    }
                     crate::planner::logical_plan::CopyFormat::Csv => PhysicalCopyFormat::Csv,
                     crate::planner::logical_plan::CopyFormat::Json => PhysicalCopyFormat::Json,
                 };
@@ -383,6 +406,7 @@ impl PhysicalPlanner {
                     input: Box::new(physical_input),
                     target: target.clone(),
                     format: physical_format,
+                    options: options.clone(),
                     schema: Arc::new(ArrowSchema::empty()),
                 })
             }
@@ -703,8 +727,16 @@ impl PhysicalPlanner {
             LogicalExpr::Literal(value) => Ok(Arc::new(LiteralExpr::new(value.clone()))),
 
             LogicalExpr::BinaryExpr { left, op, right } => {
-                let left_expr = self.create_physical_expr_with_projection_mapping(left, projected_schema, projection)?;
-                let right_expr = self.create_physical_expr_with_projection_mapping(right, projected_schema, projection)?;
+                let left_expr = self.create_physical_expr_with_projection_mapping(
+                    left,
+                    projected_schema,
+                    projection,
+                )?;
+                let right_expr = self.create_physical_expr_with_projection_mapping(
+                    right,
+                    projected_schema,
+                    projection,
+                )?;
 
                 let op_str = match op {
                     BinaryOp::Eq => "eq",
@@ -730,17 +762,29 @@ impl PhysicalPlanner {
             }
 
             LogicalExpr::Not(inner) => {
-                let inner_expr = self.create_physical_expr_with_projection_mapping(inner, projected_schema, projection)?;
+                let inner_expr = self.create_physical_expr_with_projection_mapping(
+                    inner,
+                    projected_schema,
+                    projection,
+                )?;
                 Ok(Arc::new(NotExpr::new(inner_expr)))
             }
 
             LogicalExpr::IsNull(inner) => {
-                let inner_expr = self.create_physical_expr_with_projection_mapping(inner, projected_schema, projection)?;
+                let inner_expr = self.create_physical_expr_with_projection_mapping(
+                    inner,
+                    projected_schema,
+                    projection,
+                )?;
                 Ok(Arc::new(IsNullExpr::new(inner_expr)))
             }
 
             LogicalExpr::IsNotNull(inner) => {
-                let inner_expr = self.create_physical_expr_with_projection_mapping(inner, projected_schema, projection)?;
+                let inner_expr = self.create_physical_expr_with_projection_mapping(
+                    inner,
+                    projected_schema,
+                    projection,
+                )?;
                 Ok(Arc::new(IsNotNullExpr::new(inner_expr)))
             }
 
@@ -795,11 +839,7 @@ impl PhysicalPlanner {
                     .iter()
                     .map(|sort_expr| {
                         let expr = self.create_physical_expr(&sort_expr.expr, schema)?;
-                        Ok(SortExpr::new(
-                            expr,
-                            sort_expr.asc,
-                            sort_expr.nulls_first,
-                        ))
+                        Ok(SortExpr::new(expr, sort_expr.asc, sort_expr.nulls_first))
                     })
                     .collect::<Result<Vec<_>>>()?;
 
@@ -875,10 +915,10 @@ impl Default for PhysicalPlanner {
 mod tests {
     use super::*;
     use crate::catalog::ResolvedTableRef;
-    use crate::planner::logical_plan::LogicalPlanBuilder;
     use crate::planner::logical_expr::{AggregateExpr, Column as LogicalColumn};
-    use crate::planner::JoinType;
+    use crate::planner::logical_plan::LogicalPlanBuilder;
     use crate::planner::logical_plan::SetOperation;
+    use crate::planner::JoinType;
     use crate::types::{DataType, Field, Schema};
     use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
 
@@ -903,8 +943,7 @@ mod tests {
         ]);
 
         let table_ref = ResolvedTableRef::new("default", "main", "users");
-        let logical_plan = LogicalPlanBuilder::scan(table_ref, schema.clone())
-            .build();
+        let logical_plan = LogicalPlanBuilder::scan(table_ref, schema.clone()).build();
 
         let planner = PhysicalPlanner::new();
         let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
@@ -1025,16 +1064,14 @@ mod tests {
         let schema = create_test_schema();
         let table_ref = create_test_table_ref();
 
-        let sort_exprs = vec![
-            crate::planner::logical_expr::SortExpr {
-                expr: LogicalExpr::Column(LogicalColumn {
-                    relation: None,
-                    name: "age".to_string(),
-                }),
-                asc: true,
-                nulls_first: false,
-            }
-        ];
+        let sort_exprs = vec![crate::planner::logical_expr::SortExpr {
+            expr: LogicalExpr::Column(LogicalColumn {
+                relation: None,
+                name: "age".to_string(),
+            }),
+            asc: true,
+            nulls_first: false,
+        }];
 
         let logical_plan = LogicalPlanBuilder::scan(table_ref, schema)
             .sort(sort_exprs)
@@ -1060,19 +1097,15 @@ mod tests {
         let table_ref = create_test_table_ref();
 
         // Build: SELECT category, SUM(amount) FROM users GROUP BY category
-        let group_exprs = vec![
-            LogicalExpr::Column(LogicalColumn {
-                relation: None,
-                name: "category".to_string(),
-            })
-        ];
+        let group_exprs = vec![LogicalExpr::Column(LogicalColumn {
+            relation: None,
+            name: "category".to_string(),
+        })];
 
-        let agg_exprs = vec![
-            AggregateExpr::sum(LogicalExpr::Column(LogicalColumn {
-                relation: None,
-                name: "amount".to_string(),
-            }))
-        ];
+        let agg_exprs = vec![AggregateExpr::sum(LogicalExpr::Column(LogicalColumn {
+            relation: None,
+            name: "amount".to_string(),
+        }))];
 
         let logical_plan = LogicalPlanBuilder::scan(table_ref, schema)
             .aggregate(group_exprs, agg_exprs)
@@ -1083,7 +1116,11 @@ mod tests {
         let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
 
         match physical_plan {
-            PhysicalPlan::HashAggregate { group_by, aggr_exprs, .. } => {
+            PhysicalPlan::HashAggregate {
+                group_by,
+                aggr_exprs,
+                ..
+            } => {
                 assert_eq!(group_by.len(), 1);
                 assert_eq!(aggr_exprs.len(), 1);
             }
@@ -1190,9 +1227,11 @@ mod tests {
     #[test]
     fn test_create_physical_expr_binary_eq() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("id", ArrowDataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "id",
+            ArrowDataType::Int64,
+            false,
+        )]));
 
         let expr = LogicalExpr::BinaryExpr {
             left: Box::new(LogicalExpr::Column(LogicalColumn {
@@ -1210,9 +1249,11 @@ mod tests {
     #[test]
     fn test_create_physical_expr_is_null() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("value", ArrowDataType::Int64, true),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "value",
+            ArrowDataType::Int64,
+            true,
+        )]));
 
         let expr = LogicalExpr::IsNull(Box::new(LogicalExpr::Column(LogicalColumn {
             relation: None,
@@ -1226,9 +1267,11 @@ mod tests {
     #[test]
     fn test_create_physical_expr_is_not_null() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("value", ArrowDataType::Int64, true),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "value",
+            ArrowDataType::Int64,
+            true,
+        )]));
 
         let expr = LogicalExpr::IsNotNull(Box::new(LogicalExpr::Column(LogicalColumn {
             relation: None,
@@ -1236,15 +1279,20 @@ mod tests {
         })));
         let physical = planner.create_physical_expr(&expr, &schema).unwrap();
 
-        assert!(physical.name().to_lowercase().contains("null") || physical.name().to_lowercase().contains("not"));
+        assert!(
+            physical.name().to_lowercase().contains("null")
+                || physical.name().to_lowercase().contains("not")
+        );
     }
 
     #[test]
     fn test_create_physical_expr_not() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("active", ArrowDataType::Boolean, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "active",
+            ArrowDataType::Boolean,
+            false,
+        )]));
 
         let expr = LogicalExpr::UnaryExpr {
             op: UnaryOp::Not,
@@ -1261,9 +1309,11 @@ mod tests {
     #[test]
     fn test_create_physical_expr_between() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("age", ArrowDataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "age",
+            ArrowDataType::Int64,
+            false,
+        )]));
 
         let expr = LogicalExpr::Between {
             expr: Box::new(LogicalExpr::Column(LogicalColumn {
@@ -1282,9 +1332,11 @@ mod tests {
     #[test]
     fn test_create_physical_expr_like() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("name", ArrowDataType::Utf8, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "name",
+            ArrowDataType::Utf8,
+            false,
+        )]));
 
         let expr = LogicalExpr::Like {
             negated: false,
@@ -1292,7 +1344,9 @@ mod tests {
                 relation: None,
                 name: "name".to_string(),
             })),
-            pattern: Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some("A%".to_string())))),
+            pattern: Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some(
+                "A%".to_string(),
+            )))),
             escape: None,
         };
         let physical = planner.create_physical_expr(&expr, &schema).unwrap();
@@ -1303,9 +1357,11 @@ mod tests {
     #[test]
     fn test_create_physical_expr_in_list() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("status", ArrowDataType::Utf8, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "status",
+            ArrowDataType::Utf8,
+            false,
+        )]));
 
         let expr = LogicalExpr::InList {
             expr: Box::new(LogicalExpr::Column(LogicalColumn {
@@ -1326,26 +1382,28 @@ mod tests {
     #[test]
     fn test_create_physical_expr_case() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("age", ArrowDataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "age",
+            ArrowDataType::Int64,
+            false,
+        )]));
 
         let expr = LogicalExpr::Case {
             expr: None,
-            when_then_exprs: vec![
-                (
-                    LogicalExpr::BinaryExpr {
-                        left: Box::new(LogicalExpr::Column(LogicalColumn {
-                            relation: None,
-                            name: "age".to_string(),
-                        })),
-                        op: BinaryOp::Gt,
-                        right: Box::new(LogicalExpr::Literal(ScalarValue::Int64(Some(18)))),
-                    },
-                    LogicalExpr::Literal(ScalarValue::Utf8(Some("adult".to_string()))),
-                )
-            ],
-            else_expr: Some(Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some("minor".to_string()))))),
+            when_then_exprs: vec![(
+                LogicalExpr::BinaryExpr {
+                    left: Box::new(LogicalExpr::Column(LogicalColumn {
+                        relation: None,
+                        name: "age".to_string(),
+                    })),
+                    op: BinaryOp::Gt,
+                    right: Box::new(LogicalExpr::Literal(ScalarValue::Int64(Some(18)))),
+                },
+                LogicalExpr::Literal(ScalarValue::Utf8(Some("adult".to_string()))),
+            )],
+            else_expr: Some(Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some(
+                "minor".to_string(),
+            ))))),
         };
         let physical = planner.create_physical_expr(&expr, &schema).unwrap();
 
@@ -1355,9 +1413,11 @@ mod tests {
     #[test]
     fn test_create_physical_expr_cast() {
         let planner = PhysicalPlanner::new();
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("value", ArrowDataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "value",
+            ArrowDataType::Int64,
+            false,
+        )]));
 
         let expr = LogicalExpr::Cast {
             expr: Box::new(LogicalExpr::Column(LogicalColumn {
@@ -1368,7 +1428,10 @@ mod tests {
         };
         let physical = planner.create_physical_expr(&expr, &schema).unwrap();
 
-        assert!(physical.name().to_lowercase().contains("cast") || physical.name().to_lowercase().contains("float"));
+        assert!(
+            physical.name().to_lowercase().contains("cast")
+                || physical.name().to_lowercase().contains("float")
+        );
     }
 
     #[test]
@@ -1400,8 +1463,14 @@ mod tests {
             right: Arc::new(right_plan),
             join_type: JoinType::Inner,
             on: vec![(
-                LogicalExpr::Column(LogicalColumn { relation: None, name: "id".to_string() }),
-                LogicalExpr::Column(LogicalColumn { relation: None, name: "user_id".to_string() }),
+                LogicalExpr::Column(LogicalColumn {
+                    relation: None,
+                    name: "id".to_string(),
+                }),
+                LogicalExpr::Column(LogicalColumn {
+                    relation: None,
+                    name: "user_id".to_string(),
+                }),
             )],
             filter: None,
             schema: join_schema,
@@ -1420,12 +1489,8 @@ mod tests {
 
     #[test]
     fn test_physical_planner_cross_join() {
-        let left_schema = Schema::new(vec![
-            Field::new("a", DataType::Int64, false),
-        ]);
-        let right_schema = Schema::new(vec![
-            Field::new("b", DataType::Int64, false),
-        ]);
+        let left_schema = Schema::new(vec![Field::new("a", DataType::Int64, false)]);
+        let right_schema = Schema::new(vec![Field::new("b", DataType::Int64, false)]);
 
         let left_table_ref = ResolvedTableRef::new("default", "main", "t1");
         let right_table_ref = ResolvedTableRef::new("default", "main", "t2");
@@ -1455,9 +1520,7 @@ mod tests {
 
     #[test]
     fn test_physical_planner_union() {
-        let schema = Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]);
+        let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
 
         let table_ref1 = ResolvedTableRef::new("default", "main", "t1");
         let table_ref2 = ResolvedTableRef::new("default", "main", "t2");
@@ -1492,12 +1555,10 @@ mod tests {
         ]);
 
         let logical_plan = LogicalPlan::Values {
-            values: vec![
-                vec![
-                    LogicalExpr::Literal(ScalarValue::Int64(Some(1))),
-                    LogicalExpr::Literal(ScalarValue::Utf8(Some("hello".to_string()))),
-                ],
-            ],
+            values: vec![vec![
+                LogicalExpr::Literal(ScalarValue::Int64(Some(1))),
+                LogicalExpr::Literal(ScalarValue::Utf8(Some("hello".to_string()))),
+            ]],
             schema: schema.clone(),
         };
 
@@ -1513,9 +1574,7 @@ mod tests {
 
     #[test]
     fn test_physical_planner_empty_relation() {
-        let schema = Schema::new(vec![
-            Field::new("a", DataType::Int64, false),
-        ]);
+        let schema = Schema::new(vec![Field::new("a", DataType::Int64, false)]);
 
         let logical_plan = LogicalPlan::EmptyRelation {
             produce_one_row: false,
@@ -1526,7 +1585,9 @@ mod tests {
         let physical_plan = planner.create_physical_plan(&logical_plan).unwrap();
 
         match physical_plan {
-            PhysicalPlan::Empty { produce_one_row, .. } => {
+            PhysicalPlan::Empty {
+                produce_one_row, ..
+            } => {
                 assert!(!produce_one_row);
             }
             _ => panic!("Expected Empty plan"),
