@@ -130,6 +130,52 @@ CREATE TABLE users (
 DROP TABLE [IF EXISTS] table_name
 ```
 
+### COPY TO
+
+Export query results to files in various formats:
+
+```sql
+COPY (query) TO 'path/to/file'
+COPY (query) TO 'path/to/file' WITH (FORMAT format_name [, options...])
+```
+
+#### Formats
+
+| Format | Extension | Description |
+|--------|-----------|-------------|
+| `PARQUET` | `.parquet` | Columnar format, best for analytics |
+| `CSV` | `.csv` | Comma-separated values |
+| `JSON` | `.json` | JSON Lines format |
+
+#### Examples
+
+```sql
+-- Export to Parquet (default, auto-detected from extension)
+COPY (SELECT * FROM sales WHERE year = 2024) TO 'sales_2024.parquet'
+
+-- Export to CSV with header
+COPY (SELECT * FROM users) TO 'users.csv' WITH (FORMAT CSV, HEADER true)
+
+-- Export to JSON
+COPY (SELECT id, name, email FROM customers) TO 'customers.json' WITH (FORMAT JSON)
+
+-- Export aggregated results
+COPY (
+    SELECT region, SUM(amount) as total
+    FROM sales
+    GROUP BY region
+    ORDER BY total DESC
+) TO 'regional_summary.parquet'
+```
+
+#### Options
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `FORMAT` | `PARQUET`, `CSV`, `JSON` | Output format |
+| `HEADER` | `true`, `false` | Include header row (CSV only) |
+| `DELIMITER` | character | Field delimiter (CSV only, default `,`) |
+
 ## Data Types
 
 | SQL Type | Description | Arrow Type |
@@ -297,7 +343,19 @@ GROUP BY department
 ROW_NUMBER() OVER (ORDER BY column)
 RANK() OVER (ORDER BY column)
 DENSE_RANK() OVER (ORDER BY column)
+NTILE(n) OVER (ORDER BY column)            -- Divide into n buckets
+PERCENT_RANK() OVER (ORDER BY column)      -- Relative rank (0-1)
+CUME_DIST() OVER (ORDER BY column)         -- Cumulative distribution
 ```
+
+| Function | Description |
+|----------|-------------|
+| `ROW_NUMBER()` | Unique sequential number for each row |
+| `RANK()` | Rank with gaps for ties |
+| `DENSE_RANK()` | Rank without gaps for ties |
+| `NTILE(n)` | Divide rows into n equal buckets |
+| `PERCENT_RANK()` | (rank - 1) / (count - 1), range 0-1 |
+| `CUME_DIST()` | Fraction of rows ≤ current row |
 
 ### Value Functions
 
@@ -306,7 +364,16 @@ LAG(column, offset, default) OVER (ORDER BY column)
 LEAD(column, offset, default) OVER (ORDER BY column)
 FIRST_VALUE(column) OVER (ORDER BY column)
 LAST_VALUE(column) OVER (ORDER BY column)
+NTH_VALUE(column, n) OVER (ORDER BY column)
 ```
+
+| Function | Description |
+|----------|-------------|
+| `LAG(col, n, default)` | Value n rows before current |
+| `LEAD(col, n, default)` | Value n rows after current |
+| `FIRST_VALUE(col)` | First value in window frame |
+| `LAST_VALUE(col)` | Last value in window frame |
+| `NTH_VALUE(col, n)` | Nth value in window frame |
 
 ### Aggregate Windows
 
@@ -314,6 +381,25 @@ LAST_VALUE(column) OVER (ORDER BY column)
 SUM(column) OVER (ORDER BY date)           -- Running total
 AVG(column) OVER (PARTITION BY group)      -- Group average
 COUNT(*) OVER ()                           -- Total count
+```
+
+### Window Examples
+
+```sql
+-- Quartile assignment
+SELECT name, score,
+    NTILE(4) OVER (ORDER BY score DESC) as quartile
+FROM students
+
+-- Percentile ranking
+SELECT name, salary,
+    PERCENT_RANK() OVER (ORDER BY salary) as percentile
+FROM employees
+
+-- Compare to nth value
+SELECT product, revenue,
+    NTH_VALUE(product, 1) OVER (ORDER BY revenue DESC) as top_product
+FROM sales
 ```
 
 ## Scalar Functions
@@ -330,6 +416,15 @@ COUNT(*) OVER ()                           -- Total count
 | `RTRIM(s)` | Right trim | `RTRIM('hi  ')` → `'hi'` |
 | `CONCAT(a, b, ...)` | Concatenate | `CONCAT('a', 'b')` → `'ab'` |
 | `SUBSTRING(s, start, len)` | Extract substring | `SUBSTRING('hello', 2, 3)` → `'ell'` |
+| `REPLACE(s, from, to)` | Replace occurrences | `REPLACE('hello', 'l', 'L')` → `'heLLo'` |
+| `LEFT(s, n)` | First n characters | `LEFT('hello', 3)` → `'hel'` |
+| `RIGHT(s, n)` | Last n characters | `RIGHT('hello', 3)` → `'llo'` |
+| `LPAD(s, len, pad)` | Left pad to length | `LPAD('hi', 5, '0')` → `'000hi'` |
+| `RPAD(s, len, pad)` | Right pad to length | `RPAD('hi', 5, '0')` → `'hi000'` |
+| `REVERSE(s)` | Reverse string | `REVERSE('hello')` → `'olleh'` |
+| `SPLIT_PART(s, delim, n)` | Get nth split part | `SPLIT_PART('a,b,c', ',', 2)` → `'b'` |
+| `REGEXP_MATCH(s, pattern)` | Regex match | `REGEXP_MATCH('hello', 'e.+o')` → `true` |
+| `REGEXP_REPLACE(s, pat, rep)` | Regex replace | `REGEXP_REPLACE('hello', '[aeiou]', 'X')` → `'hXllX'` |
 
 ### Math Functions
 
@@ -348,16 +443,55 @@ COUNT(*) OVER ()                           -- Total count
 | `CURRENT_TIMESTAMP`, `NOW()` | Current timestamp |
 | `EXTRACT(field FROM date)` | Extract date part |
 | `DATE_TRUNC(unit, date)` | Truncate to unit |
+| `YEAR(date)` | Extract year |
+| `MONTH(date)` | Extract month (1-12) |
+| `DAY(date)` | Extract day of month |
+| `HOUR(timestamp)` | Extract hour (0-23) |
+| `MINUTE(timestamp)` | Extract minute (0-59) |
+| `SECOND(timestamp)` | Extract second (0-59) |
+| `DATE_ADD(date, interval)` | Add interval to date |
+| `DATE_SUB(date, interval)` | Subtract interval from date |
+| `DATE_DIFF(date1, date2)` | Days between dates |
+| `TO_DATE(string, format)` | Parse string to date |
+| `TO_TIMESTAMP(string, format)` | Parse string to timestamp |
 
 ```sql
 -- Extract parts
 SELECT EXTRACT(YEAR FROM created_at) as year
+SELECT YEAR(created_at), MONTH(created_at), DAY(created_at)
 
 -- Truncate to day
 SELECT DATE_TRUNC('day', timestamp) as day
 
 -- Current time
 SELECT CURRENT_TIMESTAMP as now
+
+-- Date arithmetic
+SELECT DATE_ADD(order_date, 30) as due_date
+SELECT DATE_DIFF(end_date, start_date) as duration_days
+
+-- Parse dates
+SELECT TO_DATE('2024-01-15', 'YYYY-MM-DD')
+SELECT TO_TIMESTAMP('2024-01-15 10:30:00', 'YYYY-MM-DD HH:MI:SS')
+```
+
+### Utility Functions
+
+| Function | Description |
+|----------|-------------|
+| `GREATEST(a, b, ...)` | Maximum of values |
+| `LEAST(a, b, ...)` | Minimum of values |
+| `IFNULL(value, default)` | Return default if null |
+| `NVL(value, default)` | Return default if null (Oracle-style) |
+
+```sql
+-- Get max/min across columns
+SELECT GREATEST(score1, score2, score3) as best_score
+SELECT LEAST(price1, price2) as lowest_price
+
+-- Handle nulls
+SELECT IFNULL(nickname, 'Anonymous') as display_name
+SELECT NVL(commission, 0) as commission
 ```
 
 ### Null Functions

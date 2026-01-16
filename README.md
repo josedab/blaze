@@ -10,7 +10,8 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 - **Embeddable**: In-process database with zero network overhead
 - **SQL Support**: SELECT, JOIN, GROUP BY, window functions, CTEs, and more
 - **Prepared Statements**: Safe parameterized queries with `$1`, `$2` syntax
-- **Python Bindings**: Use Blaze from Python with PyO3 integration
+- **Multi-Platform**: Rust library, CLI, WASM, Node.js, Python, and C FFI bindings
+- **COPY TO**: Export query results to Parquet, CSV, or JSON files
 
 ## Quick Start
 
@@ -138,12 +139,39 @@ fn main() -> Result<()> {
 ## CLI Usage
 
 ```bash
+# Interactive REPL
 cargo run
 
 blaze> .tables
 blaze> .read sales data/sales.csv
 blaze> SELECT * FROM sales LIMIT 10;
 blaze> exit
+
+# Execute SQL file
+cargo run -- script.sql
+
+# Execute query directly
+cargo run -- -c "SELECT 1 + 1 AS result"
+
+# Output formats
+cargo run -- -c "SELECT * FROM users" --format json
+cargo run -- -c "SELECT * FROM users" --format csv
+cargo run -- -c "SELECT * FROM users" --format table
+
+# Output to file
+cargo run -- -c "SELECT * FROM users" --format csv --output results.csv
+```
+
+### Session Commands
+
+```
+.help              Show available commands
+.tables            List all tables
+.schema <table>    Show table schema
+.read <name> <f>   Load CSV file as table
+.timer on|off      Toggle query timing
+.mode csv|json     Set output format
+.output <file>     Redirect output to file
 ```
 
 ## Building
@@ -155,13 +183,91 @@ cargo test             # Run tests
 cargo clippy           # Linting
 ```
 
+## Benchmarks
+
+Run the benchmark suite:
+
+```bash
+cargo bench
+```
+
+Benchmarks include:
+- Table scans at various sizes
+- Filter operations (equality, range, string)
+- Aggregations (COUNT, SUM, AVG, GROUP BY)
+- Sorting (single/multi-column, ASC/DESC)
+- Joins (INNER, LEFT at various sizes)
+- Window functions (ROW_NUMBER, RANK, LAG, running sum)
+- Complex queries (CTEs, subqueries)
+
+## Language Bindings
+
+### WASM (Browser/Node.js)
+
+```bash
+npm install @blaze-sql/wasm
+```
+
+```typescript
+import { initBlaze, BlazeDB } from '@blaze-sql/wasm';
+
+await initBlaze();
+const db = new BlazeDB();
+db.registerJson('users', [{ id: 1, name: 'Alice' }]);
+const result = db.query('SELECT * FROM users');
+```
+
+See [`wasm/README.md`](wasm/README.md) for full documentation.
+
+### Node.js
+
+```bash
+npm install @blaze-sql/node
+```
+
+```typescript
+import { BlazeDB } from '@blaze-sql/node';
+
+const db = await BlazeDB.create();
+await db.registerCsv('users', './users.csv');
+const result = db.query('SELECT * FROM users');
+```
+
+See [`node/README.md`](node/README.md) for full documentation.
+
+### C FFI
+
+Build with FFI support:
+
+```bash
+cargo build --release --features c-ffi
+```
+
+```c
+#include "blaze.h"
+
+BlazeConnection* conn = blaze_connection_new();
+BlazeResult* result = blaze_query(conn, "SELECT 1 + 1");
+printf("Rows: %lld\n", blaze_result_row_count(result));
+blaze_result_free(result);
+blaze_connection_free(conn);
+```
+
+See [`include/blaze.h`](include/blaze.h) for the full C API.
+
 ## Examples
 
 See the `examples/` directory for usage examples:
 
 ```bash
 cargo run --example basic_queries
+cargo run --example advanced_queries
 ```
+
+- `basic_queries.rs` - Simple queries, joins, aggregations
+- `advanced_queries.rs` - Window functions, CTEs, subqueries, set operations
+- `python_notebook.ipynb` - PyArrow/Pandas/Polars integration
+- `browser_playground.html` - Interactive web-based SQL playground
 
 ## Supported SQL Features
 
@@ -184,7 +290,29 @@ cargo run --example basic_queries
 - BETWEEN, LIKE, IN operators
 - IS NULL, IS NOT NULL
 - CAST expressions
-- Scalar functions: UPPER, LOWER, TRIM, LTRIM, RTRIM, LENGTH, CONCAT, SUBSTRING, ABS, ROUND, CEIL, FLOOR, COALESCE, NULLIF
+
+### Scalar Functions
+- **String**: UPPER, LOWER, TRIM, LTRIM, RTRIM, LENGTH, CONCAT, SUBSTRING, REPLACE, LEFT, RIGHT, LPAD, RPAD, REVERSE, SPLIT_PART, REGEXP_MATCH, REGEXP_REPLACE
+- **Math**: ABS, ROUND, CEIL, FLOOR, SQRT, POWER, MOD
+- **Date/Time**: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DATE_ADD, DATE_SUB, DATE_DIFF, TO_DATE, TO_TIMESTAMP, CURRENT_DATE, CURRENT_TIMESTAMP
+- **Utility**: COALESCE, NULLIF, IFNULL, NVL, GREATEST, LEAST
+
+### Window Functions
+- Ranking: ROW_NUMBER, RANK, DENSE_RANK, NTILE, PERCENT_RANK, CUME_DIST
+- Value: LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE
+- Aggregate: SUM, AVG, COUNT, MIN, MAX (with OVER clause)
+
+### Data Export (COPY TO)
+```sql
+-- Export to Parquet
+COPY (SELECT * FROM users) TO 'output.parquet';
+
+-- Export to CSV
+COPY (SELECT * FROM users) TO 'output.csv' WITH (FORMAT CSV, HEADER true);
+
+-- Export to JSON
+COPY (SELECT * FROM users) TO 'output.json' WITH (FORMAT JSON);
+```
 
 ### DDL/DML (In-Memory Tables Only)
 - CREATE TABLE
@@ -254,7 +382,15 @@ src/
 ├── optimizer/       # Query optimization rules
 ├── parallel/        # Parallel execution
 ├── simd/            # SIMD optimizations
+├── ffi/             # C FFI bindings
+├── wasm/            # WASM bindings
 └── python/          # Python bindings (PyO3)
+
+wasm/                # @blaze-sql/wasm npm package
+node/                # @blaze-sql/node npm package
+include/             # C header files
+benches/             # Criterion benchmarks
+examples/            # Usage examples
 ```
 
 ## Documentation
