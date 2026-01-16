@@ -13,7 +13,7 @@ pub use operators::*;
 
 use crate::catalog::CatalogList;
 use crate::error::Result;
-use crate::planner::{JoinType, PhysicalPlan, ExecutionStats, TimeTravelSpec};
+use crate::planner::{ExecutionStats, JoinType, PhysicalPlan, TimeTravelSpec};
 
 /// Execution context for query execution.
 #[derive(Clone)]
@@ -47,7 +47,7 @@ impl ExecutionContext {
     /// Panics if batch_size is 0 or exceeds MAX_BATCH_SIZE.
     pub fn with_batch_size(mut self, batch_size: usize) -> Self {
         assert!(
-            batch_size >= Self::MIN_BATCH_SIZE && batch_size <= Self::MAX_BATCH_SIZE,
+            (Self::MIN_BATCH_SIZE..=Self::MAX_BATCH_SIZE).contains(&batch_size),
             "batch_size must be between {} and {}, got {}",
             Self::MIN_BATCH_SIZE,
             Self::MAX_BATCH_SIZE,
@@ -152,18 +152,37 @@ impl Executor {
     /// Internal execute implementation without memory tracking (to avoid double-counting).
     fn execute_plan(&mut self, plan: &PhysicalPlan) -> Result<Vec<RecordBatch>> {
         match plan {
-            PhysicalPlan::Scan { table_name, projection, schema, filters, time_travel } => {
-                self.execute_scan(table_name, projection.as_deref(), schema, filters, time_travel.as_ref())
-            }
+            PhysicalPlan::Scan {
+                table_name,
+                projection,
+                schema,
+                filters,
+                time_travel,
+            } => self.execute_scan(
+                table_name,
+                projection.as_deref(),
+                schema,
+                filters,
+                time_travel.as_ref(),
+            ),
             PhysicalPlan::Filter { predicate, input } => {
                 let input_batches = self.execute_plan(input)?;
                 self.execute_filter(predicate, input_batches)
             }
-            PhysicalPlan::Projection { exprs, schema, input } => {
+            PhysicalPlan::Projection {
+                exprs,
+                schema,
+                input,
+            } => {
                 let input_batches = self.execute_plan(input)?;
                 self.execute_projection(exprs, schema, input_batches)
             }
-            PhysicalPlan::HashAggregate { group_by, aggr_exprs, schema, input } => {
+            PhysicalPlan::HashAggregate {
+                group_by,
+                aggr_exprs,
+                schema,
+                input,
+            } => {
                 let input_batches = self.execute_plan(input)?;
                 self.execute_hash_aggregate(group_by, aggr_exprs, schema, input_batches)
             }
@@ -175,7 +194,14 @@ impl Executor {
                 let input_batches = self.execute_plan(input)?;
                 self.execute_limit(*skip, *fetch, input_batches)
             }
-            PhysicalPlan::HashJoin { left, right, join_type, left_keys, right_keys, schema } => {
+            PhysicalPlan::HashJoin {
+                left,
+                right,
+                join_type,
+                left_keys,
+                right_keys,
+                schema,
+            } => {
                 let left_batches = self.execute_plan(left)?;
                 let right_batches = self.execute_plan(right)?;
                 self.execute_hash_join(
@@ -187,7 +213,11 @@ impl Executor {
                     schema,
                 )
             }
-            PhysicalPlan::CrossJoin { left, right, schema } => {
+            PhysicalPlan::CrossJoin {
+                left,
+                right,
+                schema,
+            } => {
                 let left_batches = self.execute_plan(left)?;
                 let right_batches = self.execute_plan(right)?;
                 self.execute_cross_join(left_batches, right_batches, schema)
@@ -200,20 +230,36 @@ impl Executor {
                 Ok(result)
             }
             PhysicalPlan::Values { data, .. } => Ok(data.clone()),
-            PhysicalPlan::Empty { produce_one_row, schema } => {
-                self.execute_empty(*produce_one_row, schema)
-            }
-            PhysicalPlan::Explain { input, verbose, schema } => {
-                self.execute_explain(input, *verbose, schema)
-            }
-            PhysicalPlan::Window { window_exprs, schema, input } => {
+            PhysicalPlan::Empty {
+                produce_one_row,
+                schema,
+            } => self.execute_empty(*produce_one_row, schema),
+            PhysicalPlan::Explain {
+                input,
+                verbose,
+                schema,
+            } => self.execute_explain(input, *verbose, schema),
+            PhysicalPlan::Window {
+                window_exprs,
+                schema,
+                input,
+            } => {
                 let input_batches = self.execute_plan(input)?;
                 self.execute_window(window_exprs, schema, input_batches)
             }
-            PhysicalPlan::ExplainAnalyze { input, verbose, schema } => {
-                self.execute_explain_analyze(input, *verbose, schema)
-            }
-            PhysicalPlan::SortMergeJoin { left, right, join_type, left_keys, right_keys, schema } => {
+            PhysicalPlan::ExplainAnalyze {
+                input,
+                verbose,
+                schema,
+            } => self.execute_explain_analyze(input, *verbose, schema),
+            PhysicalPlan::SortMergeJoin {
+                left,
+                right,
+                join_type,
+                left_keys,
+                right_keys,
+                schema,
+            } => {
                 let left_batches = self.execute_plan(left)?;
                 let right_batches = self.execute_plan(right)?;
                 operators::SortMergeJoinOperator::execute(
@@ -225,15 +271,24 @@ impl Executor {
                     schema,
                 )
             }
-            PhysicalPlan::Copy { input, target, format, .. } => {
+            PhysicalPlan::Copy {
+                input,
+                target,
+                format,
+                options,
+                ..
+            } => {
                 let input_batches = self.execute_plan(input)?;
-                self.execute_copy(&input_batches, target, format)
+                self.execute_copy(&input_batches, target, format, options)
             }
         }
     }
 
     /// Execute a physical plan with statistics collection.
-    pub fn execute_with_stats(&mut self, plan: &PhysicalPlan) -> Result<(Vec<RecordBatch>, ExecutionStats)> {
+    pub fn execute_with_stats(
+        &mut self,
+        plan: &PhysicalPlan,
+    ) -> Result<(Vec<RecordBatch>, ExecutionStats)> {
         use std::time::Instant;
 
         let start = Instant::now();
@@ -241,8 +296,20 @@ impl Executor {
         let mut stats = ExecutionStats::new(&operator_name);
 
         let result = match plan {
-            PhysicalPlan::Scan { table_name, projection, schema, filters, time_travel } => {
-                let batches = self.execute_scan(table_name, projection.as_deref(), schema, filters, time_travel.as_ref())?;
+            PhysicalPlan::Scan {
+                table_name,
+                projection,
+                schema,
+                filters,
+                time_travel,
+            } => {
+                let batches = self.execute_scan(
+                    table_name,
+                    projection.as_deref(),
+                    schema,
+                    filters,
+                    time_travel.as_ref(),
+                )?;
                 stats.add_metric("table", table_name);
                 batches
             }
@@ -252,13 +319,22 @@ impl Executor {
                 stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
                 self.execute_filter(predicate, input_batches)?
             }
-            PhysicalPlan::Projection { exprs, schema, input } => {
+            PhysicalPlan::Projection {
+                exprs,
+                schema,
+                input,
+            } => {
                 let (input_batches, child_stats) = self.execute_with_stats(input)?;
                 stats.children.push(child_stats);
                 stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
                 self.execute_projection(exprs, schema, input_batches)?
             }
-            PhysicalPlan::HashAggregate { group_by, aggr_exprs, schema, input } => {
+            PhysicalPlan::HashAggregate {
+                group_by,
+                aggr_exprs,
+                schema,
+                input,
+            } => {
                 let (input_batches, child_stats) = self.execute_with_stats(input)?;
                 stats.children.push(child_stats);
                 stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
@@ -278,10 +354,20 @@ impl Executor {
                 stats.children.push(child_stats);
                 stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
                 stats.add_metric("skip", &skip.to_string());
-                stats.add_metric("fetch", &fetch.map(|f| f.to_string()).unwrap_or("ALL".to_string()));
+                stats.add_metric(
+                    "fetch",
+                    &fetch.map(|f| f.to_string()).unwrap_or("ALL".to_string()),
+                );
                 self.execute_limit(*skip, *fetch, input_batches)?
             }
-            PhysicalPlan::HashJoin { left, right, join_type, left_keys, right_keys, schema } => {
+            PhysicalPlan::HashJoin {
+                left,
+                right,
+                join_type,
+                left_keys,
+                right_keys,
+                schema,
+            } => {
                 let (left_batches, left_stats) = self.execute_with_stats(left)?;
                 let (right_batches, right_stats) = self.execute_with_stats(right)?;
                 stats.children.push(left_stats);
@@ -292,9 +378,20 @@ impl Executor {
                 stats.add_metric("join_type", &format!("{:?}", join_type));
                 stats.add_metric("left_rows", &left_rows.to_string());
                 stats.add_metric("right_rows", &right_rows.to_string());
-                self.execute_hash_join(left_batches, right_batches, *join_type, left_keys, right_keys, schema)?
+                self.execute_hash_join(
+                    left_batches,
+                    right_batches,
+                    *join_type,
+                    left_keys,
+                    right_keys,
+                    schema,
+                )?
             }
-            PhysicalPlan::CrossJoin { left, right, schema } => {
+            PhysicalPlan::CrossJoin {
+                left,
+                right,
+                schema,
+            } => {
                 let (left_batches, left_stats) = self.execute_with_stats(left)?;
                 let (right_batches, right_stats) = self.execute_with_stats(right)?;
                 stats.children.push(left_stats);
@@ -317,23 +414,39 @@ impl Executor {
                 stats.rows_processed = data.iter().map(|b| b.num_rows()).sum();
                 data.clone()
             }
-            PhysicalPlan::Empty { produce_one_row, schema } => {
-                self.execute_empty(*produce_one_row, schema)?
-            }
-            PhysicalPlan::Window { window_exprs, schema, input } => {
+            PhysicalPlan::Empty {
+                produce_one_row,
+                schema,
+            } => self.execute_empty(*produce_one_row, schema)?,
+            PhysicalPlan::Window {
+                window_exprs,
+                schema,
+                input,
+            } => {
                 let (input_batches, child_stats) = self.execute_with_stats(input)?;
                 stats.children.push(child_stats);
                 stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
                 stats.add_metric("window_functions", &window_exprs.len().to_string());
                 self.execute_window(window_exprs, schema, input_batches)?
             }
-            PhysicalPlan::Explain { input, verbose, schema } => {
-                self.execute_explain(input, *verbose, schema)?
-            }
-            PhysicalPlan::ExplainAnalyze { input, verbose, schema } => {
-                self.execute_explain_analyze(input, *verbose, schema)?
-            }
-            PhysicalPlan::SortMergeJoin { left, right, join_type, left_keys, right_keys, schema } => {
+            PhysicalPlan::Explain {
+                input,
+                verbose,
+                schema,
+            } => self.execute_explain(input, *verbose, schema)?,
+            PhysicalPlan::ExplainAnalyze {
+                input,
+                verbose,
+                schema,
+            } => self.execute_explain_analyze(input, *verbose, schema)?,
+            PhysicalPlan::SortMergeJoin {
+                left,
+                right,
+                join_type,
+                left_keys,
+                right_keys,
+                schema,
+            } => {
                 let (left_batches, left_stats) = self.execute_with_stats(left)?;
                 let (right_batches, right_stats) = self.execute_with_stats(right)?;
                 stats.children.push(left_stats);
@@ -353,13 +466,19 @@ impl Executor {
                     schema,
                 )?
             }
-            PhysicalPlan::Copy { input, target, format, .. } => {
+            PhysicalPlan::Copy {
+                input,
+                target,
+                format,
+                options,
+                ..
+            } => {
                 let (input_batches, child_stats) = self.execute_with_stats(input)?;
                 stats.children.push(child_stats);
                 stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
                 stats.add_metric("target", target);
                 stats.add_metric("format", &format!("{:?}", format));
-                self.execute_copy(&input_batches, target, format)?
+                self.execute_copy(&input_batches, target, format, options)?
             }
         };
 
@@ -369,9 +488,7 @@ impl Executor {
         stats.rows_output = result.iter().map(|b| b.num_rows()).sum();
 
         // Estimate memory usage (rough approximation based on batch sizes)
-        stats.peak_memory_bytes = result.iter()
-            .map(|b| b.get_array_memory_size())
-            .sum();
+        stats.peak_memory_bytes = result.iter().map(|b| b.get_array_memory_size()).sum();
 
         Ok((result, stats))
     }
@@ -386,7 +503,9 @@ impl Executor {
             PhysicalPlan::Limit { .. } => "Limit".to_string(),
             PhysicalPlan::HashJoin { join_type, .. } => format!("HashJoin({:?})", join_type),
             PhysicalPlan::CrossJoin { .. } => "CrossJoin".to_string(),
-            PhysicalPlan::SortMergeJoin { join_type, .. } => format!("SortMergeJoin({:?})", join_type),
+            PhysicalPlan::SortMergeJoin { join_type, .. } => {
+                format!("SortMergeJoin({:?})", join_type)
+            }
             PhysicalPlan::Union { .. } => "Union".to_string(),
             PhysicalPlan::Values { .. } => "Values".to_string(),
             PhysicalPlan::Empty { .. } => "Empty".to_string(),
@@ -449,7 +568,9 @@ impl Executor {
             let filter_array = filter_array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
-                .ok_or_else(|| crate::error::BlazeError::type_error("Filter must return boolean"))?;
+                .ok_or_else(|| {
+                    crate::error::BlazeError::type_error("Filter must return boolean")
+                })?;
 
             // Apply filter
             let filtered = filter_record_batch(&batch, filter_array)?;
@@ -470,10 +591,7 @@ impl Executor {
         let mut result = Vec::new();
 
         for batch in input_batches {
-            let columns: Result<Vec<_>> = exprs
-                .iter()
-                .map(|expr| expr.evaluate(&batch))
-                .collect();
+            let columns: Result<Vec<_>> = exprs.iter().map(|expr| expr.evaluate(&batch)).collect();
 
             let projected = RecordBatch::try_new(schema.clone(), columns?)?;
             result.push(projected);
@@ -576,8 +694,8 @@ impl Executor {
         if produce_one_row {
             // Produce one row - for empty schema we use try_new_with_options
             // which allows creating a batch with 0 columns but a row count
-            let options = arrow::record_batch::RecordBatchOptions::default()
-                .with_row_count(Some(1));
+            let options =
+                arrow::record_batch::RecordBatchOptions::default().with_row_count(Some(1));
             let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)?;
             Ok(vec![batch])
         } else {
@@ -634,13 +752,13 @@ impl Executor {
         // Plan structure
         output.push_str("Query Plan:\n");
         output.push_str(&input.display_indent(0));
-        output.push_str("\n");
+        output.push('\n');
 
         // Execution statistics
         output.push_str("Execution Statistics:\n");
         output.push_str("---------------------\n");
         output.push_str(&stats.format_tree(0));
-        output.push_str("\n");
+        output.push('\n');
 
         // Summary
         let total_ms = total_elapsed.as_secs_f64() * 1000.0;
@@ -675,6 +793,7 @@ impl Executor {
         batches: &[RecordBatch],
         target: &str,
         format: &crate::planner::CopyFormat,
+        options: &crate::planner::CopyOptions,
     ) -> Result<Vec<RecordBatch>> {
         use std::fs::File;
 
@@ -688,7 +807,20 @@ impl Executor {
         match format {
             crate::planner::CopyFormat::Parquet => {
                 use parquet::arrow::ArrowWriter;
-                let mut writer = ArrowWriter::try_new(file, schema.clone(), None)?;
+                use parquet::basic::Compression;
+                use parquet::file::properties::WriterProperties;
+
+                let compression = match options.compression.as_deref() {
+                    Some("zstd") | Some("ZSTD") => Compression::ZSTD(Default::default()),
+                    Some("gzip") | Some("GZIP") => Compression::GZIP(Default::default()),
+                    Some("lz4") | Some("LZ4") => Compression::LZ4,
+                    Some("none") | Some("NONE") | Some("uncompressed") => Compression::UNCOMPRESSED,
+                    _ => Compression::SNAPPY,
+                };
+                let props = WriterProperties::builder()
+                    .set_compression(compression)
+                    .build();
+                let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
                 for batch in batches {
                     writer.write(batch)?;
                 }
@@ -696,8 +828,11 @@ impl Executor {
             }
             crate::planner::CopyFormat::Csv => {
                 use arrow::csv::WriterBuilder;
+                let header = options.header;
+                let delimiter = options.delimiter.unwrap_or(b',');
                 let mut writer = WriterBuilder::new()
-                    .with_header(true)
+                    .with_header(header)
+                    .with_delimiter(delimiter)
                     .build(file);
                 for batch in batches {
                     writer.write(batch)?;
@@ -774,14 +909,17 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = executor.execute_limit(0, Some(3), vec![batch]).unwrap();
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
@@ -793,14 +931,17 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = executor.execute_limit(2, Some(2), vec![batch]).unwrap();
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
@@ -812,14 +953,17 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         // No fetch means take all
         let result = executor.execute_limit(2, None, vec![batch]).unwrap();
@@ -832,22 +976,28 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
         let batch1 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         let batch2 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![4, 5, 6]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Skip 2, take 3 across two batches
-        let result = executor.execute_limit(2, Some(3), vec![batch1, batch2]).unwrap();
+        let result = executor
+            .execute_limit(2, Some(3), vec![batch1, batch2])
+            .unwrap();
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3);
     }
@@ -857,9 +1007,11 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
         let result = executor.execute_empty(false, &schema).unwrap();
         assert!(result.is_empty());
@@ -882,13 +1034,17 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let scan_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let scan_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
-        let explain_schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("plan", DataType::Utf8, false),
-        ]));
+        let explain_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "plan",
+            DataType::Utf8,
+            false,
+        )]));
 
         let plan = PhysicalPlan::Scan {
             table_name: "test".to_string(),
@@ -898,7 +1054,9 @@ mod tests {
             time_travel: None,
         };
 
-        let result = executor.execute_explain(&plan, false, &explain_schema).unwrap();
+        let result = executor
+            .execute_explain(&plan, false, &explain_schema)
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].num_rows() > 0);
     }
@@ -919,7 +1077,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2])),
                 Arc::new(StringArray::from(vec!["Alice", "Bob"])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let plan = PhysicalPlan::Values {
             data: vec![batch],
@@ -936,24 +1095,30 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let mut executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
-        let batch1 = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        ).unwrap();
+        let batch1 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
 
-        let batch2 = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![3, 4]))],
-        ).unwrap();
+        let batch2 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![3, 4]))])
+                .unwrap();
 
         let plan = PhysicalPlan::Union {
             inputs: vec![
-                PhysicalPlan::Values { data: vec![batch1], schema: schema.clone() },
-                PhysicalPlan::Values { data: vec![batch2], schema: schema.clone() },
+                PhysicalPlan::Values {
+                    data: vec![batch1],
+                    schema: schema.clone(),
+                },
+                PhysicalPlan::Values {
+                    data: vec![batch2],
+                    schema: schema.clone(),
+                },
             ],
             schema,
         };
@@ -968,9 +1133,11 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
         let scan_plan = PhysicalPlan::Scan {
             table_name: "users".to_string(),
@@ -998,14 +1165,14 @@ mod tests {
         let memory_manager = Arc::new(MemoryManager::new(1024));
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
-        ).unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2, 3]))]).unwrap();
 
         // Should succeed for small batch
         assert!(executor.track_batch_memory(&batch).is_ok());
@@ -1045,7 +1212,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2, 3])),
                 Arc::new(StringArray::from(vec!["a", "b", "c"])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Right data: (2, 20), (3, 30), (4, 40)
         let right_batch = RecordBatch::try_new(
@@ -1054,7 +1222,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![2, 3, 4])),
                 Arc::new(Int64Array::from(vec![20, 30, 40])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let left_key: Arc<dyn PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
         let right_key: Arc<dyn PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
@@ -1062,11 +1231,11 @@ mod tests {
         let plan = PhysicalPlan::SortMergeJoin {
             left: Box::new(PhysicalPlan::Values {
                 schema: left_schema,
-                data: vec![left_batch]
+                data: vec![left_batch],
             }),
             right: Box::new(PhysicalPlan::Values {
                 schema: right_schema,
-                data: vec![right_batch]
+                data: vec![right_batch],
             }),
             join_type: JoinType::Inner,
             left_keys: vec![left_key],
@@ -1099,7 +1268,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
                 Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create filter predicate: id > 2
         let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
@@ -1138,7 +1308,8 @@ mod tests {
                 Arc::new(StringArray::from(vec!["a", "b", "c"])),
                 Arc::new(Int64Array::from(vec![100, 200, 300])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Project columns 0 and 2 (id and value)
         let exprs: Vec<Arc<dyn PhysicalExpr>> = vec![
@@ -1146,7 +1317,9 @@ mod tests {
             Arc::new(ColumnExpr::new("value", 2)),
         ];
 
-        let result = executor.execute_projection(&exprs, &output_schema, vec![batch]).unwrap();
+        let result = executor
+            .execute_projection(&exprs, &output_schema, vec![batch])
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].num_columns(), 2);
         assert_eq!(result[0].num_rows(), 3);
@@ -1182,7 +1355,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2, 3])),
                 Arc::new(StringArray::from(vec!["Alice", "Bob", "Carol"])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let right_batch = RecordBatch::try_new(
             right_schema.clone(),
@@ -1190,19 +1364,22 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2, 2])),
                 Arc::new(StringArray::from(vec!["Order1", "Order2", "Order3"])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let left_keys: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(ColumnExpr::new("id", 0))];
         let right_keys: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(ColumnExpr::new("user_id", 0))];
 
-        let result = executor.execute_hash_join(
-            vec![left_batch],
-            vec![right_batch],
-            JoinType::Inner,
-            &left_keys,
-            &right_keys,
-            &join_schema,
-        ).unwrap();
+        let result = executor
+            .execute_hash_join(
+                vec![left_batch],
+                vec![right_batch],
+                JoinType::Inner,
+                &left_keys,
+                &right_keys,
+                &join_schema,
+            )
+            .unwrap();
 
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3); // id=1 matches once, id=2 matches twice
@@ -1210,19 +1387,22 @@ mod tests {
 
     #[test]
     fn test_execute_sort() {
-        use crate::planner::{ColumnExpr, SortExpr, PhysicalExpr};
+        use crate::planner::{ColumnExpr, PhysicalExpr, SortExpr};
 
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
 
-        let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![3, 1, 4, 1, 5, 9, 2, 6]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         let sort_exprs = vec![SortExpr {
             expr: Arc::new(ColumnExpr::new("id", 0)) as Arc<dyn PhysicalExpr>,
@@ -1233,14 +1413,18 @@ mod tests {
         let result = executor.execute_sort(&sort_exprs, vec![batch]).unwrap();
         assert_eq!(result.len(), 1);
 
-        let sorted_col = result[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let sorted_col = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         let values: Vec<i64> = (0..sorted_col.len()).map(|i| sorted_col.value(i)).collect();
         assert_eq!(values, vec![1, 1, 2, 3, 4, 5, 6, 9]);
     }
 
     #[test]
     fn test_execute_hash_aggregate() {
-        use crate::planner::{ColumnExpr, AggregateExpr, AggregateFunc, PhysicalExpr};
+        use crate::planner::{AggregateExpr, AggregateFunc, ColumnExpr, PhysicalExpr};
 
         let memory_manager = Arc::new(MemoryManager::default_budget());
         let executor = Executor::new(8192, None, memory_manager);
@@ -1261,7 +1445,8 @@ mod tests {
                 Arc::new(StringArray::from(vec!["A", "B", "A", "B", "A"])),
                 Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let group_by: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(ColumnExpr::new("category", 0))];
         let aggr_exprs = vec![AggregateExpr {
@@ -1271,7 +1456,9 @@ mod tests {
             alias: None,
         }];
 
-        let result = executor.execute_hash_aggregate(&group_by, &aggr_exprs, &output_schema, vec![batch]).unwrap();
+        let result = executor
+            .execute_hash_aggregate(&group_by, &aggr_exprs, &output_schema, vec![batch])
+            .unwrap();
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2); // Two categories: A and B
     }
