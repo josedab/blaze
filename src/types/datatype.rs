@@ -73,7 +73,10 @@ pub enum DataType {
     /// List of values
     List(Box<DataType>),
     /// Fixed-size list
-    FixedSizeList { element_type: Box<DataType>, size: i32 },
+    FixedSizeList {
+        element_type: Box<DataType>,
+        size: i32,
+    },
     /// Struct type
     Struct(Vec<(String, DataType)>),
     /// Map type
@@ -120,7 +123,10 @@ impl DataType {
             };
         }
 
-        if sql_type.starts_with("VARCHAR") || sql_type.starts_with("CHAR") || sql_type.starts_with("TEXT") {
+        if sql_type.starts_with("VARCHAR")
+            || sql_type.starts_with("CHAR")
+            || sql_type.starts_with("TEXT")
+        {
             return DataType::Utf8;
         }
 
@@ -139,7 +145,7 @@ impl DataType {
         }
 
         // Simple type matching
-        match sql_type.as_ref() {
+        match sql_type {
             // Boolean
             "BOOL" | "BOOLEAN" => DataType::Boolean,
 
@@ -319,13 +325,9 @@ impl DataType {
             DataType::IntervalMonthDayNano => {
                 ArrowDataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano)
             }
-            DataType::List(inner) => ArrowDataType::List(
-                arrow::datatypes::FieldRef::new(arrow::datatypes::Field::new(
-                    "item",
-                    inner.to_arrow(),
-                    true,
-                )),
-            ),
+            DataType::List(inner) => ArrowDataType::List(arrow::datatypes::FieldRef::new(
+                arrow::datatypes::Field::new("item", inner.to_arrow(), true),
+            )),
             DataType::FixedSizeList { element_type, size } => ArrowDataType::FixedSizeList(
                 arrow::datatypes::FieldRef::new(arrow::datatypes::Field::new(
                     "item",

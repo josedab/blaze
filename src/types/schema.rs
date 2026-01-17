@@ -260,6 +260,7 @@ impl FromIterator<Field> for Schema {
 
 /// A reference to a schema, potentially qualified with a table name.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct QualifiedSchema {
     /// Optional qualifier (table name, alias, etc.)
     pub qualifier: Option<String>,
@@ -267,6 +268,7 @@ pub struct QualifiedSchema {
     pub schema: Schema,
 }
 
+#[allow(dead_code)]
 impl QualifiedSchema {
     /// Create a new qualified schema.
     pub fn new(qualifier: Option<String>, schema: Schema) -> Self {

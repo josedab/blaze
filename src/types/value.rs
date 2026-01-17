@@ -155,9 +155,7 @@ impl ScalarValue {
             ScalarValue::LargeBinary(_) => DataType::LargeBinary,
             ScalarValue::Date32(_) => DataType::Date32,
             ScalarValue::Date64(_) => DataType::Date64,
-            ScalarValue::Timestamp {
-                unit, timezone, ..
-            } => DataType::Timestamp {
+            ScalarValue::Timestamp { unit, timezone, .. } => DataType::Timestamp {
                 unit: *unit,
                 timezone: timezone.clone(),
             },
@@ -177,16 +175,15 @@ impl ScalarValue {
             ScalarValue::UInt8(v) => Ok(v.map(|x| x as i64)),
             ScalarValue::UInt16(v) => Ok(v.map(|x| x as i64)),
             ScalarValue::UInt32(v) => Ok(v.map(|x| x as i64)),
-            ScalarValue::UInt64(v) => {
-                v.map(|x| {
+            ScalarValue::UInt64(v) => v
+                .map(|x| {
                     if x <= i64::MAX as u64 {
                         Ok(x as i64)
                     } else {
                         Err(BlazeError::type_error("UInt64 value too large for i64"))
                     }
                 })
-                .transpose()
-            }
+                .transpose(),
             _ => Err(BlazeError::type_error(format!(
                 "Cannot convert {:?} to i64",
                 self.data_type()
@@ -300,8 +297,7 @@ impl ScalarValue {
                 std::sync::Arc::new(arr)
             }
             ScalarValue::Binary(v) => {
-                let arr: arrow::array::BinaryArray =
-                    (0..size).map(|_| v.as_deref()).collect();
+                let arr: arrow::array::BinaryArray = (0..size).map(|_| v.as_deref()).collect();
                 std::sync::Arc::new(arr)
             }
             ScalarValue::LargeBinary(v) => {
@@ -442,7 +438,9 @@ impl ScalarValue {
 
         // Determine the data type from the first non-null value
         let first_non_null = values.iter().find(|v| !matches!(v, ScalarValue::Null));
-        let data_type = first_non_null.map(|v| v.data_type()).unwrap_or(DataType::Null);
+        let data_type = first_non_null
+            .map(|v| v.data_type())
+            .unwrap_or(DataType::Null);
 
         match data_type {
             DataType::Null => Ok(Arc::new(NullArray::new(values.len()))),
@@ -755,7 +753,10 @@ mod tests {
     #[test]
     fn test_scalar_value_display() {
         assert_eq!(format!("{}", ScalarValue::Int32(Some(42))), "42");
-        assert_eq!(format!("{}", ScalarValue::Utf8(Some("hello".into()))), "'hello'");
+        assert_eq!(
+            format!("{}", ScalarValue::Utf8(Some("hello".into()))),
+            "'hello'"
+        );
         assert_eq!(format!("{}", ScalarValue::Boolean(Some(true))), "true");
         assert_eq!(format!("{}", ScalarValue::Null), "NULL");
     }
