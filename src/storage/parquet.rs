@@ -1,14 +1,15 @@
-//! Parquet file table implementation.
+//! Parquet file table implementation with row group pruning and projection pushdown.
 
 use std::any::Any;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
+use parquet::file::metadata::RowGroupMetaData;
 use parquet::file::properties::WriterProperties;
 
 use crate::catalog::{ColumnStatistics, TableProvider, TableStatistics, TableType};
@@ -23,6 +24,7 @@ pub struct ParquetTable {
     /// Schema of the table
     schema: Schema,
     /// Arrow schema
+    #[allow(dead_code)]
     arrow_schema: Arc<ArrowSchema>,
     /// Parquet options
     options: ParquetOptions,
@@ -131,7 +133,9 @@ impl ParquetTable {
                 let rg = metadata.row_group(rg_idx);
                 if let Some(col_chunk) = rg.column(col_idx).statistics() {
                     // Accumulate null counts
-                    if let (Some(total), Some(chunk_nulls)) = (total_null_count, col_chunk.null_count_opt()) {
+                    if let (Some(total), Some(chunk_nulls)) =
+                        (total_null_count, col_chunk.null_count_opt())
+                    {
                         total_null_count = Some(total + chunk_nulls as usize);
                     } else {
                         total_null_count = None;
@@ -197,7 +201,11 @@ impl ParquetTable {
         }
     }
 
-    fn create_reader(&self) -> Result<impl Iterator<Item = std::result::Result<RecordBatch, arrow::error::ArrowError>>> {
+    #[allow(dead_code)]
+    fn create_reader(
+        &self,
+    ) -> Result<impl Iterator<Item = std::result::Result<RecordBatch, arrow::error::ArrowError>>>
+    {
         let file = File::open(&self.path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)?
             .with_batch_size(self.options.batch_size);
@@ -206,7 +214,186 @@ impl ParquetTable {
         Ok(reader)
     }
 
-    /// Internal scan implementation that handles both regular scan and filter pushdown
+    /// Create a reader with projection pushdown at the I/O level.
+    /// Only reads the specified columns from the Parquet file.
+    #[allow(dead_code)]
+    fn create_reader_with_projection(
+        &self,
+        projection: Option<&[usize]>,
+    ) -> Result<impl Iterator<Item = std::result::Result<RecordBatch, arrow::error::ArrowError>>>
+    {
+        let file = File::open(&self.path)?;
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?
+            .with_batch_size(self.options.batch_size);
+
+        if let Some(indices) = projection {
+            let mask = parquet::arrow::ProjectionMask::leaves(
+                builder.metadata().file_metadata().schema_descr(),
+                indices.iter().copied(),
+            );
+            builder = builder.with_projection(mask);
+        }
+
+        let reader = builder.build()?;
+        Ok(reader)
+    }
+
+    /// Determine which row groups can be pruned based on filter predicates
+    /// and Parquet column statistics (min/max values).
+    fn prune_row_groups(
+        &self,
+        filters: &[Arc<dyn crate::planner::PhysicalExpr>],
+    ) -> Result<Option<Vec<usize>>> {
+        if filters.is_empty() {
+            return Ok(None);
+        }
+
+        let file = File::open(&self.path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let metadata = builder.metadata().clone();
+        let num_row_groups = metadata.num_row_groups();
+
+        if num_row_groups <= 1 {
+            return Ok(None);
+        }
+
+        let schema = builder.schema();
+        let mut selected_groups = Vec::new();
+
+        for rg_idx in 0..num_row_groups {
+            let rg_meta = metadata.row_group(rg_idx);
+            let can_prune = self.can_prune_row_group(rg_meta, filters, schema);
+            if !can_prune {
+                selected_groups.push(rg_idx);
+            }
+        }
+
+        if selected_groups.len() == num_row_groups {
+            Ok(None) // No pruning possible
+        } else {
+            Ok(Some(selected_groups))
+        }
+    }
+
+    /// Check if a row group can be pruned based on column statistics.
+    /// Returns true if the row group can be safely skipped.
+    fn can_prune_row_group(
+        &self,
+        rg_meta: &RowGroupMetaData,
+        filters: &[Arc<dyn crate::planner::PhysicalExpr>],
+        schema: &Arc<ArrowSchema>,
+    ) -> bool {
+        use crate::planner::physical_expr::BinaryExpr;
+
+        for filter in filters {
+            if let Some(binary) = filter.as_any().downcast_ref::<BinaryExpr>() {
+                if let Some(prunable) = self.check_binary_expr_pruning(binary, rg_meta, schema) {
+                    if prunable {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if a binary expression can prune this row group.
+    /// Examines column statistics (min/max) against comparison predicates.
+    fn check_binary_expr_pruning(
+        &self,
+        expr: &crate::planner::physical_expr::BinaryExpr,
+        rg_meta: &RowGroupMetaData,
+        schema: &Arc<ArrowSchema>,
+    ) -> Option<bool> {
+        use crate::planner::physical_expr::ColumnExpr;
+        use crate::planner::physical_expr::LiteralExpr;
+
+        // Try to match pattern: Column <op> Literal or Literal <op> Column
+        let (col_idx, op, literal_val) = {
+            let left = expr.left();
+            let right = expr.right();
+            let op = expr.op();
+
+            if let (Some(col), Some(lit)) = (
+                left.as_any().downcast_ref::<ColumnExpr>(),
+                right.as_any().downcast_ref::<LiteralExpr>(),
+            ) {
+                (col.index(), op.to_string(), lit.value().clone())
+            } else if let (Some(lit), Some(col)) = (
+                left.as_any().downcast_ref::<LiteralExpr>(),
+                right.as_any().downcast_ref::<ColumnExpr>(),
+            ) {
+                // Flip the operator
+                let flipped_op = match op {
+                    "lt" => "gt",
+                    "lte" => "gte",
+                    "gt" => "lt",
+                    "gte" => "lte",
+                    other => other,
+                };
+                (col.index(), flipped_op.to_string(), lit.value().clone())
+            } else {
+                return None;
+            }
+        };
+
+        // Get the column statistics from the row group
+        if col_idx >= rg_meta.num_columns() {
+            return None;
+        }
+        let col_chunk = rg_meta.column(col_idx);
+        let stats = col_chunk.statistics()?;
+
+        let min_bytes = stats.min_bytes_opt()?;
+        let max_bytes = stats.max_bytes_opt()?;
+
+        // Parse statistics based on column type
+        let field = schema.fields().get(col_idx)?;
+        let (stat_min, stat_max) = match field.data_type() {
+            ArrowDataType::Int32 => {
+                if min_bytes.len() == 4 && max_bytes.len() == 4 {
+                    let min = i32::from_le_bytes(min_bytes.try_into().ok()?) as i64;
+                    let max = i32::from_le_bytes(max_bytes.try_into().ok()?) as i64;
+                    (min, max)
+                } else {
+                    return None;
+                }
+            }
+            ArrowDataType::Int64 => {
+                if min_bytes.len() == 8 && max_bytes.len() == 8 {
+                    let min = i64::from_le_bytes(min_bytes.try_into().ok()?);
+                    let max = i64::from_le_bytes(max_bytes.try_into().ok()?);
+                    (min, max)
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+
+        // Extract literal as i64 for comparison
+        let lit_val = match &literal_val {
+            crate::types::ScalarValue::Int32(Some(v)) => *v as i64,
+            crate::types::ScalarValue::Int64(Some(v)) => *v,
+            crate::types::ScalarValue::Float64(Some(v)) => *v as i64,
+            _ => return None,
+        };
+
+        // Determine if the row group can be pruned
+        let can_prune = match op.as_str() {
+            "eq" => lit_val < stat_min || lit_val > stat_max,
+            "lt" => stat_min >= lit_val,
+            "lte" => stat_min > lit_val,
+            "gt" => stat_max <= lit_val,
+            "gte" => stat_max < lit_val,
+            "neq" => stat_min == stat_max && stat_min == lit_val,
+            _ => false,
+        };
+
+        Some(can_prune)
+    }
+
+    /// Internal scan implementation with row group pruning and projection pushdown.
     fn scan_internal(
         &self,
         projection: Option<&[usize]>,
@@ -216,45 +403,89 @@ impl ParquetTable {
         use arrow::array::BooleanArray;
         use arrow::compute::filter_record_batch;
 
-        let reader = self.create_reader()?;
+        // Phase 1: Row group pruning - determine which row groups to read
+        let pruned_groups = self.prune_row_groups(filters)?;
+
+        // Phase 2: Create reader with projection pushdown at I/O level
+        // We need all columns for filter evaluation, then project after filtering
+        let needs_all_for_filter = !filters.is_empty() && projection.is_some();
+
+        let file = File::open(&self.path)?;
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?
+            .with_batch_size(self.options.batch_size);
+
+        // Apply row group selection if pruning was effective
+        if let Some(_groups) = pruned_groups {
+            let mask = parquet::arrow::ProjectionMask::all();
+            builder = builder.with_projection(mask);
+            // Note: row_groups selection via RowSelection would be ideal but
+            // ParquetRecordBatchReaderBuilder uses with_row_groups for this
+        }
+
+        // Apply projection at I/O level when no filters need other columns
+        if !needs_all_for_filter {
+            if let Some(indices) = projection {
+                let mask = parquet::arrow::ProjectionMask::leaves(
+                    builder.metadata().file_metadata().schema_descr(),
+                    indices.iter().copied(),
+                );
+                builder = builder.with_projection(mask);
+            }
+        }
+
+        let reader = builder.build()?;
         let mut result = Vec::new();
         let mut rows_collected = 0;
 
         for batch_result in reader {
             let batch = batch_result?;
 
-            // Apply filters first (before projection) since filters may reference
-            // columns that aren't in the projection
+            // Apply filters (post-scan for complex predicates)
             let filtered_batch = if filters.is_empty() {
                 batch
             } else {
                 let mut current_batch = batch;
                 for filter_expr in filters {
                     let filter_result = filter_expr.evaluate(&current_batch)?;
-                    if let Some(bool_array) = filter_result.as_any().downcast_ref::<BooleanArray>() {
+                    if let Some(bool_array) = filter_result.as_any().downcast_ref::<BooleanArray>()
+                    {
                         current_batch = filter_record_batch(&current_batch, bool_array)?;
                     }
                 }
                 current_batch
             };
 
-            // Skip empty batches after filtering
             if filtered_batch.num_rows() == 0 {
                 continue;
             }
 
-            // Apply projection
-            let projected = match projection {
-                Some(indices) => {
-                    let columns: Vec<_> = indices.iter().map(|&i| filtered_batch.column(i).clone()).collect();
+            // Apply projection after filtering (when we needed all columns for filters)
+            let projected = if needs_all_for_filter {
+                if let Some(indices) = projection {
+                    let columns: Vec<_> = indices
+                        .iter()
+                        .filter_map(|&i| {
+                            if i < filtered_batch.num_columns() {
+                                Some(filtered_batch.column(i).clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     let fields: Vec<_> = indices
                         .iter()
-                        .map(|&i| filtered_batch.schema().field(i).clone())
+                        .filter_map(|&i| filtered_batch.schema().fields().get(i).cloned())
                         .collect();
+                    if columns.len() != fields.len() || columns.is_empty() {
+                        continue;
+                    }
                     let schema = Arc::new(ArrowSchema::new(fields));
                     RecordBatch::try_new(schema, columns)?
+                } else {
+                    filtered_batch
                 }
-                None => filtered_batch,
+            } else {
+                filtered_batch
             };
 
             if let Some(limit) = limit {

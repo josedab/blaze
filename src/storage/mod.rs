@@ -3,15 +3,27 @@
 //! This module provides readers and writers for various data formats
 //! including CSV, Parquet, JSON, Arrow IPC, and Delta Lake.
 
-mod memory;
 mod csv;
-mod parquet;
 mod delta;
+mod memory;
+mod object_store;
+mod parquet;
+mod persistent;
 
-pub use self::csv::{CsvTable, CsvOptions, write_csv};
-pub use self::parquet::{ParquetTable, ParquetOptions, write_parquet, write_parquet_with_options};
-pub use self::delta::{DeltaTable, DeltaTableOptions, DeltaVersionInfo, DeltaWriteResult, DeltaWriteMode};
+pub use self::csv::{write_csv, CsvOptions, CsvTable};
+pub use self::delta::{
+    DeltaTable, DeltaTableOptions, DeltaVersionInfo, DeltaWriteMode, DeltaWriteResult,
+};
+pub use self::object_store::{
+    CachingObjectStore, LocalFileSystemStore, ObjectMeta, ObjectPath, ObjectStoreProvider,
+    ObjectStoreRegistry, ObjectStoreTable,
+};
+pub use self::parquet::{write_parquet, write_parquet_with_options, ParquetOptions, ParquetTable};
 pub use memory::MemoryTable;
+pub use persistent::{
+    persistent_table, BufferPool, Page, PageType, PersistentConfig, PersistentTable, WalEntry,
+    WalOperation, WriteAheadLog,
+};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -31,10 +43,7 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvider>> {
         return Ok(Arc::new(DeltaTable::open(path)?));
     }
 
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match extension.to_lowercase().as_str() {
         "csv" | "tsv" => Ok(Arc::new(CsvTable::open(path)?)),

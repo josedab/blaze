@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::record_batch::RecordBatch;
-use deltalake::DeltaTable as DeltaLakeTable;
 use deltalake::datafusion::datasource::TableProvider as DeltaTableProvider;
+use deltalake::DeltaTable as DeltaLakeTable;
 use tokio::runtime::Runtime;
 use url::Url;
 
@@ -37,8 +37,10 @@ pub struct DeltaTable {
     /// Tokio runtime for async operations
     runtime: Arc<Runtime>,
     /// Time travel version (if specified)
+    #[allow(dead_code)]
     version: Option<i64>,
     /// Time travel timestamp (if specified)
+    #[allow(dead_code)]
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -63,9 +65,8 @@ fn path_to_url(path: &Path) -> Result<Url> {
             .join(path)
     };
 
-    Url::from_file_path(&abs_path).map_err(|_| {
-        BlazeError::internal(format!("Failed to convert path to URL: {:?}", abs_path))
-    })
+    Url::from_file_path(&abs_path)
+        .map_err(|_| BlazeError::internal(format!("Failed to convert path to URL: {:?}", abs_path)))
 }
 
 impl DeltaTable {
@@ -522,10 +523,11 @@ impl DeltaTable {
         }
 
         // Write compacted data as overwrite
-        self.write(&compacted_batches, DeltaWriteMode::Overwrite).map(|mut result| {
-            result.rows_written = total_rows;
-            result
-        })
+        self.write(&compacted_batches, DeltaWriteMode::Overwrite)
+            .map(|mut result| {
+                result.rows_written = total_rows;
+                result
+            })
     }
 }
 
@@ -558,20 +560,15 @@ pub struct DeltaWriteResult {
 }
 
 /// Write mode for Delta table operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DeltaWriteMode {
     /// Append new data to existing data
+    #[default]
     Append,
     /// Overwrite all existing data
     Overwrite,
     /// Error if table already has data
     ErrorIfExists,
-}
-
-impl Default for DeltaWriteMode {
-    fn default() -> Self {
-        Self::Append
-    }
 }
 
 impl TableProvider for DeltaTable {
