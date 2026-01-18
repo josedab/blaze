@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 
-use crate::error::{BlazeError, Result};
 use super::{
-    GpuConfig,
+    kernels::{AggregationType, KernelRegistry},
     memory::{GpuMemoryPool, MemoryTransfer},
-    kernels::{KernelRegistry, AggregationType},
+    GpuConfig,
 };
+use crate::error::{BlazeError, Result};
 
 /// GPU query executor.
 pub struct GpuExecutor {
@@ -52,9 +52,7 @@ impl GpuExecutor {
         // Check if input is large enough for GPU execution
         let total_size: usize = input.iter().map(|b| b.get_array_memory_size()).sum();
         if total_size < self.config.min_gpu_batch_size {
-            return Err(BlazeError::execution(
-                "Input too small for GPU execution",
-            ));
+            return Err(BlazeError::execution("Input too small for GPU execution"));
         }
 
         // Execute operators in the plan
@@ -76,9 +74,10 @@ impl GpuExecutor {
     ) -> Result<Vec<RecordBatch>> {
         // Get the kernel for this operator
         let kernel_name = operator.kernel_name();
-        let _kernel = self.kernel_registry.get(&kernel_name).ok_or_else(|| {
-            BlazeError::execution(format!("Kernel not found: {}", kernel_name))
-        })?;
+        let _kernel = self
+            .kernel_registry
+            .get(&kernel_name)
+            .ok_or_else(|| BlazeError::execution(format!("Kernel not found: {}", kernel_name)))?;
 
         // For now, simulate GPU execution by passing through
         // In a real implementation, this would:
@@ -92,22 +91,21 @@ impl GpuExecutor {
                 // Simulate filter - in real impl would use GPU kernel
                 self.simulate_filter(input, predicate)
             }
-            GpuOperator::Project { columns } => {
-                self.simulate_project(input, columns)
-            }
-            GpuOperator::Aggregate { group_by, aggregates } => {
-                self.simulate_aggregate(input, group_by, aggregates)
-            }
-            GpuOperator::Sort { sort_keys } => {
-                self.simulate_sort(input, sort_keys)
-            }
-            GpuOperator::Join { join_type: _, left_keys: _, right_keys: _ } => {
+            GpuOperator::Project { columns } => self.simulate_project(input, columns),
+            GpuOperator::Aggregate {
+                group_by,
+                aggregates,
+            } => self.simulate_aggregate(input, group_by, aggregates),
+            GpuOperator::Sort { sort_keys } => self.simulate_sort(input, sort_keys),
+            GpuOperator::Join {
+                join_type: _,
+                left_keys: _,
+                right_keys: _,
+            } => {
                 // Join requires two inputs - for now just pass through
                 Ok(input.to_vec())
             }
-            GpuOperator::Limit { limit } => {
-                self.simulate_limit(input, *limit)
-            }
+            GpuOperator::Limit { limit } => self.simulate_limit(input, *limit),
         }
     }
 
@@ -195,11 +193,7 @@ impl GpuExecutor {
     }
 
     /// Simulate limit operation.
-    fn simulate_limit(
-        &self,
-        input: &[RecordBatch],
-        limit: usize,
-    ) -> Result<Vec<RecordBatch>> {
+    fn simulate_limit(&self, input: &[RecordBatch], limit: usize) -> Result<Vec<RecordBatch>> {
         let mut remaining = limit;
         let mut result = Vec::new();
 
@@ -353,11 +347,11 @@ impl GpuOperator {
     }
 
     /// Create an aggregate operator.
-    pub fn aggregate(
-        group_by: Vec<usize>,
-        aggregates: Vec<(usize, AggregationType)>,
-    ) -> Self {
-        GpuOperator::Aggregate { group_by, aggregates }
+    pub fn aggregate(group_by: Vec<usize>, aggregates: Vec<(usize, AggregationType)>) -> Self {
+        GpuOperator::Aggregate {
+            group_by,
+            aggregates,
+        }
     }
 
     /// Create a sort operator.
@@ -366,12 +360,12 @@ impl GpuOperator {
     }
 
     /// Create a join operator.
-    pub fn join(
-        join_type: GpuJoinType,
-        left_keys: Vec<usize>,
-        right_keys: Vec<usize>,
-    ) -> Self {
-        GpuOperator::Join { join_type, left_keys, right_keys }
+    pub fn join(join_type: GpuJoinType, left_keys: Vec<usize>, right_keys: Vec<usize>) -> Self {
+        GpuOperator::Join {
+            join_type,
+            left_keys,
+            right_keys,
+        }
     }
 
     /// Create a limit operator.
@@ -400,9 +394,15 @@ pub enum GpuPredicate {
     /// Column is not null
     IsNotNull { column: usize },
     /// AND of predicates
-    And { left: Box<GpuPredicate>, right: Box<GpuPredicate> },
+    And {
+        left: Box<GpuPredicate>,
+        right: Box<GpuPredicate>,
+    },
     /// OR of predicates
-    Or { left: Box<GpuPredicate>, right: Box<GpuPredicate> },
+    Or {
+        left: Box<GpuPredicate>,
+        right: Box<GpuPredicate>,
+    },
     /// NOT of predicate
     Not { predicate: Box<GpuPredicate> },
 }
@@ -548,7 +548,8 @@ impl GpuPlanBuilder {
         group_by: Vec<usize>,
         aggregates: Vec<(usize, AggregationType)>,
     ) -> Self {
-        self.plan.add_operator(GpuOperator::aggregate(group_by, aggregates));
+        self.plan
+            .add_operator(GpuOperator::aggregate(group_by, aggregates));
         self
     }
 
@@ -609,9 +610,10 @@ mod tests {
         let config = GpuConfig::default();
         let executor = GpuExecutor::new(config);
 
-        assert!(executor.can_execute(&GpuOperator::filter(
-            GpuPredicate::eq(0, ScalarValue::int64(42))
-        )));
+        assert!(executor.can_execute(&GpuOperator::filter(GpuPredicate::eq(
+            0,
+            ScalarValue::int64(42)
+        ))));
     }
 
     #[test]
@@ -641,14 +643,12 @@ mod tests {
     #[test]
     fn test_gpu_operator_kernel_name() {
         assert_eq!(
-            GpuOperator::filter(GpuPredicate::eq(0, ScalarValue::int64(1)))
-                .kernel_name(),
+            GpuOperator::filter(GpuPredicate::eq(0, ScalarValue::int64(1))).kernel_name(),
             "filter"
         );
         assert_eq!(GpuOperator::project(vec![0]).kernel_name(), "project");
         assert_eq!(
-            GpuOperator::aggregate(vec![0], vec![(1, AggregationType::Sum)])
-                .kernel_name(),
+            GpuOperator::aggregate(vec![0], vec![(1, AggregationType::Sum)]).kernel_name(),
             "aggregate"
         );
     }
@@ -713,11 +713,7 @@ mod tests {
 
     #[test]
     fn test_gpu_join_type() {
-        let join = GpuOperator::join(
-            GpuJoinType::Inner,
-            vec![0],
-            vec![0],
-        );
+        let join = GpuOperator::join(GpuJoinType::Inner, vec![0], vec![0]);
 
         match join {
             GpuOperator::Join { join_type, .. } => {

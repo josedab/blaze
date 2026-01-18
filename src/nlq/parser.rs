@@ -32,12 +32,10 @@ impl NLParser {
     /// Default stop words.
     fn default_stop_words() -> HashSet<String> {
         vec![
-            "a", "an", "the", "of", "to", "and", "or", "in", "on", "at",
-            "for", "is", "are", "was", "were", "be", "been", "being",
-            "have", "has", "had", "do", "does", "did", "will", "would",
-            "could", "should", "may", "might", "must", "shall", "can",
-            "me", "my", "i", "we", "our", "us", "you", "your",
-            "please", "thanks", "thank", "hi", "hello",
+            "a", "an", "the", "of", "to", "and", "or", "in", "on", "at", "for", "is", "are", "was",
+            "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will",
+            "would", "could", "should", "may", "might", "must", "shall", "can", "me", "my", "i",
+            "we", "our", "us", "you", "your", "please", "thanks", "thank", "hi", "hello",
         ]
         .into_iter()
         .map(String::from)
@@ -47,10 +45,9 @@ impl NLParser {
     /// Default SQL keywords.
     fn default_sql_keywords() -> HashSet<String> {
         vec![
-            "select", "from", "where", "group", "by", "order", "having",
-            "limit", "offset", "join", "inner", "left", "right", "outer",
-            "on", "as", "distinct", "all", "and", "or", "not", "null",
-            "true", "false", "between", "like", "in", "exists",
+            "select", "from", "where", "group", "by", "order", "having", "limit", "offset", "join",
+            "inner", "left", "right", "outer", "on", "as", "distinct", "all", "and", "or", "not",
+            "null", "true", "false", "between", "like", "in", "exists",
         ]
         .into_iter()
         .map(String::from)
@@ -60,8 +57,8 @@ impl NLParser {
     /// Default aggregate keywords.
     fn default_aggregate_keywords() -> HashSet<String> {
         vec![
-            "count", "sum", "avg", "average", "min", "minimum", "max", "maximum",
-            "total", "number", "amount", "quantity", "how many",
+            "count", "sum", "avg", "average", "min", "minimum", "max", "maximum", "total",
+            "number", "amount", "quantity", "how many",
         ]
         .into_iter()
         .map(String::from)
@@ -71,11 +68,9 @@ impl NLParser {
     /// Default comparison words.
     fn default_comparison_words() -> HashSet<String> {
         vec![
-            "equals", "equal", "is", "are", "was", "were",
-            "greater", "more", "higher", "above", "over",
-            "less", "fewer", "lower", "below", "under",
-            "between", "contains", "like", "starts", "ends",
-            "not", "isn't", "aren't", "wasn't", "weren't",
+            "equals", "equal", "is", "are", "was", "were", "greater", "more", "higher", "above",
+            "over", "less", "fewer", "lower", "below", "under", "between", "contains", "like",
+            "starts", "ends", "not", "isn't", "aren't", "wasn't", "weren't",
         ]
         .into_iter()
         .map(String::from)
@@ -491,10 +486,9 @@ impl NLParser {
                     .map(|t| t.text.clone());
 
                 // Check for ASC/DESC
-                let ascending = !tokens
-                    .iter()
-                    .skip(i + 1)
-                    .any(|t| ["desc", "descending", "decreasing", "reverse"].contains(&t.text.as_str()));
+                let ascending = !tokens.iter().skip(i + 1).any(|t| {
+                    ["desc", "descending", "decreasing", "reverse"].contains(&t.text.as_str())
+                });
 
                 if let Some(column) = col {
                     return Some((column, ascending));

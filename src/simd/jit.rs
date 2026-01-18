@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::error::{BlazeError, Result};
-use super::{SimdLevel, VectorOp, VectorDataType};
 use super::codegen::{CodeGenerator, GeneratedCode};
+use super::{SimdLevel, VectorDataType, VectorOp};
+use crate::error::{BlazeError, Result};
 
 /// JIT compiler configuration.
 #[derive(Debug, Clone)]
@@ -112,7 +112,10 @@ impl JitCompiler {
         data_type: VectorDataType,
         comparison: VectorOp,
     ) -> Result<CompiledKernel> {
-        let key = KernelKey { op: comparison, data_type };
+        let key = KernelKey {
+            op: comparison,
+            data_type,
+        };
 
         if self.config.cache_enabled {
             if let Some(kernel) = self.get_cached(&key) {
@@ -139,7 +142,10 @@ impl JitCompiler {
         data_type: VectorDataType,
         agg_op: VectorOp,
     ) -> Result<CompiledKernel> {
-        let key = KernelKey { op: agg_op, data_type };
+        let key = KernelKey {
+            op: agg_op,
+            data_type,
+        };
 
         if self.config.cache_enabled {
             if let Some(kernel) = self.get_cached(&key) {
@@ -438,12 +444,16 @@ fn create_execution_fn(
                 for i in 0..num_elems {
                     let offset = i * elem_size;
                     let a = i32::from_le_bytes([
-                        a_bytes[offset], a_bytes[offset + 1],
-                        a_bytes[offset + 2], a_bytes[offset + 3]
+                        a_bytes[offset],
+                        a_bytes[offset + 1],
+                        a_bytes[offset + 2],
+                        a_bytes[offset + 3],
                     ]);
                     let b = i32::from_le_bytes([
-                        b_bytes[offset], b_bytes[offset + 1],
-                        b_bytes[offset + 2], b_bytes[offset + 3]
+                        b_bytes[offset],
+                        b_bytes[offset + 1],
+                        b_bytes[offset + 2],
+                        b_bytes[offset + 3],
                     ]);
                     let result = a.wrapping_add(b);
                     let result_bytes = result.to_le_bytes();
@@ -461,8 +471,14 @@ fn create_execution_fn(
                 for i in 0..num_elems {
                     let offset = i * elem_size;
                     let val = i64::from_le_bytes([
-                        input[offset], input[offset + 1], input[offset + 2], input[offset + 3],
-                        input[offset + 4], input[offset + 5], input[offset + 6], input[offset + 7]
+                        input[offset],
+                        input[offset + 1],
+                        input[offset + 2],
+                        input[offset + 3],
+                        input[offset + 4],
+                        input[offset + 5],
+                        input[offset + 6],
+                        input[offset + 7],
                     ]);
                     sum += val;
                 }
@@ -482,8 +498,10 @@ fn create_execution_fn(
                 for i in 0..num_elems.min(output.len()) {
                     let offset = i * elem_size;
                     let val = i32::from_le_bytes([
-                        input[offset], input[offset + 1],
-                        input[offset + 2], input[offset + 3]
+                        input[offset],
+                        input[offset + 1],
+                        input[offset + 2],
+                        input[offset + 3],
                     ]);
                     output[i] = if val > threshold { 1 } else { 0 };
                 }
@@ -492,9 +510,7 @@ fn create_execution_fn(
         }
         _ => {
             // Default no-op for unsupported combinations
-            Arc::new(|_input: &[u8], _output: &mut [u8], _params: &KernelParams| {
-                Ok(())
-            })
+            Arc::new(|_input: &[u8], _output: &mut [u8], _params: &KernelParams| Ok(()))
         }
     }
 }
@@ -512,7 +528,9 @@ mod tests {
     #[test]
     fn test_compile_kernel() {
         let mut compiler = JitCompiler::new(JitConfig::default());
-        let kernel = compiler.compile_kernel(VectorOp::Add, VectorDataType::I32).unwrap();
+        let kernel = compiler
+            .compile_kernel(VectorOp::Add, VectorDataType::I32)
+            .unwrap();
 
         assert_eq!(kernel.op, VectorOp::Add);
         assert_eq!(kernel.data_type, VectorDataType::I32);
@@ -526,19 +544,25 @@ mod tests {
         });
 
         // First compilation
-        let _k1 = compiler.compile_kernel(VectorOp::Add, VectorDataType::I32).unwrap();
+        let _k1 = compiler
+            .compile_kernel(VectorOp::Add, VectorDataType::I32)
+            .unwrap();
         assert_eq!(compiler.stats().cache_misses, 1);
         assert_eq!(compiler.stats().cache_hits, 0);
 
         // Second compilation should hit cache
-        let _k2 = compiler.compile_kernel(VectorOp::Add, VectorDataType::I32).unwrap();
+        let _k2 = compiler
+            .compile_kernel(VectorOp::Add, VectorDataType::I32)
+            .unwrap();
         assert_eq!(compiler.stats().cache_hits, 1);
     }
 
     #[test]
     fn test_execute_add_kernel() {
         let mut compiler = JitCompiler::new(JitConfig::default());
-        let kernel = compiler.compile_kernel(VectorOp::Add, VectorDataType::I32).unwrap();
+        let kernel = compiler
+            .compile_kernel(VectorOp::Add, VectorDataType::I32)
+            .unwrap();
 
         // Create input: two i32 arrays [1, 2, 3, 4] and [10, 20, 30, 40]
         let a: Vec<i32> = vec![1, 2, 3, 4];
@@ -553,7 +577,10 @@ mod tests {
         }
 
         let mut output = vec![0u8; 16];
-        let params = KernelParams { input_size: 4, ..Default::default() };
+        let params = KernelParams {
+            input_size: 4,
+            ..Default::default()
+        };
 
         kernel.execute(&input, &mut output, &params).unwrap();
 
@@ -562,8 +589,10 @@ mod tests {
             .map(|i| {
                 let offset = i * 4;
                 i32::from_le_bytes([
-                    output[offset], output[offset + 1],
-                    output[offset + 2], output[offset + 3]
+                    output[offset],
+                    output[offset + 1],
+                    output[offset + 2],
+                    output[offset + 3],
                 ])
             })
             .collect();
@@ -574,22 +603,24 @@ mod tests {
     #[test]
     fn test_execute_sum_kernel() {
         let mut compiler = JitCompiler::new(JitConfig::default());
-        let kernel = compiler.compile_aggregate_kernel(VectorDataType::I64, VectorOp::Sum).unwrap();
+        let kernel = compiler
+            .compile_aggregate_kernel(VectorDataType::I64, VectorOp::Sum)
+            .unwrap();
 
         // Create input: [1, 2, 3, 4, 5]
         let data: Vec<i64> = vec![1, 2, 3, 4, 5];
-        let input: Vec<u8> = data.iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let input: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let mut output = vec![0u8; 8];
-        let params = KernelParams { input_size: 5, ..Default::default() };
+        let params = KernelParams {
+            input_size: 5,
+            ..Default::default()
+        };
 
         kernel.execute(&input, &mut output, &params).unwrap();
 
         let sum = i64::from_le_bytes([
-            output[0], output[1], output[2], output[3],
-            output[4], output[5], output[6], output[7]
+            output[0], output[1], output[2], output[3], output[4], output[5], output[6], output[7],
         ]);
 
         assert_eq!(sum, 15);
@@ -598,13 +629,13 @@ mod tests {
     #[test]
     fn test_execute_filter_kernel() {
         let mut compiler = JitCompiler::new(JitConfig::default());
-        let kernel = compiler.compile_filter_kernel(VectorDataType::I32, VectorOp::Gt).unwrap();
+        let kernel = compiler
+            .compile_filter_kernel(VectorDataType::I32, VectorOp::Gt)
+            .unwrap();
 
         // Create input: [1, 5, 3, 7, 2]
         let data: Vec<i32> = vec![1, 5, 3, 7, 2];
-        let input: Vec<u8> = data.iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let input: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let mut output = vec![0u8; 5];
         let params = KernelParams {
@@ -627,7 +658,9 @@ mod tests {
     fn test_compile_fused_kernel() {
         let mut compiler = JitCompiler::new(JitConfig::default());
         let ops = vec![VectorOp::Add, VectorOp::Mul];
-        let kernel = compiler.compile_fused_kernel(&ops, VectorDataType::I32).unwrap();
+        let kernel = compiler
+            .compile_fused_kernel(&ops, VectorDataType::I32)
+            .unwrap();
 
         assert!(kernel.name.contains("fused"));
     }
@@ -683,7 +716,9 @@ mod tests {
     #[test]
     fn test_jit_function() {
         let mut compiler = JitCompiler::new(JitConfig::default());
-        let kernel = compiler.compile_kernel(VectorOp::Add, VectorDataType::I32).unwrap();
+        let kernel = compiler
+            .compile_kernel(VectorOp::Add, VectorDataType::I32)
+            .unwrap();
         let func = JitFunction::new("add_i32", kernel);
 
         assert_eq!(func.name, "add_i32");

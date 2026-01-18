@@ -2,8 +2,8 @@
 //!
 //! This module provides intent classification for natural language queries.
 
+use super::parser::{AggregateType as ParsedAggType, FilterOp, ParsedFilter, ParsedQuery};
 use crate::error::Result;
-use super::parser::{ParsedQuery, ParsedFilter, FilterOp, AggregateType as ParsedAggType};
 
 /// Query intent.
 #[derive(Debug, Clone)]
@@ -195,9 +195,10 @@ impl IntentClassifier {
         }
 
         // Check for join intent (look for join keywords in tokens)
-        let has_join = parsed.tokens.iter().any(|t| {
-            ["join", "with", "and", "combine", "merge"].contains(&t.text.as_str())
-        });
+        let has_join = parsed
+            .tokens
+            .iter()
+            .any(|t| ["join", "with", "and", "combine", "merge"].contains(&t.text.as_str()));
 
         if has_join {
             // Try to extract second table
@@ -270,7 +271,11 @@ impl IntentClassifier {
     /// Get the dominant intent type.
     pub fn dominant_intent(&self, parsed: &ParsedQuery) -> &'static str {
         if !parsed.aggregates.is_empty() {
-            if parsed.aggregates.iter().all(|(a, _)| *a == ParsedAggType::Count) {
+            if parsed
+                .aggregates
+                .iter()
+                .all(|(a, _)| *a == ParsedAggType::Count)
+            {
                 "count"
             } else {
                 "aggregate"
@@ -327,14 +332,18 @@ impl IntentValidation {
 /// Validate an intent.
 pub fn validate_intent(intent: &QueryIntent) -> IntentValidation {
     match intent {
-        QueryIntent::Select { table, columns: _, .. } => {
+        QueryIntent::Select {
+            table, columns: _, ..
+        } => {
             if table.is_empty() {
                 return IntentValidation::invalid("No table specified")
                     .with_suggestion("Try specifying a table name");
             }
             IntentValidation::valid()
         }
-        QueryIntent::Aggregate { table, aggregates, .. } => {
+        QueryIntent::Aggregate {
+            table, aggregates, ..
+        } => {
             if table.is_empty() {
                 return IntentValidation::invalid("No table specified");
             }
@@ -349,7 +358,11 @@ pub fn validate_intent(intent: &QueryIntent) -> IntentValidation {
             }
             IntentValidation::valid()
         }
-        QueryIntent::Join { left_table, right_table, .. } => {
+        QueryIntent::Join {
+            left_table,
+            right_table,
+            ..
+        } => {
             if left_table.is_empty() || right_table.is_empty() {
                 return IntentValidation::invalid("Both tables must be specified for join");
             }
@@ -360,8 +373,8 @@ pub fn validate_intent(intent: &QueryIntent) -> IntentValidation {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::parser::NLParser;
+    use super::*;
 
     #[test]
     fn test_classify_select() {
@@ -400,11 +413,18 @@ mod tests {
         let parser = NLParser::new();
         let classifier = IntentClassifier::new();
 
-        let parsed = parser.parse("sum amount from orders group by customer").unwrap();
+        let parsed = parser
+            .parse("sum amount from orders group by customer")
+            .unwrap();
         let intent = classifier.classify(&parsed).unwrap();
 
         match intent {
-            QueryIntent::Aggregate { table, aggregates, group_by, .. } => {
+            QueryIntent::Aggregate {
+                table,
+                aggregates,
+                group_by,
+                ..
+            } => {
                 assert_eq!(table, "orders");
                 assert!(!aggregates.is_empty());
             }

@@ -3,8 +3,8 @@
 //! This module provides code generation for SIMD operations,
 //! producing bytecode or machine code for vectorized execution.
 
+use super::{SimdLevel, VectorDataType, VectorOp};
 use crate::error::{BlazeError, Result};
-use super::{SimdLevel, VectorOp, VectorDataType};
 
 /// Generated code representation.
 #[derive(Debug, Clone)]
@@ -46,17 +46,15 @@ impl GeneratedCode {
         }
 
         // Generate assembly representation
-        self.assembly = self.instructions
+        self.assembly = self
+            .instructions
             .iter()
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join("\n");
 
         // Estimate cycles
-        self.estimated_cycles = self.instructions
-            .iter()
-            .map(|i| i.latency())
-            .sum();
+        self.estimated_cycles = self.instructions.iter().map(|i| i.latency()).sum();
     }
 }
 
@@ -80,7 +78,11 @@ pub struct Register {
 impl Register {
     /// Create a new register.
     pub fn new(id: u8, reg_type: RegisterType, width: u16) -> Self {
-        Self { id, reg_type, width }
+        Self {
+            id,
+            reg_type,
+            width,
+        }
     }
 
     /// Create a general purpose register.
@@ -361,7 +363,11 @@ impl CodeGenerator {
     }
 
     /// Generate code for a vector operation.
-    pub fn generate_op(&mut self, op: VectorOp, _data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_op(
+        &mut self,
+        op: VectorOp,
+        _data_type: VectorDataType,
+    ) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 
@@ -375,13 +381,16 @@ impl CodeGenerator {
         code.add_instruction(
             Instruction::new(OpCode::Load)
                 .with_dest(input1)
-                .with_memory(MemoryOperand::new(base_reg, 0))
+                .with_memory(MemoryOperand::new(base_reg, 0)),
         );
 
         code.add_instruction(
             Instruction::new(OpCode::Load)
                 .with_dest(input2)
-                .with_memory(MemoryOperand::new(base_reg, self.simd_level.vector_width() as i32))
+                .with_memory(MemoryOperand::new(
+                    base_reg,
+                    self.simd_level.vector_width() as i32,
+                )),
         );
 
         // Generate operation
@@ -402,14 +411,14 @@ impl CodeGenerator {
             Instruction::new(opcode)
                 .with_dest(output)
                 .with_source(input1)
-                .with_source(input2)
+                .with_source(input2),
         );
 
         // Store result
         code.add_instruction(
             Instruction::new(OpCode::Store)
                 .with_source(output)
-                .with_memory(MemoryOperand::new(base_reg, 0))
+                .with_memory(MemoryOperand::new(base_reg, 0)),
         );
 
         code.registers = vec![input1, input2, output, base_reg];
@@ -419,7 +428,11 @@ impl CodeGenerator {
     }
 
     /// Generate code for a filter operation.
-    pub fn generate_filter(&mut self, comparison: VectorOp, _data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_filter(
+        &mut self,
+        comparison: VectorOp,
+        _data_type: VectorDataType,
+    ) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 
@@ -434,14 +447,14 @@ impl CodeGenerator {
         code.add_instruction(
             Instruction::new(OpCode::Load)
                 .with_dest(input)
-                .with_memory(MemoryOperand::new(base_reg, 0))
+                .with_memory(MemoryOperand::new(base_reg, 0)),
         );
 
         // Broadcast threshold
         code.add_instruction(
             Instruction::new(OpCode::Broadcast)
                 .with_dest(threshold)
-                .with_immediate(0) // Placeholder for actual threshold
+                .with_immediate(0), // Placeholder for actual threshold
         );
 
         // Compare
@@ -456,14 +469,17 @@ impl CodeGenerator {
             Instruction::new(cmp_opcode)
                 .with_dest(mask)
                 .with_source(input)
-                .with_source(threshold)
+                .with_source(threshold),
         );
 
         // Store mask
         code.add_instruction(
             Instruction::new(OpCode::Store)
                 .with_source(mask)
-                .with_memory(MemoryOperand::new(base_reg, self.simd_level.vector_width() as i32))
+                .with_memory(MemoryOperand::new(
+                    base_reg,
+                    self.simd_level.vector_width() as i32,
+                )),
         );
 
         code.registers = vec![input, threshold, mask, base_reg];
@@ -473,7 +489,11 @@ impl CodeGenerator {
     }
 
     /// Generate code for an aggregate operation.
-    pub fn generate_aggregate(&mut self, agg_op: VectorOp, _data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_aggregate(
+        &mut self,
+        agg_op: VectorOp,
+        _data_type: VectorDataType,
+    ) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 
@@ -496,14 +516,14 @@ impl CodeGenerator {
         code.add_instruction(
             Instruction::new(OpCode::Broadcast)
                 .with_dest(accumulator)
-                .with_immediate(init_val)
+                .with_immediate(init_val),
         );
 
         // Load input chunk
         code.add_instruction(
             Instruction::new(OpCode::Load)
                 .with_dest(input)
-                .with_memory(MemoryOperand::new(base_reg, 0))
+                .with_memory(MemoryOperand::new(base_reg, 0)),
         );
 
         // Reduce operation
@@ -518,21 +538,21 @@ impl CodeGenerator {
             Instruction::new(reduce_op)
                 .with_dest(accumulator)
                 .with_source(accumulator)
-                .with_source(input)
+                .with_source(input),
         );
 
         // Horizontal reduce
         code.add_instruction(
             Instruction::new(OpCode::Reduce)
                 .with_dest(result)
-                .with_source(accumulator)
+                .with_source(accumulator),
         );
 
         // Store result
         code.add_instruction(
             Instruction::new(OpCode::Store)
                 .with_source(result)
-                .with_memory(MemoryOperand::new(base_reg, 0))
+                .with_memory(MemoryOperand::new(base_reg, 0)),
         );
 
         code.registers = vec![input, accumulator, result, base_reg, counter];
@@ -542,7 +562,11 @@ impl CodeGenerator {
     }
 
     /// Generate code for fused operations.
-    pub fn generate_fused(&mut self, ops: &[VectorOp], _data_type: VectorDataType) -> Result<GeneratedCode> {
+    pub fn generate_fused(
+        &mut self,
+        ops: &[VectorOp],
+        _data_type: VectorDataType,
+    ) -> Result<GeneratedCode> {
         self.reset_regs();
         let mut code = GeneratedCode::new();
 
@@ -561,13 +585,13 @@ impl CodeGenerator {
         code.add_instruction(
             Instruction::new(OpCode::Load)
                 .with_dest(input1)
-                .with_memory(MemoryOperand::new(base_reg, 0))
+                .with_memory(MemoryOperand::new(base_reg, 0)),
         );
 
         code.add_instruction(
             Instruction::new(OpCode::Load)
                 .with_dest(input2)
-                .with_memory(MemoryOperand::new(base_reg, width as i32 / 8))
+                .with_memory(MemoryOperand::new(base_reg, width as i32 / 8)),
         );
 
         // First operation
@@ -576,7 +600,7 @@ impl CodeGenerator {
             Instruction::new(first_op)
                 .with_dest(current)
                 .with_source(input1)
-                .with_source(input2)
+                .with_source(input2),
         );
 
         // Subsequent operations
@@ -588,7 +612,7 @@ impl CodeGenerator {
                 Instruction::new(opcode)
                     .with_dest(next)
                     .with_source(current)
-                    .with_source(input2)
+                    .with_source(input2),
             );
 
             current = next;
@@ -598,7 +622,7 @@ impl CodeGenerator {
         code.add_instruction(
             Instruction::new(OpCode::Store)
                 .with_source(current)
-                .with_memory(MemoryOperand::new(base_reg, 0))
+                .with_memory(MemoryOperand::new(base_reg, 0)),
         );
 
         code.finalize();
@@ -692,7 +716,9 @@ mod tests {
     #[test]
     fn test_code_generator_filter() {
         let mut gen = CodeGenerator::new(SimdLevel::Avx2);
-        let code = gen.generate_filter(VectorOp::Gt, VectorDataType::I32).unwrap();
+        let code = gen
+            .generate_filter(VectorOp::Gt, VectorDataType::I32)
+            .unwrap();
 
         assert!(!code.instructions.is_empty());
         // Should have compare instruction
@@ -702,7 +728,9 @@ mod tests {
     #[test]
     fn test_code_generator_aggregate() {
         let mut gen = CodeGenerator::new(SimdLevel::Avx2);
-        let code = gen.generate_aggregate(VectorOp::Sum, VectorDataType::I64).unwrap();
+        let code = gen
+            .generate_aggregate(VectorOp::Sum, VectorDataType::I64)
+            .unwrap();
 
         assert!(!code.instructions.is_empty());
         // Should have reduce instruction
@@ -745,7 +773,7 @@ mod tests {
     fn test_estimated_cycles() {
         let mut code = GeneratedCode::new();
         code.add_instruction(Instruction::new(OpCode::Load)); // 4 cycles
-        code.add_instruction(Instruction::new(OpCode::Add));  // 1 cycle
+        code.add_instruction(Instruction::new(OpCode::Add)); // 1 cycle
         code.add_instruction(Instruction::new(OpCode::Store)); // 4 cycles
         code.finalize();
 

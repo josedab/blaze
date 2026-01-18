@@ -3,8 +3,8 @@
 //! This module provides GPU device detection, capability querying,
 //! and device selection for different backends (CUDA, Metal, WebGPU).
 
-use std::fmt;
 use crate::error::{BlazeError, Result};
+use std::fmt;
 
 /// GPU backend type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -285,7 +285,7 @@ impl DeviceManager {
             "Apple GPU".to_string(),
             GpuBackend::Metal,
             GpuCapabilities {
-                compute_version: (3, 0), // Metal 3
+                compute_version: (3, 0),              // Metal 3
                 total_memory: 8 * 1024 * 1024 * 1024, // 8 GB typical
                 max_threads_per_block: 1024,
                 max_grid_size: (65535, 65535, 65535),

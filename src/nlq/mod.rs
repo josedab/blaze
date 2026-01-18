@@ -20,13 +20,13 @@
 //! // Result: "SELECT * FROM users WHERE state = 'California'"
 //! ```
 
-mod parser;
-mod intent;
 mod generator;
+mod intent;
+mod parser;
 
+pub use generator::{GeneratorConfig, SqlGenerator};
+pub use intent::{AggregateType, FilterOperator, IntentClassifier, QueryIntent};
 pub use parser::{NLParser, ParsedQuery, Token, TokenType};
-pub use intent::{QueryIntent, IntentClassifier, AggregateType, FilterOperator};
-pub use generator::{SqlGenerator, GeneratorConfig};
 
 use std::collections::HashMap;
 
@@ -85,7 +85,9 @@ impl NaturalLanguageProcessor {
         let intent = self.classifier.classify(&parsed)?;
 
         // Generate SQL
-        let sql = self.generator.generate(&parsed, &intent, self.schema_context.as_ref())?;
+        let sql = self
+            .generator
+            .generate(&parsed, &intent, self.schema_context.as_ref())?;
 
         Ok(sql)
     }
@@ -94,7 +96,9 @@ impl NaturalLanguageProcessor {
     pub fn to_sql_with_explanation(&self, query: &str) -> Result<QueryResult> {
         let parsed = self.parser.parse(query)?;
         let intent = self.classifier.classify(&parsed)?;
-        let sql = self.generator.generate(&parsed, &intent, self.schema_context.as_ref())?;
+        let sql = self
+            .generator
+            .generate(&parsed, &intent, self.schema_context.as_ref())?;
         let confidence = self.classifier.confidence(&parsed);
         let explanation = self.generate_explanation(&parsed, &intent);
 
@@ -115,14 +119,15 @@ impl NaturalLanguageProcessor {
                 if columns.is_empty() || columns.contains(&"*".to_string()) {
                     parts.push(format!("Selecting all columns from {}", table));
                 } else {
-                    parts.push(format!(
-                        "Selecting {} from {}",
-                        columns.join(", "),
-                        table
-                    ));
+                    parts.push(format!("Selecting {} from {}", columns.join(", "), table));
                 }
             }
-            QueryIntent::Aggregate { table, aggregates, group_by, .. } => {
+            QueryIntent::Aggregate {
+                table,
+                aggregates,
+                group_by,
+                ..
+            } => {
                 let agg_desc: Vec<String> = aggregates
                     .iter()
                     .map(|(agg, col)| format!("{:?} of {}", agg, col))
@@ -139,7 +144,11 @@ impl NaturalLanguageProcessor {
             QueryIntent::Count { table, .. } => {
                 parts.push(format!("Counting rows in {}", table));
             }
-            QueryIntent::Join { left_table, right_table, .. } => {
+            QueryIntent::Join {
+                left_table,
+                right_table,
+                ..
+            } => {
                 parts.push(format!("Joining {} with {}", left_table, right_table));
             }
         }
@@ -284,7 +293,8 @@ impl SchemaContext {
 
     /// Add an alias.
     pub fn add_alias(&mut self, alias: &str, actual: &str) {
-        self.aliases.insert(alias.to_lowercase(), actual.to_string());
+        self.aliases
+            .insert(alias.to_lowercase(), actual.to_string());
     }
 
     /// Resolve an alias to actual name.
@@ -303,7 +313,9 @@ impl SchemaContext {
     /// Check if a table exists.
     pub fn has_table(&self, name: &str) -> bool {
         let resolved = self.resolve_alias(name);
-        self.table_names.iter().any(|t| t.eq_ignore_ascii_case(&resolved))
+        self.table_names
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&resolved))
     }
 
     /// Get column names for a table.
@@ -387,8 +399,7 @@ mod tests {
 
     #[test]
     fn test_simple_select() {
-        let processor = NaturalLanguageProcessor::new()
-            .with_schema_context(create_test_context());
+        let processor = NaturalLanguageProcessor::new().with_schema_context(create_test_context());
 
         let result = processor.to_sql("show all users");
         assert!(result.is_ok());
@@ -399,8 +410,7 @@ mod tests {
 
     #[test]
     fn test_query_with_filter() {
-        let processor = NaturalLanguageProcessor::new()
-            .with_schema_context(create_test_context());
+        let processor = NaturalLanguageProcessor::new().with_schema_context(create_test_context());
 
         let result = processor.to_sql("find users where age > 25");
         assert!(result.is_ok());
@@ -408,8 +418,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_query() {
-        let processor = NaturalLanguageProcessor::new()
-            .with_schema_context(create_test_context());
+        let processor = NaturalLanguageProcessor::new().with_schema_context(create_test_context());
 
         let result = processor.to_sql("count users");
         assert!(result.is_ok());
@@ -419,8 +428,7 @@ mod tests {
 
     #[test]
     fn test_query_with_explanation() {
-        let processor = NaturalLanguageProcessor::new()
-            .with_schema_context(create_test_context());
+        let processor = NaturalLanguageProcessor::new().with_schema_context(create_test_context());
 
         let result = processor.to_sql_with_explanation("show all users");
         assert!(result.is_ok());
