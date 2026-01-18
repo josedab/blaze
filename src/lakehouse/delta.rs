@@ -7,16 +7,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::datatypes::Schema as ArrowSchema;
-use arrow::record_batch::RecordBatch;
+use super::{DataFileInfo, LakehouseTable, Operation, TableProperties, TableVersion};
 use crate::catalog::TableProvider;
 use crate::error::{BlazeError, Result};
-use crate::types::{DataType, Field, Schema, TimeUnit};
 use crate::storage::ParquetTable;
-use super::{
-    LakehouseTable, TableProperties, DataFileInfo,
-    Operation, TableVersion,
-};
+use crate::types::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::Schema as ArrowSchema;
+use arrow::record_batch::RecordBatch;
 
 /// Delta Lake table.
 pub struct DeltaTable {
@@ -55,14 +52,16 @@ impl DeltaTable {
         let log = DeltaLog::load(&delta_log_path)?;
 
         // Get schema from the latest version
-        let schema = log.current_schema().cloned().unwrap_or_else(|| {
-            Schema::new(vec![Field::new("_placeholder", DataType::Utf8, true)])
-        });
+        let schema = log
+            .current_schema()
+            .cloned()
+            .unwrap_or_else(|| Schema::new(vec![Field::new("_placeholder", DataType::Utf8, true)]));
 
         let arrow_schema = Arc::new(schema.to_arrow());
 
         // Extract table name from path
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("delta_table")
             .to_string();
@@ -117,10 +116,13 @@ impl DeltaTable {
 
     /// Time travel to a specific version.
     pub fn at_version(&self, version: i64) -> Result<Self> {
-        Self::open_with_options(&self.location, DeltaTableOptions {
-            version: Some(version),
-            ..Default::default()
-        })
+        Self::open_with_options(
+            &self.location,
+            DeltaTableOptions {
+                version: Some(version),
+                ..Default::default()
+            },
+        )
     }
 
     /// Time travel to a specific timestamp.
@@ -286,8 +288,8 @@ impl DeltaLog {
 
                 // Track file adds/removes
                 for add in &entry.adds {
-                    data_files.push(DataFileInfo::new(&add.path, "parquet")
-                        .with_size(add.size as usize));
+                    data_files
+                        .push(DataFileInfo::new(&add.path, "parquet").with_size(add.size as usize));
                 }
                 for remove in &entry.removes {
                     data_files.retain(|f| f.path != remove.path);
@@ -331,8 +333,8 @@ impl DeltaLog {
             }
 
             for add in &entry.adds {
-                log.data_files.push(DataFileInfo::new(&add.path, "parquet")
-                    .with_size(add.size as usize));
+                log.data_files
+                    .push(DataFileInfo::new(&add.path, "parquet").with_size(add.size as usize));
             }
             for remove in &entry.removes {
                 log.data_files.retain(|f| f.path != remove.path);
@@ -378,7 +380,8 @@ impl DeltaLog {
 
     /// Get partition columns.
     pub fn partition_columns(&self) -> &[String] {
-        self.metadata.as_ref()
+        self.metadata
+            .as_ref()
             .map(|m| m.partition_columns.as_slice())
             .unwrap_or(&[])
     }
@@ -428,33 +431,43 @@ impl DeltaLogEntry {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(p) = value.get("protocol") {
                     protocol = Some(DeltaProtocol {
-                        min_reader_version: p.get("minReaderVersion")
+                        min_reader_version: p
+                            .get("minReaderVersion")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(1) as i32,
-                        min_writer_version: p.get("minWriterVersion")
+                        min_writer_version: p
+                            .get("minWriterVersion")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(2) as i32,
                     });
                 }
 
                 if let Some(m) = value.get("metaData") {
-                    let schema = if let Some(schema_str) = m.get("schemaString").and_then(|s| s.as_str()) {
-                        parse_delta_schema(schema_str).unwrap_or_else(|_|
+                    let schema =
+                        if let Some(schema_str) = m.get("schemaString").and_then(|s| s.as_str()) {
+                            parse_delta_schema(schema_str).unwrap_or_else(|_| {
+                                Schema::new(vec![Field::new("_placeholder", DataType::Utf8, true)])
+                            })
+                        } else {
                             Schema::new(vec![Field::new("_placeholder", DataType::Utf8, true)])
-                        )
-                    } else {
-                        Schema::new(vec![Field::new("_placeholder", DataType::Utf8, true)])
-                    };
+                        };
 
-                    let partition_columns = m.get("partitionColumns")
+                    let partition_columns = m
+                        .get("partitionColumns")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default();
 
                     metadata = Some(DeltaMetadata {
-                        id: m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        id: m
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         name: m.get("name").and_then(|v| v.as_str()).map(String::from),
                         schema,
                         partition_columns,
@@ -463,19 +476,19 @@ impl DeltaLogEntry {
                 }
 
                 if let Some(a) = value.get("add") {
-                    let path = a.get("path")
+                    let path = a
+                        .get("path")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let size = a.get("size")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
+                    let size = a.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
 
                     adds.push(DeltaAdd { path, size });
                 }
 
                 if let Some(r) = value.get("remove") {
-                    let path = r.get("path")
+                    let path = r
+                        .get("path")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
@@ -484,9 +497,7 @@ impl DeltaLogEntry {
                 }
 
                 if let Some(txn) = value.get("commitInfo") {
-                    timestamp = txn.get("timestamp")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
+                    timestamp = txn.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
 
                     if let Some(op) = txn.get("operation").and_then(|v| v.as_str()) {
                         operation = Operation::from_str(op);
@@ -552,18 +563,21 @@ fn parse_delta_schema(schema_str: &str) -> Result<Schema> {
     let value: serde_json::Value = serde_json::from_str(schema_str)
         .map_err(|e| BlazeError::execution(format!("Failed to parse schema: {}", e)))?;
 
-    let fields = value.get("fields")
+    let fields = value
+        .get("fields")
         .and_then(|f| f.as_array())
         .ok_or_else(|| BlazeError::execution("Invalid schema: no fields"))?;
 
     let mut result_fields = Vec::new();
     for field in fields {
-        let name = field.get("name")
+        let name = field
+            .get("name")
             .and_then(|n| n.as_str())
             .unwrap_or("_unknown")
             .to_string();
 
-        let nullable = field.get("nullable")
+        let nullable = field
+            .get("nullable")
             .and_then(|n| n.as_bool())
             .unwrap_or(true);
 
@@ -578,22 +592,23 @@ fn parse_delta_schema(schema_str: &str) -> Result<Schema> {
 /// Parse Delta Lake data type.
 fn parse_delta_type(type_value: Option<&serde_json::Value>) -> Result<DataType> {
     match type_value {
-        Some(serde_json::Value::String(s)) => {
-            Ok(match s.as_str() {
-                "string" => DataType::Utf8,
-                "long" | "bigint" => DataType::Int64,
-                "integer" | "int" => DataType::Int32,
-                "short" | "smallint" => DataType::Int16,
-                "byte" | "tinyint" => DataType::Int8,
-                "float" => DataType::Float32,
-                "double" => DataType::Float64,
-                "boolean" => DataType::Boolean,
-                "binary" => DataType::Binary,
-                "date" => DataType::Date32,
-                "timestamp" => DataType::Timestamp { unit: TimeUnit::Microsecond, timezone: None },
-                _ => DataType::Utf8,
-            })
-        }
+        Some(serde_json::Value::String(s)) => Ok(match s.as_str() {
+            "string" => DataType::Utf8,
+            "long" | "bigint" => DataType::Int64,
+            "integer" | "int" => DataType::Int32,
+            "short" | "smallint" => DataType::Int16,
+            "byte" | "tinyint" => DataType::Int8,
+            "float" => DataType::Float32,
+            "double" => DataType::Float64,
+            "boolean" => DataType::Boolean,
+            "binary" => DataType::Binary,
+            "date" => DataType::Date32,
+            "timestamp" => DataType::Timestamp {
+                unit: TimeUnit::Microsecond,
+                timezone: None,
+            },
+            _ => DataType::Utf8,
+        }),
         Some(serde_json::Value::Object(obj)) => {
             // Complex type
             if let Some(element_type) = obj.get("elementType") {
@@ -614,8 +629,7 @@ mod tests {
 
     #[test]
     fn test_delta_table_options() {
-        let opts = DeltaTableOptions::new()
-            .with_version(5);
+        let opts = DeltaTableOptions::new().with_version(5);
 
         assert_eq!(opts.version, Some(5));
     }
@@ -633,9 +647,21 @@ mod tests {
 
     #[test]
     fn test_parse_delta_type() {
-        assert_eq!(parse_delta_type(Some(&serde_json::json!("string"))).unwrap(), DataType::Utf8);
-        assert_eq!(parse_delta_type(Some(&serde_json::json!("long"))).unwrap(), DataType::Int64);
-        assert_eq!(parse_delta_type(Some(&serde_json::json!("integer"))).unwrap(), DataType::Int32);
-        assert_eq!(parse_delta_type(Some(&serde_json::json!("double"))).unwrap(), DataType::Float64);
+        assert_eq!(
+            parse_delta_type(Some(&serde_json::json!("string"))).unwrap(),
+            DataType::Utf8
+        );
+        assert_eq!(
+            parse_delta_type(Some(&serde_json::json!("long"))).unwrap(),
+            DataType::Int64
+        );
+        assert_eq!(
+            parse_delta_type(Some(&serde_json::json!("integer"))).unwrap(),
+            DataType::Int32
+        );
+        assert_eq!(
+            parse_delta_type(Some(&serde_json::json!("double"))).unwrap(),
+            DataType::Float64
+        );
     }
 }

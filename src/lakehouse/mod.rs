@@ -28,8 +28,8 @@ mod delta;
 mod iceberg;
 mod snapshot;
 
-pub use delta::{DeltaTable, DeltaTableOptions, DeltaLog};
-pub use iceberg::{IcebergTable, IcebergTableOptions, IcebergSnapshot};
+pub use delta::{DeltaLog, DeltaTable, DeltaTableOptions};
+pub use iceberg::{IcebergSnapshot, IcebergTable, IcebergTableOptions};
 pub use snapshot::{Operation, Snapshot, SnapshotId, SnapshotSummary, TableVersion};
 
 use std::path::Path;
