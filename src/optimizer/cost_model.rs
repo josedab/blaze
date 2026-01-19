@@ -33,22 +33,42 @@ pub struct Cost {
 impl Cost {
     /// Create a new cost with all components.
     pub fn new(cpu: f64, io: f64, network: f64, memory: f64) -> Self {
-        Self { cpu, io, network, memory }
+        Self {
+            cpu,
+            io,
+            network,
+            memory,
+        }
     }
 
     /// Create a zero cost.
     pub fn zero() -> Self {
-        Self { cpu: 0.0, io: 0.0, network: 0.0, memory: 0.0 }
+        Self {
+            cpu: 0.0,
+            io: 0.0,
+            network: 0.0,
+            memory: 0.0,
+        }
     }
 
     /// Create a cost with only CPU component.
     pub fn cpu(cpu: f64) -> Self {
-        Self { cpu, io: 0.0, network: 0.0, memory: 0.0 }
+        Self {
+            cpu,
+            io: 0.0,
+            network: 0.0,
+            memory: 0.0,
+        }
     }
 
     /// Create a cost with only I/O component.
     pub fn io(io: f64) -> Self {
-        Self { cpu: 0.0, io, network: 0.0, memory: 0.0 }
+        Self {
+            cpu: 0.0,
+            io,
+            network: 0.0,
+            memory: 0.0,
+        }
     }
 
     /// Calculate total weighted cost.
@@ -108,6 +128,7 @@ pub struct CostModel {
     /// Cost per page read from disk
     io_cost_factor: f64,
     /// Cost per tuple transferred over network
+    #[allow(dead_code)]
     network_cost_factor: f64,
     /// Cost per byte of memory used
     memory_cost_factor: f64,
@@ -177,12 +198,7 @@ impl CostModel {
     }
 
     /// Estimate cost of a hash join.
-    pub fn hash_join_cost(
-        &self,
-        left_rows: usize,
-        right_rows: usize,
-        output_rows: usize,
-    ) -> Cost {
+    pub fn hash_join_cost(&self, left_rows: usize, right_rows: usize, output_rows: usize) -> Cost {
         // Build phase: hash the smaller input
         let (build_rows, probe_rows) = if left_rows < right_rows {
             (left_rows, right_rows)
@@ -222,12 +238,7 @@ impl CostModel {
     }
 
     /// Estimate cost of a merge join (assuming sorted inputs).
-    pub fn merge_join_cost(
-        &self,
-        left_rows: usize,
-        right_rows: usize,
-        output_rows: usize,
-    ) -> Cost {
+    pub fn merge_join_cost(&self, left_rows: usize, right_rows: usize, output_rows: usize) -> Cost {
         Cost {
             cpu: (left_rows + right_rows + output_rows) as f64 * self.cpu_cost_factor,
             io: 0.0,
@@ -301,10 +312,15 @@ impl CostModel {
     /// Estimate the total cost of a logical plan.
     pub fn estimate(&self, plan: &LogicalPlan) -> Result<Cost> {
         match plan {
-            LogicalPlan::TableScan { projection, schema, .. } => {
-                let num_cols = projection.as_ref().map(|p| p.len()).unwrap_or(schema.fields().len());
+            LogicalPlan::TableScan {
+                projection, schema, ..
+            } => {
+                let num_cols = projection
+                    .as_ref()
+                    .map(|p| p.len())
+                    .unwrap_or(schema.fields().len());
                 let row_width = num_cols * 8; // Assume 8 bytes per column average
-                // For now, estimate 1000 rows since we don't have actual stats
+                                              // For now, estimate 1000 rows since we don't have actual stats
                 Ok(self.scan_cost(1000, row_width))
             }
             LogicalPlan::Filter { input, .. } => {
@@ -317,7 +333,12 @@ impl CostModel {
                 let proj_cost = self.projection_cost(1000, exprs.len());
                 Ok(input_cost + proj_cost)
             }
-            LogicalPlan::Aggregate { input, group_by, aggr_exprs, .. } => {
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggr_exprs,
+                ..
+            } => {
                 let input_cost = self.estimate(input)?;
                 let num_groups = if group_by.is_empty() { 1 } else { 100 }; // Estimate
                 let agg_cost = self.hash_aggregate_cost(1000, num_groups, aggr_exprs.len());
@@ -355,12 +376,8 @@ impl CostModel {
                 let right_cost = self.estimate(right)?;
                 Ok(left_cost + right_cost)
             }
-            LogicalPlan::Values { .. } => {
-                Ok(Cost::zero())
-            }
-            LogicalPlan::SubqueryAlias { input, .. } => {
-                self.estimate(input)
-            }
+            LogicalPlan::Values { .. } => Ok(Cost::zero()),
+            LogicalPlan::SubqueryAlias { input, .. } => self.estimate(input),
             LogicalPlan::Window { input, .. } => {
                 let input_cost = self.estimate(input)?;
                 let window_cost = Cost::cpu(1000.0 * self.cpu_cost_factor * 2.0);

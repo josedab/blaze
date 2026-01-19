@@ -19,15 +19,15 @@
 //! let optimized_plan = optimizer.optimize(logical_plan, &statistics)?;
 //! ```
 
-mod cost_model;
-mod statistics;
-mod join_ordering;
 mod cardinality;
+mod cost_model;
+mod join_ordering;
+mod statistics;
 
-pub use cost_model::{Cost, CostModel, DEFAULT_CPU_COST, DEFAULT_IO_COST};
-pub use statistics::{ColumnStatistics, TableStatistics, Histogram, StatisticsManager};
-pub use join_ordering::JoinOrderOptimizer;
 pub use cardinality::CardinalityEstimator;
+pub use cost_model::{Cost, CostModel, DEFAULT_CPU_COST, DEFAULT_IO_COST};
+pub use join_ordering::JoinOrderOptimizer;
+pub use statistics::{ColumnStatistics, Histogram, StatisticsManager, TableStatistics};
 
 use crate::error::Result;
 use crate::planner::LogicalPlan;
@@ -68,7 +68,9 @@ impl CostBasedOptimizer {
         let plan_with_stats = self.cardinality_estimator.estimate(plan, stats_manager)?;
 
         // Optimize join ordering if there are multiple joins
-        let plan_with_optimized_joins = self.join_optimizer.optimize(&plan_with_stats, &self.cost_model)?;
+        let plan_with_optimized_joins = self
+            .join_optimizer
+            .optimize(&plan_with_stats, &self.cost_model)?;
 
         Ok(plan_with_optimized_joins)
     }

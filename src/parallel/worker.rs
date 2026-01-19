@@ -3,8 +3,8 @@
 //! This module provides a thread pool for parallel query execution,
 //! managing worker threads and task distribution.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -105,9 +105,8 @@ impl WorkerPool {
         }
 
         // Use scoped threads for parallel execution
-        let results: Arc<Mutex<Vec<Option<TaskResult>>>> = Arc::new(Mutex::new(
-            (0..num_tasks).map(|_| None).collect()
-        ));
+        let results: Arc<Mutex<Vec<Option<TaskResult>>>> =
+            Arc::new(Mutex::new((0..num_tasks).map(|_| None).collect()));
 
         // Collect tasks into Arc for sharing
         let tasks: Vec<_> = tasks.into_iter().map(|t| Mutex::new(Some(t))).collect();
@@ -153,9 +152,10 @@ impl WorkerPool {
         let mut results_guard = results.lock().unwrap();
         let final_results: Vec<TaskResult> = results_guard
             .iter_mut()
-            .map(|opt| opt.take().unwrap_or_else(|| {
-                Err(BlazeError::execution("Task result missing"))
-            }))
+            .map(|opt| {
+                opt.take()
+                    .unwrap_or_else(|| Err(BlazeError::execution("Task result missing")))
+            })
             .collect();
 
         Ok(final_results)
@@ -168,20 +168,26 @@ impl WorkerPool {
     {
         let task = WorkerTask::new(0, task_fn);
         let results = self.execute_all(vec![task])?;
-        results.into_iter().next().unwrap_or_else(|| {
-            Err(BlazeError::execution("No result returned"))
-        })
+        results
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Err(BlazeError::execution("No result returned")))
     }
 }
 
 impl Default for WorkerPool {
     fn default() -> Self {
-        Self::new(thread::available_parallelism().map(|p| p.get()).unwrap_or(4))
+        Self::new(
+            thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4),
+        )
     }
 }
 
 /// Statistics for worker pool.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct WorkerPoolStats {
     /// Total tasks executed
     pub tasks_executed: usize,
@@ -194,11 +200,13 @@ pub struct WorkerPoolStats {
 }
 
 /// Simple future-like wrapper for async task results.
+#[allow(dead_code)]
 pub struct TaskFuture<T> {
     result: Arc<Mutex<Option<T>>>,
     completed: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl<T> TaskFuture<T> {
     /// Create a new task future.
     pub fn new() -> (Self, TaskFutureSetter<T>) {
@@ -210,10 +218,7 @@ impl<T> TaskFuture<T> {
             completed: completed.clone(),
         };
 
-        let setter = TaskFutureSetter {
-            result,
-            completed,
-        };
+        let setter = TaskFutureSetter { result, completed };
 
         (future, setter)
     }
@@ -240,11 +245,13 @@ impl<T> Default for TaskFuture<T> {
 }
 
 /// Setter for task future results.
+#[allow(dead_code)]
 pub struct TaskFutureSetter<T> {
     result: Arc<Mutex<Option<T>>>,
     completed: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl<T> TaskFutureSetter<T> {
     /// Set the result.
     pub fn set(self, value: T) {
@@ -338,9 +345,7 @@ mod tests {
     fn test_single_task_execution() {
         let pool = WorkerPool::new(2);
 
-        let result = pool.execute_one(|_ctx| {
-            Ok(vec![])
-        });
+        let result = pool.execute_one(|_ctx| Ok(vec![]));
 
         assert!(result.is_ok());
     }

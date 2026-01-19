@@ -16,9 +16,16 @@ use crate::error::{BlazeError, Result};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Partitioning {
     /// Hash partitioning on specified columns
-    Hash { columns: Vec<usize>, num_partitions: usize },
+    Hash {
+        columns: Vec<usize>,
+        num_partitions: usize,
+    },
     /// Range partitioning on a column with boundaries
-    Range { column: usize, boundaries: Vec<String>, num_partitions: usize },
+    Range {
+        column: usize,
+        boundaries: Vec<String>,
+        num_partitions: usize,
+    },
     /// Round-robin partitioning
     RoundRobin { num_partitions: usize },
     /// Single partition (no partitioning)
@@ -69,7 +76,10 @@ impl HashPartitioner {
 
         let num_rows = batch.num_rows();
         if num_rows == 0 {
-            return Ok(vec![RecordBatch::new_empty(batch.schema()); self.num_partitions]);
+            return Ok(vec![
+                RecordBatch::new_empty(batch.schema());
+                self.num_partitions
+            ]);
         }
 
         // Compute hash for each row
@@ -95,8 +105,9 @@ impl HashPartitioner {
                     .map(|col| compute::take(col.as_ref(), &indices_array, None))
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| BlazeError::execution(format!("Failed to partition: {}", e)))?;
-                result.push(RecordBatch::try_new(batch.schema(), arrays)
-                    .map_err(|e| BlazeError::execution(format!("Failed to create batch: {}", e)))?);
+                result.push(RecordBatch::try_new(batch.schema(), arrays).map_err(|e| {
+                    BlazeError::execution(format!("Failed to create batch: {}", e))
+                })?);
             }
         }
 
@@ -213,7 +224,10 @@ impl RangePartitioner {
 
         let num_rows = batch.num_rows();
         if num_rows == 0 {
-            return Ok(vec![RecordBatch::new_empty(batch.schema()); self.num_partitions]);
+            return Ok(vec![
+                RecordBatch::new_empty(batch.schema());
+                self.num_partitions
+            ]);
         }
 
         // Get the key column
@@ -251,8 +265,9 @@ impl RangePartitioner {
                     .map(|col| compute::take(col.as_ref(), &indices_array, None))
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| BlazeError::execution(format!("Failed to partition: {}", e)))?;
-                result.push(RecordBatch::try_new(batch.schema(), arrays)
-                    .map_err(|e| BlazeError::execution(format!("Failed to create batch: {}", e)))?);
+                result.push(RecordBatch::try_new(batch.schema(), arrays).map_err(|e| {
+                    BlazeError::execution(format!("Failed to create batch: {}", e))
+                })?);
             }
         }
 
@@ -292,7 +307,10 @@ impl RoundRobinPartitioner {
 
         let num_rows = batch.num_rows();
         if num_rows == 0 {
-            return Ok(vec![RecordBatch::new_empty(batch.schema()); self.num_partitions]);
+            return Ok(vec![
+                RecordBatch::new_empty(batch.schema());
+                self.num_partitions
+            ]);
         }
 
         // Group row indices by partition (round-robin)
@@ -315,8 +333,9 @@ impl RoundRobinPartitioner {
                     .map(|col| compute::take(col.as_ref(), &indices_array, None))
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| BlazeError::execution(format!("Failed to partition: {}", e)))?;
-                result.push(RecordBatch::try_new(batch.schema(), arrays)
-                    .map_err(|e| BlazeError::execution(format!("Failed to create batch: {}", e)))?);
+                result.push(RecordBatch::try_new(batch.schema(), arrays).map_err(|e| {
+                    BlazeError::execution(format!("Failed to create batch: {}", e))
+                })?);
             }
         }
 
@@ -325,6 +344,7 @@ impl RoundRobinPartitioner {
 }
 
 /// Utility to coalesce multiple batches into one.
+#[allow(dead_code)]
 pub fn coalesce_batches(batches: Vec<RecordBatch>) -> Result<Option<RecordBatch>> {
     if batches.is_empty() {
         return Ok(None);
@@ -340,10 +360,7 @@ pub fn coalesce_batches(batches: Vec<RecordBatch>) -> Result<Option<RecordBatch>
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for col_idx in 0..schema.fields().len() {
-        let arrays: Vec<&dyn Array> = batches
-            .iter()
-            .map(|b| b.column(col_idx).as_ref())
-            .collect();
+        let arrays: Vec<&dyn Array> = batches.iter().map(|b| b.column(col_idx).as_ref()).collect();
 
         let concatenated = compute::concat(&arrays)
             .map_err(|e| BlazeError::execution(format!("Failed to concatenate: {}", e)))?;
@@ -377,7 +394,10 @@ mod tests {
 
     #[test]
     fn test_hash_partitioner() {
-        let batch = make_test_batch(&[1, 2, 3, 4, 5, 6, 7, 8], &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let batch = make_test_batch(
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &["a", "b", "c", "d", "e", "f", "g", "h"],
+        );
 
         let partitioner = HashPartitioner::new(4, vec![0]);
         let partitions = partitioner.partition(&batch).unwrap();
@@ -391,7 +411,10 @@ mod tests {
 
     #[test]
     fn test_range_partitioner() {
-        let batch = make_test_batch(&[10, 20, 30, 40, 50, 60, 70, 80], &["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let batch = make_test_batch(
+            &[10, 20, 30, 40, 50, 60, 70, 80],
+            &["a", "b", "c", "d", "e", "f", "g", "h"],
+        );
 
         let partitioner = RangePartitioner::uniform(4, 0, 0, 100);
         let partitions = partitioner.partition(&batch).unwrap();

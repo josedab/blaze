@@ -329,9 +329,10 @@ impl StatisticsManager {
 
     /// Register statistics for a table.
     pub fn register(&self, stats: TableStatistics) -> Result<()> {
-        let mut tables = self.tables.write().map_err(|e| {
-            BlazeError::internal(format!("Failed to acquire write lock: {}", e))
-        })?;
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|e| BlazeError::internal(format!("Failed to acquire write lock: {}", e)))?;
         tables.insert(stats.table_name.clone(), stats);
         Ok(())
     }
@@ -344,16 +345,19 @@ impl StatisticsManager {
 
     /// Remove statistics for a table.
     pub fn remove(&self, table_name: &str) -> Result<Option<TableStatistics>> {
-        let mut tables = self.tables.write().map_err(|e| {
-            BlazeError::internal(format!("Failed to acquire write lock: {}", e))
-        })?;
+        let mut tables = self
+            .tables
+            .write()
+            .map_err(|e| BlazeError::internal(format!("Failed to acquire write lock: {}", e)))?;
         Ok(tables.remove(table_name))
     }
 
     /// List all tables with statistics.
     pub fn list_tables(&self) -> Vec<String> {
         let tables = self.tables.read().ok();
-        tables.map(|t| t.keys().cloned().collect()).unwrap_or_default()
+        tables
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Estimate join cardinality between two tables.
@@ -373,10 +377,12 @@ impl StatisticsManager {
                 let right_rows = right.row_count;
 
                 // Get distinct counts for join keys
-                let left_distinct = left.column(left_key)
+                let left_distinct = left
+                    .column(left_key)
                     .and_then(|c| c.distinct_count)
                     .unwrap_or(left_rows);
-                let right_distinct = right.column(right_key)
+                let right_distinct = right
+                    .column(right_key)
                     .and_then(|c| c.distinct_count)
                     .unwrap_or(right_rows);
 
@@ -420,8 +426,7 @@ mod tests {
 
     #[test]
     fn test_selectivity_eq() {
-        let stats = ColumnStatistics::new("status", DataType::Utf8)
-            .with_distinct_count(5);
+        let stats = ColumnStatistics::new("status", DataType::Utf8).with_distinct_count(5);
 
         let selectivity = stats.selectivity_eq("active");
         assert!((selectivity - 0.2).abs() < 0.001);
@@ -446,12 +451,16 @@ mod tests {
     fn test_table_statistics() {
         let stats = TableStatistics::new("users", 10000)
             .with_size(1024 * 1024)
-            .with_column(ColumnStatistics::new("id", DataType::Int32)
-                .with_distinct_count(10000)
-                .with_avg_width(4))
-            .with_column(ColumnStatistics::new("name", DataType::Utf8)
-                .with_distinct_count(8000)
-                .with_avg_width(50));
+            .with_column(
+                ColumnStatistics::new("id", DataType::Int32)
+                    .with_distinct_count(10000)
+                    .with_avg_width(4),
+            )
+            .with_column(
+                ColumnStatistics::new("name", DataType::Utf8)
+                    .with_distinct_count(8000)
+                    .with_avg_width(50),
+            );
 
         assert_eq!(stats.row_count, 10000);
         assert_eq!(stats.avg_row_width(), 54);
@@ -477,21 +486,19 @@ mod tests {
         let manager = StatisticsManager::new();
 
         // Register orders table
-        let orders = TableStatistics::new("orders", 10000)
-            .with_column(ColumnStatistics::new("customer_id", DataType::Int32)
-                .with_distinct_count(1000));
+        let orders = TableStatistics::new("orders", 10000).with_column(
+            ColumnStatistics::new("customer_id", DataType::Int32).with_distinct_count(1000),
+        );
         manager.register(orders).unwrap();
 
         // Register customers table
         let customers = TableStatistics::new("customers", 1000)
-            .with_column(ColumnStatistics::new("id", DataType::Int32)
-                .with_distinct_count(1000));
+            .with_column(ColumnStatistics::new("id", DataType::Int32).with_distinct_count(1000));
         manager.register(customers).unwrap();
 
         // Estimate join cardinality
-        let cardinality = manager.estimate_join_cardinality(
-            "orders", "customers", "customer_id", "id"
-        );
+        let cardinality =
+            manager.estimate_join_cardinality("orders", "customers", "customer_id", "id");
 
         // Expected: 10000 * 1000 / max(1000, 1000) = 10000
         assert_eq!(cardinality, 10000);
