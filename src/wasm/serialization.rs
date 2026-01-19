@@ -7,13 +7,12 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, Int8Array, StringArray,
-    UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, Schema};
-use arrow::ipc::writer::StreamWriter;
 use arrow::ipc::reader::StreamReader;
+use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 
 use crate::error::{BlazeError, Result};
@@ -125,7 +124,10 @@ impl JsonSerializer {
                 Ok(format!("\"{}\"", escape_json_string(arr.value(idx))))
             }
             DataType::LargeUtf8 => {
-                let arr = array.as_any().downcast_ref::<arrow::array::LargeStringArray>().unwrap();
+                let arr = array
+                    .as_any()
+                    .downcast_ref::<arrow::array::LargeStringArray>()
+                    .unwrap();
                 Ok(format!("\"{}\"", escape_json_string(arr.value(idx))))
             }
             _ => Ok(format!("\"<unsupported type: {:?}>\"", array.data_type())),
@@ -165,14 +167,14 @@ impl JsonSerializer {
             .map_err(|e| BlazeError::invalid_argument(format!("Invalid JSON: {}", e)))?;
 
         match value {
-            serde_json::Value::Array(rows) => {
-                Self::deserialize_rows(&rows)
-            }
+            serde_json::Value::Array(rows) => Self::deserialize_rows(&rows),
             serde_json::Value::Object(_) => {
                 // Columnar format
                 Self::deserialize_columnar(&value)
             }
-            _ => Err(BlazeError::invalid_argument("JSON must be an array or object")),
+            _ => Err(BlazeError::invalid_argument(
+                "JSON must be an array or object",
+            )),
         }
     }
 
@@ -183,13 +185,13 @@ impl JsonSerializer {
         }
 
         // Infer schema from first row
-        let first_row = rows.first().ok_or_else(|| {
-            BlazeError::invalid_argument("Empty JSON array")
-        })?;
+        let first_row = rows
+            .first()
+            .ok_or_else(|| BlazeError::invalid_argument("Empty JSON array"))?;
 
-        let obj = first_row.as_object().ok_or_else(|| {
-            BlazeError::invalid_argument("JSON rows must be objects")
-        })?;
+        let obj = first_row
+            .as_object()
+            .ok_or_else(|| BlazeError::invalid_argument("JSON rows must be objects"))?;
 
         let mut fields: Vec<arrow::datatypes::Field> = Vec::new();
         for (key, value) in obj.iter() {
@@ -202,7 +204,7 @@ impl JsonSerializer {
         // Build arrays
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
-        for (_col_idx, field) in schema.fields().iter().enumerate() {
+        for field in schema.fields().iter() {
             let col_name = field.name();
             let col_type = field.data_type();
 
@@ -218,9 +220,9 @@ impl JsonSerializer {
 
     /// Deserialize columnar JSON.
     fn deserialize_columnar(value: &serde_json::Value) -> Result<Vec<RecordBatch>> {
-        let obj = value.as_object().ok_or_else(|| {
-            BlazeError::invalid_argument("Columnar JSON must be an object")
-        })?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| BlazeError::invalid_argument("Columnar JSON must be an object"))?;
 
         if obj.is_empty() {
             return Ok(vec![]);
@@ -230,9 +232,9 @@ impl JsonSerializer {
         let mut arrays: Vec<ArrayRef> = Vec::new();
 
         for (key, values) in obj.iter() {
-            let arr = values.as_array().ok_or_else(|| {
-                BlazeError::invalid_argument("Column values must be arrays")
-            })?;
+            let arr = values
+                .as_array()
+                .ok_or_else(|| BlazeError::invalid_argument("Column values must be arrays"))?;
 
             if arr.is_empty() {
                 continue;
@@ -384,7 +386,13 @@ fn build_array_from_json_values(
         _ => {
             let arr: Vec<Option<String>> = values
                 .iter()
-                .map(|v| if v.is_null() { None } else { Some(v.to_string()) })
+                .map(|v| {
+                    if v.is_null() {
+                        None
+                    } else {
+                        Some(v.to_string())
+                    }
+                })
                 .collect();
             Ok(Arc::new(StringArray::from(arr)) as ArrayRef)
         }
@@ -405,16 +413,19 @@ impl ArrowIpcSerializer {
         let mut buf = Cursor::new(Vec::new());
 
         {
-            let mut writer = StreamWriter::try_new(&mut buf, &schema)
-                .map_err(|e| BlazeError::execution(format!("Failed to create IPC writer: {}", e)))?;
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).map_err(|e| {
+                BlazeError::execution(format!("Failed to create IPC writer: {}", e))
+            })?;
 
             for batch in batches {
-                writer.write(batch)
+                writer
+                    .write(batch)
                     .map_err(|e| BlazeError::execution(format!("Failed to write batch: {}", e)))?;
             }
 
-            writer.finish()
-                .map_err(|e| BlazeError::execution(format!("Failed to finish IPC stream: {}", e)))?;
+            writer.finish().map_err(|e| {
+                BlazeError::execution(format!("Failed to finish IPC stream: {}", e))
+            })?;
         }
 
         Ok(buf.into_inner())
@@ -430,9 +441,7 @@ impl ArrowIpcSerializer {
         let reader = StreamReader::try_new(cursor, None)
             .map_err(|e| BlazeError::execution(format!("Failed to create IPC reader: {}", e)))?;
 
-        let batches: Vec<RecordBatch> = reader
-            .filter_map(|r| r.ok())
-            .collect();
+        let batches: Vec<RecordBatch> = reader.filter_map(|r| r.ok()).collect();
 
         Ok(batches)
     }
@@ -535,26 +544,11 @@ mod tests {
 
     #[test]
     fn test_infer_json_type() {
-        assert_eq!(
-            infer_json_type(&serde_json::json!(null)),
-            DataType::Null
-        );
-        assert_eq!(
-            infer_json_type(&serde_json::json!(true)),
-            DataType::Boolean
-        );
-        assert_eq!(
-            infer_json_type(&serde_json::json!(42)),
-            DataType::Int64
-        );
-        assert_eq!(
-            infer_json_type(&serde_json::json!(3.14)),
-            DataType::Float64
-        );
-        assert_eq!(
-            infer_json_type(&serde_json::json!("hello")),
-            DataType::Utf8
-        );
+        assert_eq!(infer_json_type(&serde_json::json!(null)), DataType::Null);
+        assert_eq!(infer_json_type(&serde_json::json!(true)), DataType::Boolean);
+        assert_eq!(infer_json_type(&serde_json::json!(42)), DataType::Int64);
+        assert_eq!(infer_json_type(&serde_json::json!(3.14)), DataType::Float64);
+        assert_eq!(infer_json_type(&serde_json::json!("hello")), DataType::Utf8);
     }
 
     #[test]

@@ -228,6 +228,364 @@ pub fn json_contains_key(json_str: &str, key: &str) -> Result<bool> {
     }
 }
 
+/// Set a value at a JSON path, creating intermediate objects/arrays as needed.
+pub fn json_set(json_str: &str, path: &str, new_value: &str) -> Result<String> {
+    let mut root: Value = serde_json::from_str(json_str)
+        .map_err(|e| BlazeError::execution(format!("Invalid JSON: {}", e)))?;
+    let set_value: Value =
+        serde_json::from_str(new_value).unwrap_or(Value::String(new_value.to_string()));
+
+    set_at_path(&mut root, path, set_value)?;
+    Ok(root.to_string())
+}
+
+/// Remove a value at a JSON path.
+pub fn json_remove(json_str: &str, path: &str) -> Result<String> {
+    let mut root: Value = serde_json::from_str(json_str)
+        .map_err(|e| BlazeError::execution(format!("Invalid JSON: {}", e)))?;
+
+    remove_at_path(&mut root, path)?;
+    Ok(root.to_string())
+}
+
+/// Flatten nested JSON into tabular rows (JSON_TABLE equivalent).
+///
+/// Given a JSON array (or array at a path), produces rows of key-value pairs
+/// for each element. Nested objects are flattened with dot-notation keys.
+///
+/// # Example
+/// ```ignore
+/// json_table('[{"a":1,"b":{"c":2}},{"a":3,"b":{"c":4}}]', '$')
+/// // Returns:
+/// // [{"a": "1", "b.c": "2"}, {"a": "3", "b.c": "4"}]
+/// ```
+pub fn json_table(json_str: &str, path: &str) -> Result<Vec<Vec<(String, String)>>> {
+    let value: Value = serde_json::from_str(json_str)
+        .map_err(|e| BlazeError::execution(format!("Invalid JSON: {}", e)))?;
+
+    let target =
+        extract_path(&value, path)?.ok_or_else(|| BlazeError::execution("JSON path not found"))?;
+
+    let array = match target {
+        Value::Array(arr) => arr,
+        other => {
+            // Wrap single object in array
+            return Ok(vec![flatten_value(other, "")]);
+        }
+    };
+
+    Ok(array.iter().map(|v| flatten_value(v, "")).collect())
+}
+
+/// Extract all matching paths from a JSON document (for path indexing).
+pub fn json_extract_all_paths(json_str: &str) -> Result<Vec<(String, String)>> {
+    let value: Value = serde_json::from_str(json_str)
+        .map_err(|e| BlazeError::execution(format!("Invalid JSON: {}", e)))?;
+
+    let mut paths = Vec::new();
+    collect_paths(&value, "$", &mut paths);
+    Ok(paths)
+}
+
+/// JSON path index for fast lookups across multiple JSON documents.
+#[derive(Debug, Clone, Default)]
+pub struct JsonPathIndex {
+    /// Maps (path -> row_index -> value)
+    index: std::collections::HashMap<String, Vec<(usize, String)>>,
+}
+
+impl JsonPathIndex {
+    pub fn new() -> Self {
+        Self {
+            index: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Index a JSON document at the given row index.
+    pub fn add_document(&mut self, row_idx: usize, json_str: &str) -> Result<()> {
+        let paths = json_extract_all_paths(json_str)?;
+        for (path, value) in paths {
+            self.index.entry(path).or_default().push((row_idx, value));
+        }
+        Ok(())
+    }
+
+    /// Look up all row indices and values for a given path.
+    pub fn lookup(&self, path: &str) -> Option<&[(usize, String)]> {
+        self.index.get(path).map(|v| v.as_slice())
+    }
+
+    /// Get all indexed paths.
+    pub fn paths(&self) -> Vec<&String> {
+        self.index.keys().collect()
+    }
+
+    /// Number of indexed paths.
+    pub fn num_paths(&self) -> usize {
+        self.index.len()
+    }
+}
+
+/// Flatten a JSON value into key-value pairs with dot-notation.
+fn flatten_value(value: &Value, prefix: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    match value {
+        Value::Object(obj) => {
+            for (key, val) in obj {
+                let full_key = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", prefix, key)
+                };
+                match val {
+                    Value::Object(_) => {
+                        result.extend(flatten_value(val, &full_key));
+                    }
+                    Value::Array(arr) => {
+                        for (i, item) in arr.iter().enumerate() {
+                            let arr_key = format!("{}[{}]", full_key, i);
+                            if matches!(item, Value::Object(_) | Value::Array(_)) {
+                                result.extend(flatten_value(item, &arr_key));
+                            } else {
+                                result.push((arr_key, value_to_string(item)));
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push((full_key, value_to_string(val)));
+                    }
+                }
+            }
+        }
+        _ => {
+            let key = if prefix.is_empty() {
+                "$".to_string()
+            } else {
+                prefix.to_string()
+            };
+            result.push((key, value_to_string(value)));
+        }
+    }
+    result
+}
+
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Collect all paths from a JSON value.
+fn collect_paths(value: &Value, prefix: &str, paths: &mut Vec<(String, String)>) {
+    match value {
+        Value::Object(obj) => {
+            for (key, val) in obj {
+                let full_path = format!("{}.{}", prefix, key);
+                match val {
+                    Value::Object(_) | Value::Array(_) => {
+                        collect_paths(val, &full_path, paths);
+                    }
+                    _ => {
+                        paths.push((full_path, value_to_string(val)));
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for (i, val) in arr.iter().enumerate() {
+                let full_path = format!("{}[{}]", prefix, i);
+                match val {
+                    Value::Object(_) | Value::Array(_) => {
+                        collect_paths(val, &full_path, paths);
+                    }
+                    _ => {
+                        paths.push((full_path, value_to_string(val)));
+                    }
+                }
+            }
+        }
+        _ => {
+            paths.push((prefix.to_string(), value_to_string(value)));
+        }
+    }
+}
+
+/// Set a value at a JSON path (mutable).
+fn set_at_path(root: &mut Value, path: &str, new_value: Value) -> Result<()> {
+    let path = path.trim();
+    if path == "$" {
+        *root = new_value;
+        return Ok(());
+    }
+    if !path.starts_with('$') {
+        return Err(BlazeError::invalid_argument(
+            "JSON path must start with '$'",
+        ));
+    }
+
+    let segments = parse_path_segments(&path[1..])?;
+    if segments.is_empty() {
+        *root = new_value;
+        return Ok(());
+    }
+
+    let mut current = root;
+    for (i, segment) in segments.iter().enumerate() {
+        let is_last = i == segments.len() - 1;
+        match segment {
+            PathSegment::Key(key) => {
+                if is_last {
+                    if let Value::Object(obj) = current {
+                        obj.insert(key.clone(), new_value);
+                        return Ok(());
+                    }
+                    return Err(BlazeError::execution("Cannot set key on non-object"));
+                }
+                if let Value::Object(obj) = current {
+                    current = obj.entry(key.clone()).or_insert(Value::Object(Map::new()));
+                } else {
+                    return Err(BlazeError::execution("Path traversal: expected object"));
+                }
+            }
+            PathSegment::Index(idx) => {
+                if is_last {
+                    if let Value::Array(arr) = current {
+                        if *idx < arr.len() {
+                            arr[*idx] = new_value;
+                        } else {
+                            arr.push(new_value);
+                        }
+                        return Ok(());
+                    }
+                    return Err(BlazeError::execution("Cannot set index on non-array"));
+                }
+                if let Value::Array(arr) = current {
+                    if *idx < arr.len() {
+                        current = &mut arr[*idx];
+                    } else {
+                        return Err(BlazeError::execution("Array index out of bounds"));
+                    }
+                } else {
+                    return Err(BlazeError::execution("Path traversal: expected array"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove a value at a JSON path.
+fn remove_at_path(root: &mut Value, path: &str) -> Result<()> {
+    let path = path.trim();
+    if !path.starts_with('$') {
+        return Err(BlazeError::invalid_argument(
+            "JSON path must start with '$'",
+        ));
+    }
+
+    let segments = parse_path_segments(&path[1..])?;
+    if segments.is_empty() {
+        return Err(BlazeError::invalid_argument("Cannot remove root"));
+    }
+
+    let mut current = root;
+    for (i, segment) in segments.iter().enumerate() {
+        let is_last = i == segments.len() - 1;
+        match segment {
+            PathSegment::Key(key) => {
+                if is_last {
+                    if let Value::Object(obj) = current {
+                        obj.remove(key);
+                        return Ok(());
+                    }
+                    return Ok(());
+                }
+                if let Value::Object(obj) = current {
+                    if let Some(val) = obj.get_mut(key) {
+                        current = val;
+                    } else {
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
+            }
+            PathSegment::Index(idx) => {
+                if is_last {
+                    if let Value::Array(arr) = current {
+                        if *idx < arr.len() {
+                            arr.remove(*idx);
+                        }
+                        return Ok(());
+                    }
+                    return Ok(());
+                }
+                if let Value::Array(arr) = current {
+                    if *idx < arr.len() {
+                        current = &mut arr[*idx];
+                    } else {
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+enum PathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn parse_path_segments(path: &str) -> Result<Vec<PathSegment>> {
+    let mut segments = Vec::new();
+    let mut chars = path.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => {
+                let mut key = String::new();
+                while let Some(&next) = chars.peek() {
+                    if next == '.' || next == '[' {
+                        break;
+                    }
+                    key.push(chars.next().unwrap());
+                }
+                if !key.is_empty() {
+                    segments.push(PathSegment::Key(key));
+                }
+            }
+            '[' => {
+                let mut idx_str = String::new();
+                for next in chars.by_ref() {
+                    if next == ']' {
+                        break;
+                    }
+                    idx_str.push(next);
+                }
+                let idx: usize = idx_str
+                    .trim()
+                    .parse()
+                    .map_err(|_| BlazeError::invalid_argument("Invalid array index"))?;
+                segments.push(PathSegment::Index(idx));
+            }
+            ' ' | '\t' => continue,
+            _ => {
+                return Err(BlazeError::invalid_argument(format!(
+                    "Unexpected character '{}' in path",
+                    c
+                )));
+            }
+        }
+    }
+    Ok(segments)
+}
+
 /// Parse a JSON path and extract the value.
 fn extract_path<'a>(value: &'a Value, path: &str) -> Result<Option<&'a Value>> {
     let path = path.trim();
@@ -280,7 +638,7 @@ fn extract_path<'a>(value: &'a Value, path: &str) -> Result<Option<&'a Value>> {
                 let mut index_str = String::new();
                 let mut found_close = false;
 
-                while let Some(next_c) = chars.next() {
+                for next_c in chars.by_ref() {
                     if next_c == ']' {
                         found_close = true;
                         break;
@@ -289,7 +647,9 @@ fn extract_path<'a>(value: &'a Value, path: &str) -> Result<Option<&'a Value>> {
                 }
 
                 if !found_close {
-                    return Err(BlazeError::invalid_argument("Unclosed bracket in JSON path"));
+                    return Err(BlazeError::invalid_argument(
+                        "Unclosed bracket in JSON path",
+                    ));
                 }
 
                 // Check if it's a quoted string (object key) or numeric index
@@ -310,9 +670,9 @@ fn extract_path<'a>(value: &'a Value, path: &str) -> Result<Option<&'a Value>> {
                     }
                 } else {
                     // Numeric index for array access
-                    let index: usize = index_str
-                        .parse()
-                        .map_err(|_| BlazeError::invalid_argument("Invalid array index in JSON path"))?;
+                    let index: usize = index_str.parse().map_err(|_| {
+                        BlazeError::invalid_argument("Invalid array index in JSON path")
+                    })?;
 
                     match current {
                         Value::Array(arr) => {
@@ -432,9 +792,18 @@ mod tests {
     fn test_json_keys() {
         let result = json_keys(r#"{"a": 1, "b": 2, "c": 3}"#).unwrap().unwrap();
         let keys: Value = serde_json::from_str(&result).unwrap();
-        assert!(keys.as_array().unwrap().contains(&Value::String("a".to_string())));
-        assert!(keys.as_array().unwrap().contains(&Value::String("b".to_string())));
-        assert!(keys.as_array().unwrap().contains(&Value::String("c".to_string())));
+        assert!(keys
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("a".to_string())));
+        assert!(keys
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("b".to_string())));
+        assert!(keys
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("c".to_string())));
     }
 
     #[test]
@@ -479,5 +848,70 @@ mod tests {
         let json = r#"{"name": "John"}"#;
         let result = json_extract(json, "$").unwrap();
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_json_set() {
+        let json = r#"{"name": "John", "age": 30}"#;
+        let result = json_set(json, "$.age", "31").unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["age"], 31);
+    }
+
+    #[test]
+    fn test_json_set_nested() {
+        let json = r#"{"person": {"name": "John"}}"#;
+        let result = json_set(json, "$.person.name", "\"Jane\"").unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["person"]["name"], "Jane");
+    }
+
+    #[test]
+    fn test_json_remove() {
+        let json = r#"{"name": "John", "age": 30}"#;
+        let result = json_remove(json, "$.age").unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v.get("age"), None);
+        assert_eq!(v["name"], "John");
+    }
+
+    #[test]
+    fn test_json_table_basic() {
+        let json = r#"[{"a": 1, "b": 2}, {"a": 3, "b": 4}]"#;
+        let rows = json_table(json, "$").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains(&("a".to_string(), "1".to_string())));
+        assert!(rows[1].contains(&("a".to_string(), "3".to_string())));
+    }
+
+    #[test]
+    fn test_json_table_nested() {
+        let json = r#"[{"a": 1, "b": {"c": 2}}]"#;
+        let rows = json_table(json, "$").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains(&("a".to_string(), "1".to_string())));
+        assert!(rows[0].contains(&("b.c".to_string(), "2".to_string())));
+    }
+
+    #[test]
+    fn test_json_path_index() {
+        let mut idx = JsonPathIndex::new();
+        idx.add_document(0, r#"{"name": "Alice", "age": 30}"#)
+            .unwrap();
+        idx.add_document(1, r#"{"name": "Bob", "age": 25}"#)
+            .unwrap();
+
+        let names = idx.lookup("$.name").unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0], (0, "Alice".to_string()));
+        assert_eq!(names[1], (1, "Bob".to_string()));
+    }
+
+    #[test]
+    fn test_json_extract_all_paths() {
+        let json = r#"{"a": 1, "b": {"c": 2}}"#;
+        let paths = json_extract_all_paths(json).unwrap();
+        assert!(paths.contains(&("$.a".to_string(), "1".to_string())));
+        assert!(paths.contains(&("$.b.c".to_string(), "2".to_string())));
     }
 }
