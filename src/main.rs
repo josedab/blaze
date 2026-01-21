@@ -57,7 +57,13 @@ struct Session {
 }
 
 impl Session {
-    fn new(conn: Connection, format: OutputFormat, output_path: Option<PathBuf>, timer: bool, quiet: bool) -> Self {
+    fn new(
+        conn: Connection,
+        format: OutputFormat,
+        output_path: Option<PathBuf>,
+        timer: bool,
+        quiet: bool,
+    ) -> Self {
         Self {
             conn,
             format,
@@ -104,7 +110,11 @@ impl Session {
         // Handle session commands (start with .)
         let input_lower = input.to_lowercase();
 
-        if input_lower == "exit" || input_lower == "quit" || input_lower == ".exit" || input_lower == ".quit" {
+        if input_lower == "exit"
+            || input_lower == "quit"
+            || input_lower == ".exit"
+            || input_lower == ".quit"
+        {
             if !self.quiet {
                 println!("Goodbye!");
             }
@@ -159,7 +169,10 @@ impl Session {
                     Err(e) => println!("Error: {}", e),
                 }
             } else {
-                println!("Current format: {}. Usage: .mode csv|json|table|arrow", self.format);
+                println!(
+                    "Current format: {}. Usage: .mode csv|json|table|arrow",
+                    self.format
+                );
             }
             return true;
         }
@@ -192,11 +205,24 @@ impl Session {
                             "  {} {} {}",
                             field.name(),
                             field.data_type(),
-                            if field.is_nullable() { "NULL" } else { "NOT NULL" }
+                            if field.is_nullable() {
+                                "NULL"
+                            } else {
+                                "NOT NULL"
+                            }
                         );
                     }
                 } else {
-                    println!("Table '{}' not found.", parts[1]);
+                    let tables = self.conn.list_tables();
+                    if tables.is_empty() {
+                        println!("Table '{}' not found. No tables are registered.", parts[1]);
+                        println!("Hint: Use .read <name> <file> to load a CSV or Parquet file.");
+                    } else {
+                        println!("Table '{}' not found. Available tables:", parts[1]);
+                        for t in &tables {
+                            println!("  {}", t);
+                        }
+                    }
                 }
             } else {
                 println!("Usage: .schema <table_name>");
@@ -306,10 +332,10 @@ fn main() -> Result<()> {
         multiline_buffer.push(' ');
 
         // Check if statement is complete (ends with semicolon or is a command)
-        let is_command = trimmed.starts_with('.') ||
-            trimmed.to_lowercase() == "exit" ||
-            trimmed.to_lowercase() == "quit" ||
-            trimmed.to_lowercase() == "help";
+        let is_command = trimmed.starts_with('.')
+            || trimmed.to_lowercase() == "exit"
+            || trimmed.to_lowercase() == "quit"
+            || trimmed.to_lowercase() == "help";
 
         if !is_command && !multiline_buffer.trim().ends_with(';') {
             continue;
