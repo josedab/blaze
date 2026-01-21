@@ -1,0 +1,15 @@
+#!/bin/sh
+# Pre-commit hook: ensures code is formatted before committing.
+# Install with: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or run: make setup
+
+set -e
+
+echo "Running cargo fmt --check..."
+if ! cargo fmt --check 2>/dev/null; then
+    echo ""
+    echo "❌ Code is not formatted. Run 'cargo fmt' before committing."
+    exit 1
+fi
+
+echo "✅ Formatting check passed."
