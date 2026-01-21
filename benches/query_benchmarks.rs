@@ -6,13 +6,13 @@
 //! Run specific benchmark: cargo bench -- <name>
 //! Generate HTML report: cargo bench -- --save-baseline main
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::sync::Arc;
 
-use blaze::Connection;
-use arrow::array::{Int64Array, Float64Array, StringArray};
+use arrow::array::{Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use blaze::Connection;
 
 /// Generate a table with N rows for benchmarking.
 fn create_large_test_connection(num_rows: usize) -> Connection {
@@ -114,9 +114,7 @@ fn bench_scan(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
-            b.iter(|| {
-                black_box(conn.query("SELECT * FROM bench_table").unwrap())
-            })
+            b.iter(|| black_box(conn.query("SELECT * FROM bench_table").unwrap()))
         });
     }
 
@@ -136,43 +134,34 @@ fn bench_filter(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*size as u64));
 
         // Simple equality filter
-        group.bench_with_input(
-            BenchmarkId::new("equality", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(conn.query("SELECT * FROM bench_table WHERE id = 500").unwrap())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("equality", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query("SELECT * FROM bench_table WHERE id = 500")
+                        .unwrap(),
+                )
+            })
+        });
 
         // Range filter
-        group.bench_with_input(
-            BenchmarkId::new("range", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query("SELECT * FROM bench_table WHERE id > 100 AND id < 500")
-                            .unwrap(),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("range", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query("SELECT * FROM bench_table WHERE id > 100 AND id < 500")
+                        .unwrap(),
+                )
+            })
+        });
 
         // String filter
-        group.bench_with_input(
-            BenchmarkId::new("string", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query("SELECT * FROM bench_table WHERE category = 'A'")
-                            .unwrap(),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("string", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query("SELECT * FROM bench_table WHERE category = 'A'")
+                        .unwrap(),
+                )
+            })
+        });
     }
 
     group.finish();
@@ -191,37 +180,19 @@ fn bench_aggregate(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*size as u64));
 
         // Simple COUNT
-        group.bench_with_input(
-            BenchmarkId::new("count", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(conn.query("SELECT COUNT(*) FROM bench_table").unwrap())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("count", size), size, |b, _| {
+            b.iter(|| black_box(conn.query("SELECT COUNT(*) FROM bench_table").unwrap()))
+        });
 
         // SUM
-        group.bench_with_input(
-            BenchmarkId::new("sum", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(conn.query("SELECT SUM(value) FROM bench_table").unwrap())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("sum", size), size, |b, _| {
+            b.iter(|| black_box(conn.query("SELECT SUM(value) FROM bench_table").unwrap()))
+        });
 
         // AVG
-        group.bench_with_input(
-            BenchmarkId::new("avg", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(conn.query("SELECT AVG(value) FROM bench_table").unwrap())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("avg", size), size, |b, _| {
+            b.iter(|| black_box(conn.query("SELECT AVG(value) FROM bench_table").unwrap()))
+        });
 
         // Multiple aggregates
         group.bench_with_input(
@@ -240,20 +211,16 @@ fn bench_aggregate(c: &mut Criterion) {
         );
 
         // GROUP BY
-        group.bench_with_input(
-            BenchmarkId::new("group_by", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query(
-                            "SELECT category, COUNT(*), AVG(value) FROM bench_table GROUP BY category",
-                        )
-                        .unwrap(),
+        group.bench_with_input(BenchmarkId::new("group_by", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query(
+                        "SELECT category, COUNT(*), AVG(value) FROM bench_table GROUP BY category",
                     )
-                })
-            },
-        );
+                    .unwrap(),
+                )
+            })
+        });
     }
 
     group.finish();
@@ -272,46 +239,34 @@ fn bench_sort(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*size as u64));
 
         // Single column sort
-        group.bench_with_input(
-            BenchmarkId::new("single_column", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query("SELECT * FROM bench_table ORDER BY value")
-                            .unwrap(),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("single_column", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query("SELECT * FROM bench_table ORDER BY value")
+                        .unwrap(),
+                )
+            })
+        });
 
         // Descending sort
-        group.bench_with_input(
-            BenchmarkId::new("descending", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query("SELECT * FROM bench_table ORDER BY value DESC")
-                            .unwrap(),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("descending", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query("SELECT * FROM bench_table ORDER BY value DESC")
+                        .unwrap(),
+                )
+            })
+        });
 
         // Multi-column sort
-        group.bench_with_input(
-            BenchmarkId::new("multi_column", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query("SELECT * FROM bench_table ORDER BY category, value DESC")
-                            .unwrap(),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("multi_column", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query("SELECT * FROM bench_table ORDER BY category, value DESC")
+                        .unwrap(),
+                )
+            })
+        });
     }
 
     group.finish();
@@ -385,20 +340,14 @@ fn bench_window_functions(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*size as u64));
 
         // ROW_NUMBER
-        group.bench_with_input(
-            BenchmarkId::new("row_number", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query(
-                            "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM bench_table",
-                        )
+        group.bench_with_input(BenchmarkId::new("row_number", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query("SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM bench_table")
                         .unwrap(),
-                    )
-                })
-            },
-        );
+                )
+            })
+        });
 
         // RANK with partition
         group.bench_with_input(
@@ -417,20 +366,16 @@ fn bench_window_functions(c: &mut Criterion) {
         );
 
         // LAG
-        group.bench_with_input(
-            BenchmarkId::new("lag", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    black_box(
-                        conn.query(
-                            "SELECT id, value, LAG(value, 1) OVER (ORDER BY id) FROM bench_table",
-                        )
-                        .unwrap(),
+        group.bench_with_input(BenchmarkId::new("lag", size), size, |b, _| {
+            b.iter(|| {
+                black_box(
+                    conn.query(
+                        "SELECT id, value, LAG(value, 1) OVER (ORDER BY id) FROM bench_table",
                     )
-                })
-            },
-        );
+                    .unwrap(),
+                )
+            })
+        });
 
         // Running sum
         group.bench_with_input(

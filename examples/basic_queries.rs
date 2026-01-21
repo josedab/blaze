@@ -28,12 +28,16 @@ fn main() {
 
     // SELECT with WHERE
     println!("\n=== SELECT with WHERE ===");
-    let results = conn.query("SELECT name, age FROM users WHERE age > 25").unwrap();
+    let results = conn
+        .query("SELECT name, age FROM users WHERE age > 25")
+        .unwrap();
     print_results(&results);
 
     // SELECT with ORDER BY
     println!("\n=== SELECT with ORDER BY ===");
-    let results = conn.query("SELECT name, age FROM users ORDER BY age DESC").unwrap();
+    let results = conn
+        .query("SELECT name, age FROM users ORDER BY age DESC")
+        .unwrap();
     print_results(&results);
 
     // SELECT with LIMIT
@@ -43,36 +47,40 @@ fn main() {
 
     // Aggregate functions
     println!("\n=== Aggregate functions ===");
-    let results = conn.query("SELECT COUNT(*) as total, AVG(age) as avg_age FROM users").unwrap();
+    let results = conn
+        .query("SELECT COUNT(*) as total, AVG(age) as avg_age FROM users")
+        .unwrap();
     print_results(&results);
 
     // GROUP BY
     println!("\n=== GROUP BY ===");
-    let results = conn.query(
-        "SELECT department, COUNT(*) as count FROM employees GROUP BY department"
-    ).unwrap();
+    let results = conn
+        .query("SELECT department, COUNT(*) as count FROM employees GROUP BY department")
+        .unwrap();
     print_results(&results);
 
     // JOIN
     println!("\n=== INNER JOIN ===");
-    let results = conn.query(
-        "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id"
-    ).unwrap();
+    let results = conn
+        .query("SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id")
+        .unwrap();
     print_results(&results);
 
     // Window functions
     println!("\n=== Window functions ===");
-    let results = conn.query(
-        "SELECT name, age, ROW_NUMBER() OVER (ORDER BY age) as rn FROM users"
-    ).unwrap();
+    let results = conn
+        .query("SELECT name, age, ROW_NUMBER() OVER (ORDER BY age) as rn FROM users")
+        .unwrap();
     print_results(&results);
 
     // CTE (Common Table Expression)
     println!("\n=== CTE ===");
-    let results = conn.query(
-        "WITH senior_users AS (SELECT * FROM users WHERE age >= 30)
-         SELECT name, age FROM senior_users"
-    ).unwrap();
+    let results = conn
+        .query(
+            "WITH senior_users AS (SELECT * FROM users WHERE age >= 30)
+         SELECT name, age FROM senior_users",
+        )
+        .unwrap();
     print_results(&results);
 
     // CASE WHEN
@@ -84,7 +92,9 @@ fn main() {
 
     // String functions
     println!("\n=== String functions ===");
-    let results = conn.query("SELECT UPPER(name) as upper_name FROM users WHERE name = 'Alice'").unwrap();
+    let results = conn
+        .query("SELECT UPPER(name) as upper_name FROM users WHERE name = 'Alice'")
+        .unwrap();
     print_results(&results);
 
     // Literal expressions
@@ -116,10 +126,13 @@ fn setup_tables(conn: &Connection) {
         users_schema,
         vec![
             Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "Diana", "Eve"])),
+            Arc::new(StringArray::from(vec![
+                "Alice", "Bob", "Charlie", "Diana", "Eve",
+            ])),
             Arc::new(Int64Array::from(vec![30, 25, 35, 28, 32])),
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     conn.register_batches("users", vec![users_batch]).unwrap();
 
@@ -137,7 +150,8 @@ fn setup_tables(conn: &Connection) {
             Arc::new(Int64Array::from(vec![1, 2, 1])),
             Arc::new(Float64Array::from(vec![100.0, 150.0, 200.0])),
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     conn.register_batches("orders", vec![orders_batch]).unwrap();
 
@@ -153,16 +167,31 @@ fn setup_tables(conn: &Connection) {
         vec![
             Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
             Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "Diana"])),
-            Arc::new(StringArray::from(vec!["Engineering", "Sales", "Engineering", "Sales"])),
+            Arc::new(StringArray::from(vec![
+                "Engineering",
+                "Sales",
+                "Engineering",
+                "Sales",
+            ])),
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
-    conn.register_batches("employees", vec![employees_batch]).unwrap();
+    conn.register_batches("employees", vec![employees_batch])
+        .unwrap();
 }
 
 fn print_results(batches: &[RecordBatch]) {
     for batch in batches {
-        println!("Schema: {:?}", batch.schema().fields().iter().map(|f| f.name()).collect::<Vec<_>>());
+        println!(
+            "Schema: {:?}",
+            batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+        );
         println!("Rows: {}", batch.num_rows());
         for row in 0..batch.num_rows().min(5) {
             let mut row_values = Vec::new();
@@ -180,8 +209,6 @@ fn print_results(batches: &[RecordBatch]) {
 }
 
 fn format_value(arr: &dyn arrow::array::Array, row: usize) -> String {
-    use arrow::array::Array;
-
     if arr.is_null(row) {
         return "NULL".to_string();
     }

@@ -3,9 +3,7 @@
 //! These tests verify end-to-end functionality of the query engine.
 //! Some tests are marked #[ignore] due to known limitations in the current implementation.
 
-use arrow::array::{
-    Float64Array, Int64Array, StringArray, BooleanArray,
-};
+use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
@@ -28,11 +26,14 @@ fn create_test_connection() -> Connection {
         users_schema,
         vec![
             Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
-            Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie", "Diana", "Eve"])),
+            Arc::new(StringArray::from(vec![
+                "Alice", "Bob", "Charlie", "Diana", "Eve",
+            ])),
             Arc::new(Int64Array::from(vec![30, 25, 35, 28, 32])),
             Arc::new(BooleanArray::from(vec![true, true, false, true, false])),
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     conn.register_batches("users", vec![users_batch]).unwrap();
 
@@ -49,10 +50,20 @@ fn create_test_connection() -> Connection {
         vec![
             Arc::new(Int64Array::from(vec![101, 102, 103, 104, 105, 106])),
             Arc::new(Int64Array::from(vec![1, 1, 2, 3, 1, 4])),
-            Arc::new(Float64Array::from(vec![100.0, 200.0, 150.0, 300.0, 50.0, 250.0])),
-            Arc::new(StringArray::from(vec!["completed", "pending", "completed", "completed", "cancelled", "pending"])),
+            Arc::new(Float64Array::from(vec![
+                100.0, 200.0, 150.0, 300.0, 50.0, 250.0,
+            ])),
+            Arc::new(StringArray::from(vec![
+                "completed",
+                "pending",
+                "completed",
+                "completed",
+                "cancelled",
+                "pending",
+            ])),
         ],
-    ).unwrap();
+    )
+    .unwrap();
 
     conn.register_batches("orders", vec![orders_batch]).unwrap();
 
@@ -114,7 +125,8 @@ fn test_limit_larger_than_table() {
 #[test]
 fn test_create_table() {
     let conn = Connection::in_memory().unwrap();
-    conn.execute("CREATE TABLE test (id INT, name VARCHAR)").unwrap();
+    conn.execute("CREATE TABLE test (id INT, name VARCHAR)")
+        .unwrap();
     let tables = conn.list_tables();
     assert!(tables.contains(&"test".to_string()));
 }
@@ -187,13 +199,13 @@ fn test_config_combined() {
 fn test_register_batches() {
     let conn = Connection::in_memory().unwrap();
 
-    let schema = Arc::new(ArrowSchema::new(vec![
-        ArrowField::new("id", ArrowDataType::Int64, false),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
-    ).unwrap();
+    let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+        "id",
+        ArrowDataType::Int64,
+        false,
+    )]));
+    let batch =
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2, 3]))]).unwrap();
 
     conn.register_batches("test", vec![batch]).unwrap();
     assert!(conn.list_tables().contains(&"test".to_string()));
@@ -289,7 +301,9 @@ fn test_select_columns() {
 #[test]
 fn test_select_with_alias() {
     let conn = create_test_connection();
-    let results = conn.query("SELECT name AS user_name, age AS user_age FROM users").unwrap();
+    let results = conn
+        .query("SELECT name AS user_name, age AS user_age FROM users")
+        .unwrap();
     assert!(results[0].schema().field(0).name() == "user_name");
 }
 
@@ -303,7 +317,9 @@ fn test_select_literal() {
 #[test]
 fn test_where_equals() {
     let conn = create_test_connection();
-    let results = conn.query("SELECT * FROM users WHERE name = 'Alice'").unwrap();
+    let results = conn
+        .query("SELECT * FROM users WHERE name = 'Alice'")
+        .unwrap();
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 1);
 }
@@ -311,8 +327,14 @@ fn test_where_equals() {
 #[test]
 fn test_order_by_asc() {
     let conn = create_test_connection();
-    let results = conn.query("SELECT name, age FROM users ORDER BY age ASC").unwrap();
-    let ages = results[0].column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+    let results = conn
+        .query("SELECT name, age FROM users ORDER BY age ASC")
+        .unwrap();
+    let ages = results[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     assert!(ages.value(0) <= ages.value(1));
 }
 
@@ -320,16 +342,21 @@ fn test_order_by_asc() {
 fn test_count() {
     let conn = create_test_connection();
     let results = conn.query("SELECT COUNT(*) FROM users").unwrap();
-    let count = results[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap().value(0);
+    let count = results[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
     assert_eq!(count, 5);
 }
 
 #[test]
 fn test_inner_join() {
     let conn = create_test_connection();
-    let results = conn.query(
-        "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id"
-    ).unwrap();
+    let results = conn
+        .query("SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id")
+        .unwrap();
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 6);
 }
@@ -337,10 +364,14 @@ fn test_inner_join() {
 #[test]
 fn test_row_number() {
     let conn = create_test_connection();
-    let results = conn.query(
-        "SELECT name, ROW_NUMBER() OVER (ORDER BY age) AS rn FROM users"
-    ).unwrap();
-    let rn = results[0].column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+    let results = conn
+        .query("SELECT name, ROW_NUMBER() OVER (ORDER BY age) AS rn FROM users")
+        .unwrap();
+    let rn = results[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
     let mut values: Vec<i64> = (0..rn.len()).map(|i| rn.value(i)).collect();
     values.sort();
     assert_eq!(values, vec![1, 2, 3, 4, 5]);
@@ -349,20 +380,29 @@ fn test_row_number() {
 #[test]
 fn test_cte_basic() {
     let conn = create_test_connection();
-    let results = conn.query(
-        "WITH active_users AS (SELECT * FROM users WHERE active = true)
-         SELECT COUNT(*) FROM active_users"
-    ).unwrap();
-    let count = results[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap().value(0);
+    let results = conn
+        .query(
+            "WITH active_users AS (SELECT * FROM users WHERE active = true)
+         SELECT COUNT(*) FROM active_users",
+        )
+        .unwrap();
+    let count = results[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
     assert_eq!(count, 3);
 }
 
 #[test]
 fn test_union_all() {
     let conn = create_test_connection();
-    let results = conn.query(
-        "SELECT name FROM users WHERE age < 30 UNION ALL SELECT name FROM users WHERE age > 30"
-    ).unwrap();
+    let results = conn
+        .query(
+            "SELECT name FROM users WHERE age < 30 UNION ALL SELECT name FROM users WHERE age > 30",
+        )
+        .unwrap();
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 4);
 }
@@ -370,7 +410,9 @@ fn test_union_all() {
 #[test]
 fn test_group_by() {
     let conn = create_test_connection();
-    let results = conn.query("SELECT user_id, COUNT(*) FROM orders GROUP BY user_id").unwrap();
+    let results = conn
+        .query("SELECT user_id, COUNT(*) FROM orders GROUP BY user_id")
+        .unwrap();
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 4);
 }
@@ -387,7 +429,14 @@ fn test_case_when() {
 #[test]
 fn test_upper() {
     let conn = create_test_connection();
-    let results = conn.query("SELECT UPPER(name) FROM users WHERE name = 'Alice'").unwrap();
-    let val = results[0].column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+    let results = conn
+        .query("SELECT UPPER(name) FROM users WHERE name = 'Alice'")
+        .unwrap();
+    let val = results[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .value(0);
     assert_eq!(val, "ALICE");
 }

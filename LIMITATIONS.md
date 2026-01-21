@@ -84,7 +84,7 @@ Date/time functions have the following limitations:
 
 ### Filter Pushdown
 
-Filter pushdown is fully implemented for in-memory tables. For CSV and Parquet files, filters are applied after the scan.
+Filter pushdown is implemented for in-memory tables, CSV files, and Parquet files.
 
 ### Statistics
 
@@ -108,14 +108,15 @@ Memory limits are enforced via `ConnectionConfig::with_memory_limit()`. When the
 - `LEAD()`
 - `FIRST_VALUE()`
 - `LAST_VALUE()`
+- `NTILE()`
+- `PERCENT_RANK()`
+- `CUME_DIST()`
+- `NTH_VALUE()`
 - Aggregate functions as window functions (SUM, COUNT, AVG, etc.)
 
 ### Not Supported
 
-- `NTH_VALUE()`
-- `NTILE()`
-- `PERCENT_RANK()`
-- `CUME_DIST()`
+- Named window references (`WINDOW w AS (...)`)
 
 ### Frame Specifications
 
@@ -142,19 +143,17 @@ File paths must be valid UTF-8 and accessible from the current process.
 
 ### Implemented
 
-- String: `UPPER`, `LOWER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `CONCAT`, `SUBSTRING`
-- Math: `ABS`, `ROUND`, `CEIL`/`CEILING`, `FLOOR`
-- Null handling: `COALESCE`, `NULLIF`
-- Date/Time: `CURRENT_DATE`, `CURRENT_TIMESTAMP`/`NOW`, `EXTRACT`/`DATE_PART`, `DATE_TRUNC`
+- String: `UPPER`, `LOWER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `CONCAT`, `SUBSTRING`, `REPLACE`, `REVERSE`, `LPAD`, `RPAD`, `SPLIT_PART`, `LEFT`, `RIGHT`, `INITCAP`, `REPEAT`, `TRANSLATE`, `ASCII`, `CHR`, `POSITION`/`STRPOS`, `STARTS_WITH`, `ENDS_WITH`
+- Math: `ABS`, `ROUND`, `CEIL`/`CEILING`, `FLOOR`, `POWER`/`POW`, `SQRT`, `EXP`, `LN`, `LOG`, `SIGN`, `MOD`/`MODULO`
+- Regex: `REGEXP_MATCH`, `REGEXP_REPLACE`, `REGEXP_EXTRACT`
+- Hash: `MD5`, `SHA256`/`SHA2`
+- Null handling: `COALESCE`, `NULLIF`, `IFNULL`/`NVL`, `GREATEST`, `LEAST`
+- Date/Time: `CURRENT_DATE`, `CURRENT_TIMESTAMP`/`NOW`, `EXTRACT`/`DATE_PART`, `DATE_TRUNC`, `TO_DATE`, `TO_TIMESTAMP`, `DATE_ADD`/`DATEADD`, `DATE_SUB`/`DATESUB`, `DATE_DIFF`/`DATEDIFF`
 
-### Not Implemented
+### Not Yet Implemented
 
-- `REPLACE`
-- `SPLIT`
-- `REGEXP_*` functions
-- `TO_DATE`, `TO_TIMESTAMP` (parsing)
-- `DATE_ADD`, `DATE_SUB`
-- `GREATEST`, `LEAST`
+- `SPLIT` (use `SPLIT_PART` with index)
+- Full `REGEXP_*` family with flags
 
 ## Operators
 
@@ -170,7 +169,7 @@ Some internal errors may expose implementation details. Error messages are conti
 
 ### Recovery
 
-Failed queries do not roll back any state changes (there are no transactions).
+Full transaction support is available via SQL `BEGIN`/`COMMIT`/`ROLLBACK` statements, programmatic `begin_transaction`/`commit_transaction`/`rollback_transaction` API, and `SAVEPOINT`/`RELEASE SAVEPOINT`/`ROLLBACK TO SAVEPOINT` for fine-grained control. Full MVCC snapshot isolation is provided by the `TransactionManager`.
 
 ## API
 
@@ -191,10 +190,11 @@ The CLI (`cargo run`) is a simple REPL for testing. It is not intended for produ
 The following features are planned for future releases:
 
 - [ ] Decimal type support in joins and GROUP BY
-- [ ] Additional window functions (NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST)
 - [ ] Parquet write support
-- [ ] Transaction support
+- [x] SQL-level transaction statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT)
 - [ ] Thread-safe connection pool
-- [ ] More comprehensive date/time functions (DATE_ADD, DATE_SUB, TO_DATE, TO_TIMESTAMP)
-- [ ] Additional scalar functions (REPLACE, SPLIT, REGEXP_*, GREATEST, LEAST)
-- [ ] Filter pushdown for CSV and Parquet files
+- [x] Date/time functions (DATE_ADD, DATE_SUB, TO_DATE, TO_TIMESTAMP)
+- [x] Additional scalar functions (REPLACE, REGEXP_*, GREATEST, LEAST)
+- [x] Filter pushdown for CSV and Parquet files
+- [ ] `SPLIT` function (currently use `SPLIT_PART` with index)
+- [ ] Full `REGEXP_*` family with flags support
