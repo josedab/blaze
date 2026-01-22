@@ -39,6 +39,18 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 
 ## Quick Start
 
+### Prerequisites
+
+- **Rust 1.92.0+** — Install via [rustup](https://rustup.rs/)
+- Build takes ~10s (debug) or ~3-4min (release)
+- Tests run in ~0.3s (650+ tests)
+
+```bash
+# Clone and verify everything works
+git clone <repo-url> && cd blaze
+make setup    # First-time: installs toolchain, pre-commit hook, builds, tests
+```
+
 ### Registering Data from Files
 
 The most common way to use Blaze is to register external files as tables:
@@ -308,6 +320,14 @@ cargo run --example advanced_queries
 - `advanced_queries.rs` - Window functions, CTEs, subqueries, set operations
 - `python_notebook.ipynb` - PyArrow/Pandas/Polars integration
 - `browser_playground.html` - Interactive web-based SQL playground
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| `target/` is very large (>10GB) | Run `cargo clean` to reclaim disk space |
+| Tests fail after checkout | Run `make setup` to ensure correct toolchain |
+| Type mismatch errors in queries | Use float literals (`80000.0`) when comparing to `FLOAT`/`DOUBLE` columns |
 
 ## Supported SQL Features
 
