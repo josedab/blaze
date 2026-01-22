@@ -395,6 +395,7 @@ mod tests {
             projection: None,
             schema,
             filters: vec![],
+            time_travel: None,
         };
 
         let filter = LogicalPlan::Filter {

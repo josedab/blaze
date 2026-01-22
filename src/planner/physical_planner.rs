@@ -55,6 +55,7 @@ impl PhysicalPlanner {
                 schema,
                 projection,
                 filters,
+                time_travel,
             } => {
                 // The schema in LogicalPlan::TableScan is already the output schema
                 // (possibly projected by the optimizer). The projection field contains
@@ -81,6 +82,7 @@ impl PhysicalPlanner {
                     projection: projection.clone(),
                     schema: output_schema,
                     filters: physical_filters,
+                    time_travel: time_travel.clone(),
                 })
             }
 

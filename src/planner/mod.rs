@@ -11,7 +11,7 @@ mod physical_planner;
 mod binder;
 mod optimizer;
 
-pub use logical_plan::{LogicalPlan, LogicalPlanBuilder, JoinType};
+pub use logical_plan::{LogicalPlan, LogicalPlanBuilder, JoinType, TimeTravelSpec};
 pub use logical_expr::{LogicalExpr, Column, AggregateExpr as LogicalAggregateExpr, WindowExpr, SortExpr as LogicalSortExpr, AggregateFunc, BinaryOp, UnaryOp};
 pub use physical_plan::{PhysicalPlan, AggregateExpr, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction, ExecutionStats};
 pub use physical_expr::{

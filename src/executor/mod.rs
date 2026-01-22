@@ -13,9 +13,10 @@ pub use operators::*;
 
 use crate::catalog::CatalogList;
 use crate::error::Result;
-use crate::planner::{JoinType, PhysicalPlan, ExecutionStats};
+use crate::planner::{JoinType, PhysicalPlan, ExecutionStats, TimeTravelSpec};
 
 /// Execution context for query execution.
+#[derive(Clone)]
 pub struct ExecutionContext {
     /// Batch size for vectorized execution
     batch_size: usize,
@@ -151,8 +152,8 @@ impl Executor {
     /// Internal execute implementation without memory tracking (to avoid double-counting).
     fn execute_plan(&mut self, plan: &PhysicalPlan) -> Result<Vec<RecordBatch>> {
         match plan {
-            PhysicalPlan::Scan { table_name, projection, schema, filters } => {
-                self.execute_scan(table_name, projection.as_deref(), schema, filters)
+            PhysicalPlan::Scan { table_name, projection, schema, filters, time_travel } => {
+                self.execute_scan(table_name, projection.as_deref(), schema, filters, time_travel.as_ref())
             }
             PhysicalPlan::Filter { predicate, input } => {
                 let input_batches = self.execute_plan(input)?;
@@ -236,8 +237,8 @@ impl Executor {
         let mut stats = ExecutionStats::new(&operator_name);
 
         let result = match plan {
-            PhysicalPlan::Scan { table_name, projection, schema, filters } => {
-                let batches = self.execute_scan(table_name, projection.as_deref(), schema, filters)?;
+            PhysicalPlan::Scan { table_name, projection, schema, filters, time_travel } => {
+                let batches = self.execute_scan(table_name, projection.as_deref(), schema, filters, time_travel.as_ref())?;
                 stats.add_metric("table", table_name);
                 batches
             }
@@ -389,11 +390,17 @@ impl Executor {
         projection: Option<&[usize]>,
         schema: &Arc<arrow::datatypes::Schema>,
         filters: &[Arc<dyn crate::planner::PhysicalExpr>],
+        time_travel: Option<&TimeTravelSpec>,
     ) -> Result<Vec<RecordBatch>> {
         // Try to get the table from catalog
         if let Some(catalog_list) = &self.catalog_list {
             if let Some(catalog) = catalog_list.catalog("default") {
                 if let Some(table) = catalog.get_table(table_name) {
+                    // TODO: For time travel, we need to get the Delta table at a specific version
+                    // For now, time_travel is used as metadata but actual implementation
+                    // will be enhanced when we add Delta-specific catalog support.
+                    let _ = time_travel; // Suppress unused warning for now
+
                     // Use scan_with_filters for filter pushdown when supported
                     let batches = if table.supports_filter_pushdown() && !filters.is_empty() {
                         table.scan_with_filters(projection, filters, None)?
@@ -828,6 +835,7 @@ mod tests {
             projection: None,
             schema: scan_schema,
             filters: vec![],
+            time_travel: None,
         };
 
         let result = executor.execute_explain(&plan, false, &explain_schema).unwrap();
@@ -909,6 +917,7 @@ mod tests {
             projection: None,
             schema: schema.clone(),
             filters: vec![],
+            time_travel: None,
         };
 
         let name = executor.get_operator_name(&scan_plan);

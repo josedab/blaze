@@ -7,7 +7,7 @@ use arrow::datatypes::Schema as ArrowSchema;
 
 use super::physical_expr::PhysicalExpr;
 use super::logical_expr::AggregateFunc;
-use super::logical_plan::JoinType;
+use super::logical_plan::{JoinType, TimeTravelSpec};
 
 /// A physical plan node that can be executed.
 #[derive(Debug)]
@@ -22,6 +22,8 @@ pub enum PhysicalPlan {
         schema: Arc<ArrowSchema>,
         /// Filter expressions to push down
         filters: Vec<Arc<dyn PhysicalExpr>>,
+        /// Time travel specification (for Delta Lake)
+        time_travel: Option<TimeTravelSpec>,
     },
 
     /// Filter operation

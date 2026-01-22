@@ -12,7 +12,7 @@ use super::logical_expr::{
     AggregateExpr, AggregateFunc, BinaryOp, Column, LogicalExpr, SortExpr, UnaryOp,
     WindowExpr, WindowFrame, WindowFrameBound, WindowFrameUnits,
 };
-use super::logical_plan::{JoinType, LogicalPlan, LogicalPlanBuilder, SetOperation};
+use super::logical_plan::{JoinType, LogicalPlan, LogicalPlanBuilder, SetOperation, TimeTravelSpec};
 
 /// Maximum allowed depth for nested queries/expressions to prevent stack overflow.
 const MAX_PLAN_DEPTH: usize = 128;
@@ -507,7 +507,7 @@ impl Binder {
         ctx: &mut BindContext,
     ) -> Result<LogicalPlan> {
         match factor {
-            sql::parser::TableFactor::Table { name, alias } => {
+            sql::parser::TableFactor::Table { name, alias, time_travel } => {
                 // First check if this is a CTE reference
                 let table_name = name.last().map(|s| s.as_str()).unwrap_or("");
                 if let Some(cte_plan) = ctx.get_cte(table_name) {
@@ -531,7 +531,15 @@ impl Binder {
                 // Try to get schema from catalog
                 let schema = self.get_table_schema(&resolved)?;
 
-                let mut plan = LogicalPlanBuilder::scan(resolved, schema).build();
+                // Convert time travel specification from parser to logical plan format
+                let logical_time_travel = self.convert_time_travel(time_travel.as_ref(), ctx)?;
+
+                let mut plan = LogicalPlanBuilder::scan_with_time_travel(
+                    resolved,
+                    schema,
+                    logical_time_travel,
+                )
+                .build();
 
                 // Apply alias
                 if let Some(a) = alias {
@@ -585,6 +593,77 @@ impl Binder {
                 "Table function: {}",
                 name
             ))),
+        }
+    }
+
+    /// Convert parser time travel specification to logical plan time travel spec.
+    fn convert_time_travel(
+        &self,
+        time_travel: Option<&sql::parser::TimeTravelSpec>,
+        ctx: &mut BindContext,
+    ) -> Result<Option<TimeTravelSpec>> {
+        match time_travel {
+            None => Ok(None),
+            Some(sql::parser::TimeTravelSpec::Version(version)) => {
+                Ok(Some(TimeTravelSpec::Version(*version)))
+            }
+            Some(sql::parser::TimeTravelSpec::Timestamp(expr)) => {
+                // Evaluate the timestamp expression
+                let bound_expr = self.bind_expr(expr.clone(), ctx)?;
+                let ts = self.eval_timestamp_expr(&bound_expr)?;
+                Ok(Some(TimeTravelSpec::Timestamp(ts)))
+            }
+            Some(sql::parser::TimeTravelSpec::SystemTimeAsOf(expr)) => {
+                // FOR SYSTEM_TIME AS OF is the SQL standard syntax
+                let bound_expr = self.bind_expr(expr.clone(), ctx)?;
+                let ts = self.eval_timestamp_expr(&bound_expr)?;
+                Ok(Some(TimeTravelSpec::Timestamp(ts)))
+            }
+        }
+    }
+
+    /// Evaluate a timestamp expression to get a concrete DateTime value.
+    fn eval_timestamp_expr(&self, expr: &LogicalExpr) -> Result<chrono::DateTime<chrono::Utc>> {
+        use chrono::{DateTime, NaiveDateTime, Utc};
+        use crate::types::TimeUnit;
+
+        match expr {
+            LogicalExpr::Literal(ScalarValue::Utf8(Some(s))) => {
+                // Try to parse as timestamp string
+                // Support ISO 8601 format: "2024-01-15T10:30:00Z" or "2024-01-15 10:30:00"
+                if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                    return Ok(dt.with_timezone(&Utc));
+                }
+                if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                    return Ok(dt.and_utc());
+                }
+                if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+                    return Ok(dt.and_utc());
+                }
+                Err(BlazeError::analysis(format!(
+                    "Cannot parse timestamp from string: {}",
+                    s
+                )))
+            }
+            LogicalExpr::Literal(ScalarValue::Timestamp { value: Some(ts), unit, .. }) => {
+                // Convert timestamp value based on unit
+                let micros = match unit {
+                    TimeUnit::Second => ts * 1_000_000,
+                    TimeUnit::Millisecond => ts * 1_000,
+                    TimeUnit::Microsecond => *ts,
+                    TimeUnit::Nanosecond => ts / 1_000,
+                };
+                let secs = micros / 1_000_000;
+                let nsecs = ((micros % 1_000_000) * 1000) as u32;
+                Ok(DateTime::from_timestamp(secs, nsecs).unwrap_or_else(Utc::now))
+            }
+            LogicalExpr::Literal(ScalarValue::Int64(Some(ts))) => {
+                // Assume Unix timestamp in seconds
+                Ok(DateTime::from_timestamp(*ts, 0).unwrap_or_else(Utc::now))
+            }
+            _ => Err(BlazeError::analysis(
+                "Time travel requires a constant timestamp expression",
+            )),
         }
     }
 

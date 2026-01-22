@@ -692,6 +692,7 @@ mod tests {
                 Field::new("value", DataType::Utf8, true),
             ]),
             filters: vec![],
+            time_travel: None,
         }
     }
 
