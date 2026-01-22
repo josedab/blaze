@@ -11,26 +11,31 @@ categories = ["database", "data-structures"]
 [lib]
 name = "blaze"
 path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
 
 [[bin]]
 name = "blaze"
 path = "src/main.rs"
+
+[features]
+default = []
+python = ["pyo3"]
 
 [dependencies]
 # SQL Parsing
 sqlparser = "0.53"
 
 # Apache Arrow ecosystem
-arrow = { version = "54", features = ["prettyprint"] }
-arrow-schema = "54"
-arrow-array = "54"
-arrow-buffer = "54"
-arrow-cast = "54"
-arrow-ord = "54"
-arrow-select = "54"
-arrow-csv = "54"
-arrow-json = "54"
-parquet = { version = "54", features = ["arrow", "async"] }
+arrow = { version = "57", features = ["prettyprint"] }
+arrow-schema = "57"
+arrow-array = "57"
+arrow-buffer = "57"
+arrow-cast = "57"
+arrow-ord = "57"
+arrow-select = "57"
+arrow-csv = "57"
+arrow-json = "57"
+parquet = { version = "57", features = ["arrow", "async"] }
 
 # Error handling
 thiserror = "2.0"
@@ -65,6 +70,18 @@ half = "2.0"
 # Memory management
 crossbeam = "0.8"
 crossbeam-channel = "0.5"
+
+# Delta Lake
+deltalake = { version = "0.30", features = ["datafusion"] }
+
+# LRU cache
+lru = "0.12"
+
+# URL handling
+url = "2.5"
+
+# Python bindings (optional)
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
