@@ -18,10 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Community section on landing page
 
 ### Changed
-- Updated Quick Start guide to use correct API (register_batches instead of unsupported CREATE TABLE/INSERT)
+- Updated Quick Start guide with clearer examples for file registration and Arrow data
+- Improved README with accurate feature descriptions and prepared statements examples
+- Enhanced ARCHITECTURE.md with prepared statements documentation
+- Updated LIMITATIONS.md to accurately document DDL/DML support (in-memory tables only)
+- Clarified that INSERT/UPDATE/DELETE only work with in-memory tables
 
 ### Fixed
-- Fixed inconsistency between Quick Start guide and actual supported SQL features
+- Fixed documentation inconsistencies about CREATE TABLE and DML support
+- Fixed LIMITATIONS.md incorrectly stating that prepared statements aren't supported
 
 ## [0.1.0] - 2025-01-15
 
