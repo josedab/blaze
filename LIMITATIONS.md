@@ -4,17 +4,20 @@ This document lists current limitations and unimplemented features in Blaze.
 
 ## Query Features
 
-### Query Placeholders
+### DML Operations (INSERT, UPDATE, DELETE)
 
-Query placeholders (`$1`, `$2`, `?`) are not supported. Instead, use string formatting to substitute values:
+DML operations are only supported for in-memory tables created via `CREATE TABLE`. External data sources (CSV, Parquet files) are read-only.
 
 ```rust
-// Not supported:
-// conn.query("SELECT * FROM users WHERE id = $1")
+// In-memory tables support full DML
+conn.execute("CREATE TABLE users (id INT, name VARCHAR)")?;
+conn.execute("INSERT INTO users VALUES (1, 'Alice')")?;
+conn.execute("UPDATE users SET name = 'Bob' WHERE id = 1")?;
+conn.execute("DELETE FROM users WHERE id = 1")?;
 
-// Do this instead:
-let id = 42;
-conn.query(&format!("SELECT * FROM users WHERE id = {}", id))?;
+// CSV/Parquet files are read-only
+conn.register_csv("sales", "data/sales.csv")?;
+// conn.execute("DELETE FROM sales WHERE ..."); // ERROR: Not supported
 ```
 
 ### Multi-Statement Queries
@@ -25,6 +28,14 @@ Only the first statement in a query string is executed. Semicolon-separated stat
 // Only the first SELECT is executed
 conn.query("SELECT * FROM t1; SELECT * FROM t2")?;
 ```
+
+### Prepared Statements
+
+Prepared statements support positional parameters (`$1`, `$2`, etc.) but have some limitations:
+
+- Named parameters (`:name`, `@name`) are not supported
+- The `?` placeholder syntax is not supported (use `$1`, `$2`, etc.)
+- Type inference for parameters is limited; explicit casts may be needed
 
 ### Query Nesting Depth
 
@@ -179,10 +190,11 @@ The CLI (`cargo run`) is a simple REPL for testing. It is not intended for produ
 
 The following features are planned for future releases:
 
-- [ ] Prepared statements with parameter binding
-- [ ] Decimal type support in joins
-- [ ] Additional window functions
+- [ ] Decimal type support in joins and GROUP BY
+- [ ] Additional window functions (NTH_VALUE, NTILE, PERCENT_RANK, CUME_DIST)
 - [ ] Parquet write support
 - [ ] Transaction support
 - [ ] Thread-safe connection pool
-- [ ] More comprehensive date/time functions
+- [ ] More comprehensive date/time functions (DATE_ADD, DATE_SUB, TO_DATE, TO_TIMESTAMP)
+- [ ] Additional scalar functions (REPLACE, SPLIT, REGEXP_*, GREATEST, LEAST)
+- [ ] Filter pushdown for CSV and Parquet files
