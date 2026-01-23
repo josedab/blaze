@@ -244,7 +244,7 @@ impl ParquetTable {
         &self,
         filters: &[Arc<dyn crate::planner::PhysicalExpr>],
     ) -> Result<Option<Vec<usize>>> {
-        if filters.is_empty() {
+        if filters.is_empty() || !self.options.use_statistics {
             return Ok(None);
         }
 
@@ -283,22 +283,57 @@ impl ParquetTable {
         filters: &[Arc<dyn crate::planner::PhysicalExpr>],
         schema: &Arc<ArrowSchema>,
     ) -> bool {
-        use crate::planner::physical_expr::BinaryExpr;
-
         for filter in filters {
-            if let Some(binary) = filter.as_any().downcast_ref::<BinaryExpr>() {
-                if let Some(prunable) = self.check_binary_expr_pruning(binary, rg_meta, schema) {
-                    if prunable {
-                        return true;
-                    }
-                }
+            if self.evaluate_pruning_expr(filter.as_ref(), rg_meta, schema) == Some(true) {
+                return true;
             }
         }
         false
     }
 
+    /// Recursively evaluate whether a filter expression allows pruning a row group.
+    /// Returns Some(true) if prunable, Some(false) if not, None if unknown.
+    fn evaluate_pruning_expr(
+        &self,
+        expr: &dyn crate::planner::PhysicalExpr,
+        rg_meta: &RowGroupMetaData,
+        schema: &Arc<ArrowSchema>,
+    ) -> Option<bool> {
+        use crate::planner::physical_expr::BinaryExpr;
+
+        if let Some(binary) = expr.as_any().downcast_ref::<BinaryExpr>() {
+            let op = binary.op();
+
+            // Handle AND: prunable if either side is prunable
+            if op == "and" {
+                let left = self.evaluate_pruning_expr(binary.left().as_ref(), rg_meta, schema);
+                let right = self.evaluate_pruning_expr(binary.right().as_ref(), rg_meta, schema);
+                return match (left, right) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                };
+            }
+
+            // Handle OR: prunable only if both sides are prunable
+            if op == "or" {
+                let left = self.evaluate_pruning_expr(binary.left().as_ref(), rg_meta, schema);
+                let right = self.evaluate_pruning_expr(binary.right().as_ref(), rg_meta, schema);
+                return match (left, right) {
+                    (Some(true), Some(true)) => Some(true),
+                    _ => Some(false),
+                };
+            }
+
+            // Leaf comparison: Column <op> Literal
+            return self.check_binary_expr_pruning(binary, rg_meta, schema);
+        }
+        None
+    }
+
     /// Check if a binary expression can prune this row group.
     /// Examines column statistics (min/max) against comparison predicates.
+    /// Supports Int32, Int64, Float64, and Utf8 types.
     fn check_binary_expr_pruning(
         &self,
         expr: &crate::planner::physical_expr::BinaryExpr,
@@ -308,7 +343,6 @@ impl ParquetTable {
         use crate::planner::physical_expr::ColumnExpr;
         use crate::planner::physical_expr::LiteralExpr;
 
-        // Try to match pattern: Column <op> Literal or Literal <op> Column
         let (col_idx, op, literal_val) = {
             let left = expr.left();
             let right = expr.right();
@@ -323,7 +357,6 @@ impl ParquetTable {
                 left.as_any().downcast_ref::<LiteralExpr>(),
                 right.as_any().downcast_ref::<ColumnExpr>(),
             ) {
-                // Flip the operator
                 let flipped_op = match op {
                     "lt" => "gt",
                     "lte" => "gte",
@@ -337,50 +370,83 @@ impl ParquetTable {
             }
         };
 
-        // Get the column statistics from the row group
         if col_idx >= rg_meta.num_columns() {
             return None;
         }
         let col_chunk = rg_meta.column(col_idx);
         let stats = col_chunk.statistics()?;
-
         let min_bytes = stats.min_bytes_opt()?;
         let max_bytes = stats.max_bytes_opt()?;
 
-        // Parse statistics based on column type
         let field = schema.fields().get(col_idx)?;
-        let (stat_min, stat_max) = match field.data_type() {
-            ArrowDataType::Int32 => {
-                if min_bytes.len() == 4 && max_bytes.len() == 4 {
-                    let min = i32::from_le_bytes(min_bytes.try_into().ok()?) as i64;
-                    let max = i32::from_le_bytes(max_bytes.try_into().ok()?) as i64;
-                    (min, max)
-                } else {
-                    return None;
-                }
+        match field.data_type() {
+            ArrowDataType::Int32 | ArrowDataType::Int64 | ArrowDataType::Date32 => {
+                let (stat_min, stat_max) = self.parse_int_stats(min_bytes, max_bytes, field.data_type())?;
+                let lit_val = match &literal_val {
+                    crate::types::ScalarValue::Int32(Some(v)) => *v as i64,
+                    crate::types::ScalarValue::Int64(Some(v)) => *v,
+                    crate::types::ScalarValue::Float64(Some(v)) => *v as i64,
+                    _ => return None,
+                };
+                Some(Self::prune_with_int_stats(op.as_str(), stat_min, stat_max, lit_val))
+            }
+            ArrowDataType::Float32 | ArrowDataType::Float64 => {
+                let (stat_min, stat_max) = self.parse_float_stats(min_bytes, max_bytes, field.data_type())?;
+                let lit_val = match &literal_val {
+                    crate::types::ScalarValue::Int32(Some(v)) => *v as f64,
+                    crate::types::ScalarValue::Int64(Some(v)) => *v as f64,
+                    crate::types::ScalarValue::Float64(Some(v)) => *v,
+                    _ => return None,
+                };
+                Some(Self::prune_with_float_stats(op.as_str(), stat_min, stat_max, lit_val))
+            }
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
+                let stat_min = std::str::from_utf8(min_bytes).ok()?;
+                let stat_max = std::str::from_utf8(max_bytes).ok()?;
+                let lit_val = match &literal_val {
+                    crate::types::ScalarValue::Utf8(Some(v)) => v.as_str(),
+                    _ => return None,
+                };
+                Some(Self::prune_with_str_stats(op.as_str(), stat_min, stat_max, lit_val))
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_int_stats(&self, min_bytes: &[u8], max_bytes: &[u8], dt: &ArrowDataType) -> Option<(i64, i64)> {
+        match dt {
+            ArrowDataType::Int32 | ArrowDataType::Date32 => {
+                let min = i32::from_le_bytes(min_bytes.try_into().ok()?) as i64;
+                let max = i32::from_le_bytes(max_bytes.try_into().ok()?) as i64;
+                Some((min, max))
             }
             ArrowDataType::Int64 => {
-                if min_bytes.len() == 8 && max_bytes.len() == 8 {
-                    let min = i64::from_le_bytes(min_bytes.try_into().ok()?);
-                    let max = i64::from_le_bytes(max_bytes.try_into().ok()?);
-                    (min, max)
-                } else {
-                    return None;
-                }
+                let min = i64::from_le_bytes(min_bytes.try_into().ok()?);
+                let max = i64::from_le_bytes(max_bytes.try_into().ok()?);
+                Some((min, max))
             }
-            _ => return None,
-        };
+            _ => None,
+        }
+    }
 
-        // Extract literal as i64 for comparison
-        let lit_val = match &literal_val {
-            crate::types::ScalarValue::Int32(Some(v)) => *v as i64,
-            crate::types::ScalarValue::Int64(Some(v)) => *v,
-            crate::types::ScalarValue::Float64(Some(v)) => *v as i64,
-            _ => return None,
-        };
+    fn parse_float_stats(&self, min_bytes: &[u8], max_bytes: &[u8], dt: &ArrowDataType) -> Option<(f64, f64)> {
+        match dt {
+            ArrowDataType::Float32 => {
+                let min = f32::from_le_bytes(min_bytes.try_into().ok()?) as f64;
+                let max = f32::from_le_bytes(max_bytes.try_into().ok()?) as f64;
+                Some((min, max))
+            }
+            ArrowDataType::Float64 => {
+                let min = f64::from_le_bytes(min_bytes.try_into().ok()?);
+                let max = f64::from_le_bytes(max_bytes.try_into().ok()?);
+                Some((min, max))
+            }
+            _ => None,
+        }
+    }
 
-        // Determine if the row group can be pruned
-        let can_prune = match op.as_str() {
+    fn prune_with_int_stats(op: &str, stat_min: i64, stat_max: i64, lit_val: i64) -> bool {
+        match op {
             "eq" => lit_val < stat_min || lit_val > stat_max,
             "lt" => stat_min >= lit_val,
             "lte" => stat_min > lit_val,
@@ -388,9 +454,29 @@ impl ParquetTable {
             "gte" => stat_max < lit_val,
             "neq" => stat_min == stat_max && stat_min == lit_val,
             _ => false,
-        };
+        }
+    }
 
-        Some(can_prune)
+    fn prune_with_float_stats(op: &str, stat_min: f64, stat_max: f64, lit_val: f64) -> bool {
+        match op {
+            "eq" => lit_val < stat_min || lit_val > stat_max,
+            "lt" => stat_min >= lit_val,
+            "lte" => stat_min > lit_val,
+            "gt" => stat_max <= lit_val,
+            "gte" => stat_max < lit_val,
+            _ => false,
+        }
+    }
+
+    fn prune_with_str_stats(op: &str, stat_min: &str, stat_max: &str, lit_val: &str) -> bool {
+        match op {
+            "eq" => lit_val < stat_min || lit_val > stat_max,
+            "lt" => stat_min >= lit_val,
+            "lte" => stat_min > lit_val,
+            "gt" => stat_max <= lit_val,
+            "gte" => stat_max < lit_val,
+            _ => false,
+        }
     }
 
     /// Internal scan implementation with row group pruning and projection pushdown.
@@ -662,5 +748,56 @@ mod tests {
 
         assert_eq!(stats.num_rows, Some(5));
         assert!(stats.total_byte_size.is_some());
+    }
+
+    #[test]
+    fn test_prune_with_int_stats() {
+        // eq: value outside range → prunable
+        assert!(ParquetTable::prune_with_int_stats("eq", 10, 20, 5));
+        assert!(ParquetTable::prune_with_int_stats("eq", 10, 20, 25));
+        assert!(!ParquetTable::prune_with_int_stats("eq", 10, 20, 15));
+
+        // lt: all values >= lit → prunable
+        assert!(ParquetTable::prune_with_int_stats("lt", 10, 20, 10));
+        assert!(!ParquetTable::prune_with_int_stats("lt", 10, 20, 15));
+
+        // gt: all values <= lit → prunable
+        assert!(ParquetTable::prune_with_int_stats("gt", 10, 20, 20));
+        assert!(!ParquetTable::prune_with_int_stats("gt", 10, 20, 15));
+    }
+
+    #[test]
+    fn test_prune_with_float_stats() {
+        assert!(ParquetTable::prune_with_float_stats("eq", 1.0, 5.0, 0.5));
+        assert!(ParquetTable::prune_with_float_stats("eq", 1.0, 5.0, 5.5));
+        assert!(!ParquetTable::prune_with_float_stats("eq", 1.0, 5.0, 3.0));
+
+        assert!(ParquetTable::prune_with_float_stats("gt", 1.0, 5.0, 5.0));
+        assert!(!ParquetTable::prune_with_float_stats("gt", 1.0, 5.0, 3.0));
+    }
+
+    #[test]
+    fn test_prune_with_str_stats() {
+        assert!(ParquetTable::prune_with_str_stats("eq", "b", "d", "a"));
+        assert!(ParquetTable::prune_with_str_stats("eq", "b", "d", "e"));
+        assert!(!ParquetTable::prune_with_str_stats("eq", "b", "d", "c"));
+
+        assert!(ParquetTable::prune_with_str_stats("lt", "b", "d", "b"));
+        assert!(!ParquetTable::prune_with_str_stats("lt", "b", "d", "e"));
+    }
+
+    #[test]
+    fn test_parquet_options_use_statistics_disabled() {
+        let batch = create_test_batch();
+        let temp_file = NamedTempFile::new().unwrap();
+        write_parquet(temp_file.path(), &[batch]).unwrap();
+
+        let opts = ParquetOptions {
+            use_statistics: false,
+            ..Default::default()
+        };
+        let table = ParquetTable::open_with_options(temp_file.path(), opts).unwrap();
+        let result = table.prune_row_groups(&[]).unwrap();
+        assert!(result.is_none());
     }
 }
