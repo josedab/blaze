@@ -4,6 +4,9 @@
 //! for visualizing query execution profiles from `ExecutionStats`.
 
 use crate::planner::ExecutionStats;
+use parking_lot::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 /// Output format for profiler reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +217,562 @@ pub struct OperatorProfile {
     pub peak_memory_bytes: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Production observability features
+// ---------------------------------------------------------------------------
+
+/// Production query profiler that tracks execution history.
+pub struct QueryProfiler {
+    history: RwLock<Vec<QueryProfileEntry>>,
+    max_history: usize,
+    slow_query_threshold_ms: f64,
+}
+
+/// A single recorded query profile entry.
+#[derive(Debug, Clone)]
+pub struct QueryProfileEntry {
+    pub query_id: String,
+    pub sql: String,
+    pub total_elapsed_ms: f64,
+    pub rows_returned: usize,
+    pub peak_memory_bytes: usize,
+    pub timestamp_epoch_ms: u64,
+    pub is_slow: bool,
+}
+
+impl QueryProfiler {
+    pub fn new(max_history: usize, slow_query_threshold_ms: f64) -> Self {
+        Self {
+            history: RwLock::new(Vec::new()),
+            max_history,
+            slow_query_threshold_ms,
+        }
+    }
+
+    /// Record a completed query's execution statistics.
+    pub fn record(&self, sql: &str, stats: &ExecutionStats) {
+        let total_ms = stats.total_elapsed_nanos() as f64 / 1_000_000.0;
+        let entry = QueryProfileEntry {
+            query_id: Uuid::new_v4().to_string(),
+            sql: sql.to_string(),
+            total_elapsed_ms: total_ms,
+            rows_returned: stats.rows_output,
+            peak_memory_bytes: stats.peak_memory_bytes,
+            timestamp_epoch_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            is_slow: total_ms > self.slow_query_threshold_ms,
+        };
+
+        let mut history = self.history.write();
+        if history.len() >= self.max_history {
+            history.remove(0);
+        }
+        history.push(entry);
+    }
+
+    /// Return all queries that exceeded the slow-query threshold.
+    pub fn slow_queries(&self) -> Vec<QueryProfileEntry> {
+        self.history
+            .read()
+            .iter()
+            .filter(|e| e.is_slow)
+            .cloned()
+            .collect()
+    }
+
+    /// Average query duration across all recorded queries.
+    pub fn avg_query_time_ms(&self) -> f64 {
+        let history = self.history.read();
+        if history.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = history.iter().map(|e| e.total_elapsed_ms).sum();
+        sum / history.len() as f64
+    }
+
+    /// 95th-percentile query latency.
+    pub fn p95_query_time_ms(&self) -> f64 {
+        let history = self.history.read();
+        if history.is_empty() {
+            return 0.0;
+        }
+        let mut times: Vec<f64> = history.iter().map(|e| e.total_elapsed_ms).collect();
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((times.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+        times[idx.min(times.len() - 1)]
+    }
+
+    /// Total number of queries recorded.
+    pub fn total_queries(&self) -> usize {
+        self.history.read().len()
+    }
+
+    /// Clear all recorded history.
+    pub fn clear(&self) {
+        self.history.write().clear();
+    }
+}
+
+/// Analyzes query profiles to identify performance bottlenecks.
+pub struct BottleneckAnalyzer;
+
+/// A detected performance bottleneck.
+#[derive(Debug, Clone)]
+pub struct Bottleneck {
+    pub operator_name: String,
+    pub percentage_of_total: f64,
+    pub elapsed_ms: f64,
+    pub suggestion: String,
+}
+
+impl BottleneckAnalyzer {
+    /// Analyze execution statistics and return operators consuming >20% of total time.
+    pub fn analyze(stats: &ExecutionStats) -> Vec<Bottleneck> {
+        let total_ns = stats.total_elapsed_nanos() as f64;
+        if total_ns == 0.0 {
+            return Vec::new();
+        }
+
+        let mut operators = Vec::new();
+        Self::collect_operators(stats, &mut operators);
+
+        operators
+            .into_iter()
+            .filter_map(|(name, elapsed_ns)| {
+                let pct = (elapsed_ns as f64 / total_ns) * 100.0;
+                if pct > 20.0 {
+                    let suggestion = if name.starts_with("TableScan") {
+                        "Consider adding filters or using partitioned data"
+                    } else if name.starts_with("HashJoin") {
+                        "Consider adding indexes or reducing join input size"
+                    } else if name.starts_with("Sort") {
+                        "Consider limiting result set or using pre-sorted data"
+                    } else {
+                        "Operator is a potential bottleneck"
+                    };
+                    Some(Bottleneck {
+                        operator_name: name,
+                        percentage_of_total: pct,
+                        elapsed_ms: elapsed_ns as f64 / 1_000_000.0,
+                        suggestion: suggestion.to_string(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn collect_operators(stats: &ExecutionStats, out: &mut Vec<(String, u64)>) {
+        out.push((stats.operator_name.clone(), stats.elapsed_nanos));
+        for child in &stats.children {
+            Self::collect_operators(child, out);
+        }
+    }
+}
+
+/// Exports query profiles as OpenTelemetry-compatible trace spans.
+pub struct OpenTelemetryExporter {
+    service_name: String,
+}
+
+/// A single OpenTelemetry-compatible span.
+#[derive(Debug, Clone)]
+pub struct OtelSpan {
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub operation_name: String,
+    pub start_time_ns: u64,
+    pub duration_ns: u64,
+    pub attributes: Vec<(String, String)>,
+}
+
+impl OpenTelemetryExporter {
+    pub fn new(service_name: impl Into<String>) -> Self {
+        Self {
+            service_name: service_name.into(),
+        }
+    }
+
+    /// Convert an ExecutionStats tree into a flat list of OtelSpans.
+    pub fn export_spans(&self, stats: &ExecutionStats) -> Vec<OtelSpan> {
+        let trace_id = Uuid::new_v4().to_string();
+        let base_time_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        let mut spans = Vec::new();
+        self.collect_spans(stats, &trace_id, None, base_time_ns, &mut spans);
+        spans
+    }
+
+    fn collect_spans(
+        &self,
+        stats: &ExecutionStats,
+        trace_id: &str,
+        parent_span_id: Option<&str>,
+        start_time_ns: u64,
+        spans: &mut Vec<OtelSpan>,
+    ) {
+        let span_id = Uuid::new_v4().to_string();
+
+        let mut attributes = vec![
+            ("service.name".to_string(), self.service_name.clone()),
+            (
+                "rows_processed".to_string(),
+                stats.rows_processed.to_string(),
+            ),
+            ("rows_output".to_string(), stats.rows_output.to_string()),
+            (
+                "peak_memory_bytes".to_string(),
+                stats.peak_memory_bytes.to_string(),
+            ),
+            (
+                "batches_processed".to_string(),
+                stats.batches_processed.to_string(),
+            ),
+        ];
+        for (k, v) in &stats.extra_metrics {
+            attributes.push((k.clone(), v.clone()));
+        }
+
+        spans.push(OtelSpan {
+            trace_id: trace_id.to_string(),
+            span_id: span_id.clone(),
+            parent_span_id: parent_span_id.map(|s| s.to_string()),
+            operation_name: stats.operator_name.clone(),
+            start_time_ns,
+            duration_ns: stats.elapsed_nanos,
+            attributes,
+        });
+
+        let mut child_start = start_time_ns;
+        for child in &stats.children {
+            self.collect_spans(child, trace_id, Some(&span_id), child_start, spans);
+            child_start += child.total_elapsed_nanos();
+        }
+    }
+}
+
+/// Prometheus-compatible metrics exporter.
+#[derive(Debug, Clone, Default)]
+pub struct PrometheusMetrics {
+    pub query_count: u64,
+    pub query_duration_sum_ms: f64,
+    pub query_errors: u64,
+    pub active_queries: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub memory_used_bytes: usize,
+}
+
+impl PrometheusMetrics {
+    /// Record the outcome of a single query.
+    pub fn record_query(&mut self, duration_ms: f64, error: bool) {
+        self.query_count += 1;
+        self.query_duration_sum_ms += duration_ms;
+        if error {
+            self.query_errors += 1;
+        }
+    }
+
+    /// Format metrics in Prometheus text exposition format.
+    pub fn format_exposition(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# HELP blaze_queries_total Total queries executed\n");
+        out.push_str("# TYPE blaze_queries_total counter\n");
+        out.push_str(&format!("blaze_queries_total {}\n", self.query_count));
+        out.push_str("# HELP blaze_query_duration_ms_sum Total query duration\n");
+        out.push_str("# TYPE blaze_query_duration_ms_sum counter\n");
+        out.push_str(&format!(
+            "blaze_query_duration_ms_sum {:.3}\n",
+            self.query_duration_sum_ms
+        ));
+        out.push_str("# HELP blaze_query_errors_total Total query errors\n");
+        out.push_str("# TYPE blaze_query_errors_total counter\n");
+        out.push_str(&format!(
+            "blaze_query_errors_total {}\n",
+            self.query_errors
+        ));
+        out.push_str("# HELP blaze_active_queries Currently active queries\n");
+        out.push_str("# TYPE blaze_active_queries gauge\n");
+        out.push_str(&format!("blaze_active_queries {}\n", self.active_queries));
+        out.push_str("# HELP blaze_cache_hits Total cache hits\n");
+        out.push_str("# TYPE blaze_cache_hits counter\n");
+        out.push_str(&format!("blaze_cache_hits {}\n", self.cache_hits));
+        out.push_str("# HELP blaze_cache_misses Total cache misses\n");
+        out.push_str("# TYPE blaze_cache_misses counter\n");
+        out.push_str(&format!("blaze_cache_misses {}\n", self.cache_misses));
+        out.push_str("# HELP blaze_memory_used_bytes Current memory usage\n");
+        out.push_str("# TYPE blaze_memory_used_bytes gauge\n");
+        out.push_str(&format!(
+            "blaze_memory_used_bytes {}\n",
+            self.memory_used_bytes
+        ));
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Flamegraph Generator + Cardinality Annotator
+// ---------------------------------------------------------------------------
+
+/// Generates flamegraph-compatible folded stack output from profiling data.
+pub struct FlamegraphGenerator;
+
+impl FlamegraphGenerator {
+    /// Generate folded stack format from operator profiles.
+    /// Output format: "stack;frame duration_us" per line (for flamegraph.pl)
+    pub fn generate_folded(operators: &[(String, u64)]) -> String {
+        let mut output = String::new();
+        let mut stack = String::new();
+        for (name, duration_us) in operators {
+            if !stack.is_empty() {
+                stack.push(';');
+            }
+            stack.push_str(name);
+            output.push_str(&format!("{} {}\n", stack, duration_us));
+        }
+        output
+    }
+
+    /// Generate a simple text-based flame chart.
+    pub fn generate_text_chart(operators: &[(String, u64)], width: usize) -> String {
+        if operators.is_empty() {
+            return String::new();
+        }
+        let max_duration = operators.iter().map(|(_, d)| *d).max().unwrap_or(1);
+        let mut chart = String::new();
+        for (name, duration) in operators {
+            let bar_width = (*duration as f64 / max_duration as f64 * width as f64) as usize;
+            let bar = "█".repeat(bar_width.max(1));
+            chart.push_str(&format!("{:>30} {} ({} μs)\n", name, bar, duration));
+        }
+        chart
+    }
+}
+
+/// Annotates query plan nodes with actual vs estimated cardinality.
+#[derive(Debug, Clone)]
+pub struct CardinalityAnnotation {
+    pub operator: String,
+    pub estimated_rows: usize,
+    pub actual_rows: usize,
+    pub selectivity: f64,
+}
+
+impl CardinalityAnnotation {
+    pub fn new(operator: &str, estimated: usize, actual: usize) -> Self {
+        let selectivity = if estimated > 0 {
+            actual as f64 / estimated as f64
+        } else {
+            0.0
+        };
+        Self {
+            operator: operator.to_string(),
+            estimated_rows: estimated,
+            actual_rows: actual,
+            selectivity,
+        }
+    }
+
+    /// The Q-error (max of ratio and its inverse, always >= 1.0).
+    pub fn q_error(&self) -> f64 {
+        if self.estimated_rows == 0 || self.actual_rows == 0 {
+            return f64::INFINITY;
+        }
+        let ratio = self.actual_rows as f64 / self.estimated_rows as f64;
+        ratio.max(1.0 / ratio)
+    }
+
+    /// Whether the estimate was significantly off (q-error > threshold).
+    pub fn is_misestimate(&self, threshold: f64) -> bool {
+        self.q_error() > threshold
+    }
+}
+
+/// Collects cardinality annotations across a query plan.
+pub struct CardinalityAnnotator {
+    annotations: Vec<CardinalityAnnotation>,
+}
+
+impl CardinalityAnnotator {
+    pub fn new() -> Self {
+        Self { annotations: Vec::new() }
+    }
+
+    pub fn add(&mut self, operator: &str, estimated: usize, actual: usize) {
+        self.annotations.push(CardinalityAnnotation::new(operator, estimated, actual));
+    }
+
+    /// Get all annotations.
+    pub fn annotations(&self) -> &[CardinalityAnnotation] {
+        &self.annotations
+    }
+
+    /// Get annotations where the estimate was significantly wrong.
+    pub fn misestimates(&self, threshold: f64) -> Vec<&CardinalityAnnotation> {
+        self.annotations.iter().filter(|a| a.is_misestimate(threshold)).collect()
+    }
+
+    /// Average Q-error across all operators.
+    pub fn avg_q_error(&self) -> f64 {
+        let finite: Vec<f64> = self.annotations.iter()
+            .map(|a| a.q_error())
+            .filter(|q| q.is_finite())
+            .collect();
+        if finite.is_empty() { 0.0 } else { finite.iter().sum::<f64>() / finite.len() as f64 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Slow Query Analyzer + Sampling Profiler
+// ---------------------------------------------------------------------------
+
+/// Analyzes slow queries and provides optimization recommendations.
+pub struct SlowQueryAnalyzer {
+    threshold_ms: u64,
+    slow_queries: Vec<SlowQueryEntry>,
+    max_entries: usize,
+}
+
+/// A recorded slow query with analysis.
+#[derive(Debug, Clone)]
+pub struct SlowQueryEntry {
+    pub sql: String,
+    pub execution_time_ms: u64,
+    pub recommendations: Vec<String>,
+}
+
+impl SlowQueryAnalyzer {
+    pub fn new(threshold_ms: u64, max_entries: usize) -> Self {
+        Self {
+            threshold_ms,
+            slow_queries: Vec::new(),
+            max_entries,
+        }
+    }
+
+    /// Record a query execution and analyze if slow.
+    pub fn record(&mut self, sql: &str, execution_time_ms: u64) {
+        if execution_time_ms < self.threshold_ms {
+            return;
+        }
+
+        let recommendations = Self::analyze_query(sql, execution_time_ms);
+
+        if self.slow_queries.len() >= self.max_entries {
+            self.slow_queries.remove(0);
+        }
+
+        self.slow_queries.push(SlowQueryEntry {
+            sql: sql.to_string(),
+            execution_time_ms,
+            recommendations,
+        });
+    }
+
+    fn analyze_query(sql: &str, _execution_time_ms: u64) -> Vec<String> {
+        let upper = sql.to_uppercase();
+        let mut recs = Vec::new();
+
+        if upper.contains("SELECT *") {
+            recs.push("Consider specifying columns instead of SELECT *".to_string());
+        }
+        if upper.contains("CROSS JOIN") || (upper.contains("FROM") && upper.contains(",") && !upper.contains("JOIN")) {
+            recs.push("Possible cross join detected - ensure join conditions are specified".to_string());
+        }
+        if !upper.contains("LIMIT") && !upper.contains("GROUP BY") {
+            recs.push("Consider adding LIMIT to reduce result set size".to_string());
+        }
+        if upper.contains("LIKE '%") {
+            recs.push("Leading wildcard in LIKE prevents index usage".to_string());
+        }
+        if upper.contains("OR") && upper.contains("WHERE") {
+            recs.push("OR conditions in WHERE may prevent index usage - consider UNION".to_string());
+        }
+
+        recs
+    }
+
+    /// Get all recorded slow queries.
+    pub fn slow_queries(&self) -> &[SlowQueryEntry] {
+        &self.slow_queries
+    }
+
+    /// Get the slowest query.
+    pub fn slowest(&self) -> Option<&SlowQueryEntry> {
+        self.slow_queries.iter().max_by_key(|q| q.execution_time_ms)
+    }
+
+    pub fn count(&self) -> usize { self.slow_queries.len() }
+}
+
+/// Sampling-based profiler for low-overhead continuous profiling.
+pub struct SamplingProfiler {
+    samples: Vec<ProfileSample>,
+    sample_rate_hz: u32,
+    is_active: bool,
+    max_samples: usize,
+}
+
+/// A single profiling sample.
+#[derive(Debug, Clone)]
+pub struct ProfileSample {
+    pub operator: String,
+    pub timestamp_us: u64,
+    pub memory_bytes: usize,
+}
+
+impl SamplingProfiler {
+    pub fn new(sample_rate_hz: u32, max_samples: usize) -> Self {
+        Self {
+            samples: Vec::new(),
+            sample_rate_hz,
+            is_active: false,
+            max_samples,
+        }
+    }
+
+    pub fn start(&mut self) { self.is_active = true; }
+    pub fn stop(&mut self) { self.is_active = false; }
+    pub fn is_active(&self) -> bool { self.is_active }
+
+    /// Record a sample.
+    pub fn record(&mut self, operator: &str, timestamp_us: u64, memory_bytes: usize) {
+        if !self.is_active { return; }
+        if self.samples.len() >= self.max_samples {
+            self.samples.remove(0);
+        }
+        self.samples.push(ProfileSample {
+            operator: operator.to_string(),
+            timestamp_us,
+            memory_bytes,
+        });
+    }
+
+    /// Get time spent per operator (aggregated).
+    pub fn operator_time(&self) -> std::collections::HashMap<String, u64> {
+        let mut times: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for sample in &self.samples {
+            *times.entry(sample.operator.clone()).or_insert(0) += 1;
+        }
+        // Convert sample counts to estimated microseconds
+        let interval_us = if self.sample_rate_hz > 0 { 1_000_000 / self.sample_rate_hz as u64 } else { 0 };
+        for v in times.values_mut() {
+            *v *= interval_us;
+        }
+        times
+    }
+
+    pub fn sample_count(&self) -> usize { self.samples.len() }
+    pub fn sample_rate(&self) -> u32 { self.sample_rate_hz }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +858,199 @@ mod tests {
         let total = stats.total_elapsed_nanos();
         let report = ProfileReport::new(stats);
         assert_eq!(report.stats().total_elapsed_nanos(), total);
+    }
+
+    #[test]
+    fn test_query_profiler_record() {
+        let profiler = QueryProfiler::new(100, 1.0);
+        let stats = sample_stats();
+        profiler.record("SELECT * FROM users", &stats);
+        assert_eq!(profiler.total_queries(), 1);
+
+        let history = profiler.history.read();
+        assert_eq!(history[0].sql, "SELECT * FROM users");
+        assert!(history[0].timestamp_epoch_ms > 0);
+        assert!(!history[0].query_id.is_empty());
+    }
+
+    #[test]
+    fn test_query_profiler_slow_queries() {
+        let profiler = QueryProfiler::new(100, 0.1); // 0.1ms threshold
+        // sample_stats total = 0.8ms → should be slow
+        profiler.record("SELECT * FROM users", &sample_stats());
+
+        let mut fast = ExecutionStats::new("Projection");
+        fast.elapsed_nanos = 1_000; // 0.001ms → fast
+        fast.rows_output = 1;
+        profiler.record("SELECT 1", &fast);
+
+        assert_eq!(profiler.total_queries(), 2);
+        let slow = profiler.slow_queries();
+        assert_eq!(slow.len(), 1);
+        assert_eq!(slow[0].sql, "SELECT * FROM users");
+    }
+
+    #[test]
+    fn test_query_profiler_percentiles() {
+        let profiler = QueryProfiler::new(100, 100.0);
+        for i in 1..=100 {
+            let mut s = ExecutionStats::new("Op");
+            s.elapsed_nanos = i * 1_000_000; // i ms
+            s.rows_output = 1;
+            profiler.record("q", &s);
+        }
+        let avg = profiler.avg_query_time_ms();
+        assert!((avg - 50.5).abs() < 0.01);
+        let p95 = profiler.p95_query_time_ms();
+        assert!((p95 - 95.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_bottleneck_analyzer() {
+        let mut scan = ExecutionStats::new("TableScan[orders]");
+        scan.elapsed_nanos = 8_000_000; // 8ms – dominant
+
+        let mut join = ExecutionStats::new("HashJoin");
+        join.elapsed_nanos = 1_000_000;
+        join.children.push(scan);
+
+        let mut project = ExecutionStats::new("Projection");
+        project.elapsed_nanos = 1_000_000;
+        project.children.push(join);
+
+        let bottlenecks = BottleneckAnalyzer::analyze(&project);
+        assert!(!bottlenecks.is_empty());
+        let scan_b = bottlenecks
+            .iter()
+            .find(|b| b.operator_name.starts_with("TableScan"))
+            .expect("TableScan should be a bottleneck");
+        assert!(scan_b.percentage_of_total > 20.0);
+        assert_eq!(
+            scan_b.suggestion,
+            "Consider adding filters or using partitioned data"
+        );
+    }
+
+    #[test]
+    fn test_otel_exporter_spans() {
+        let exporter = OpenTelemetryExporter::new("blaze-test");
+        let stats = sample_stats();
+        let spans = exporter.export_spans(&stats);
+
+        // Should have one span per operator (3 total)
+        assert_eq!(spans.len(), 3);
+
+        // All spans share the same trace_id
+        let trace_id = &spans[0].trace_id;
+        assert!(spans.iter().all(|s| s.trace_id == *trace_id));
+
+        // Root span has no parent
+        assert!(spans[0].parent_span_id.is_none());
+        // Children have a parent
+        assert!(spans[1].parent_span_id.is_some());
+        assert!(spans[2].parent_span_id.is_some());
+
+        // Service name appears in attributes
+        assert!(spans[0]
+            .attributes
+            .iter()
+            .any(|(k, v)| k == "service.name" && v == "blaze-test"));
+    }
+
+    #[test]
+    fn test_prometheus_metrics_format() {
+        let mut metrics = PrometheusMetrics::default();
+        metrics.record_query(10.0, false);
+        metrics.record_query(20.0, true);
+        metrics.cache_hits = 5;
+        metrics.cache_misses = 2;
+        metrics.memory_used_bytes = 1024;
+
+        let text = metrics.format_exposition();
+        assert!(text.contains("blaze_queries_total 2"));
+        assert!(text.contains("blaze_query_duration_ms_sum 30.000"));
+        assert!(text.contains("blaze_query_errors_total 1"));
+        assert!(text.contains("blaze_cache_hits 5"));
+        assert!(text.contains("blaze_memory_used_bytes 1024"));
+        assert!(text.contains("# TYPE blaze_queries_total counter"));
+    }
+
+    #[test]
+    fn test_flamegraph_folded() {
+        let ops = vec![
+            ("Scan".to_string(), 1000u64),
+            ("Filter".to_string(), 500),
+            ("Project".to_string(), 200),
+        ];
+        let folded = FlamegraphGenerator::generate_folded(&ops);
+        assert!(folded.contains("Scan 1000"));
+        assert!(folded.contains("Scan;Filter 500"));
+    }
+
+    #[test]
+    fn test_flamegraph_text_chart() {
+        let ops = vec![
+            ("Scan".to_string(), 1000u64),
+            ("Filter".to_string(), 500),
+        ];
+        let chart = FlamegraphGenerator::generate_text_chart(&ops, 40);
+        assert!(chart.contains("█"));
+        assert!(chart.contains("Scan"));
+    }
+
+    #[test]
+    fn test_cardinality_annotation() {
+        let ann = CardinalityAnnotation::new("Scan", 1000, 5000);
+        assert!((ann.q_error() - 5.0).abs() < 0.01);
+        assert!(ann.is_misestimate(3.0));
+        assert!(!ann.is_misestimate(10.0));
+    }
+
+    #[test]
+    fn test_cardinality_annotator() {
+        let mut annotator = CardinalityAnnotator::new();
+        annotator.add("Scan", 1000, 1000);
+        annotator.add("Filter", 500, 50);
+        assert_eq!(annotator.annotations().len(), 2);
+        assert_eq!(annotator.misestimates(5.0).len(), 1);
+    }
+
+    #[test]
+    fn test_slow_query_analyzer() {
+        let mut analyzer = SlowQueryAnalyzer::new(100, 10);
+        analyzer.record("SELECT * FROM users", 200);
+        analyzer.record("SELECT id FROM users", 50); // Not slow
+        assert_eq!(analyzer.count(), 1);
+        assert!(analyzer.slow_queries()[0].recommendations.len() > 0);
+    }
+
+    #[test]
+    fn test_slow_query_recommendations() {
+        let mut analyzer = SlowQueryAnalyzer::new(0, 10); // threshold=0 to capture all
+        analyzer.record("SELECT * FROM users CROSS JOIN orders", 100);
+        let recs = &analyzer.slow_queries()[0].recommendations;
+        assert!(recs.iter().any(|r| r.contains("SELECT *")));
+    }
+
+    #[test]
+    fn test_sampling_profiler() {
+        let mut profiler = SamplingProfiler::new(1000, 100);
+        profiler.start();
+        profiler.record("Scan", 1000, 1024);
+        profiler.record("Scan", 2000, 2048);
+        profiler.record("Filter", 3000, 512);
+        assert_eq!(profiler.sample_count(), 3);
+        
+        let times = profiler.operator_time();
+        assert!(times.contains_key("Scan"));
+        assert!(times.contains_key("Filter"));
+    }
+
+    #[test]
+    fn test_sampling_profiler_inactive() {
+        let mut profiler = SamplingProfiler::new(1000, 100);
+        // Not started
+        profiler.record("Scan", 1000, 1024);
+        assert_eq!(profiler.sample_count(), 0);
     }
 }
