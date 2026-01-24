@@ -1332,6 +1332,526 @@ impl ColumnarReader {
 }
 
 // ---------------------------------------------------------------------------
+// B-Tree Index
+// ---------------------------------------------------------------------------
+
+/// An in-memory B-tree index for fast point lookups and range scans on a column.
+///
+/// Keys are serialized as `Vec<u8>` so that any orderable column type can be
+/// indexed with a single data structure. Each key maps to one or more row
+/// indices that share that value.
+#[derive(Debug, Clone)]
+pub struct BTreeIndex {
+    /// The name of the indexed column.
+    column_name: String,
+    /// Mapping from serialized key bytes to the set of row indices.
+    tree: std::collections::BTreeMap<Vec<u8>, Vec<usize>>,
+}
+
+impl BTreeIndex {
+    /// Create a new, empty B-tree index for `column_name`.
+    pub fn new(column_name: impl Into<String>) -> Self {
+        Self {
+            column_name: column_name.into(),
+            tree: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Insert a mapping from `key` to `row_index`.
+    pub fn insert(&mut self, key: Vec<u8>, row_index: usize) {
+        self.tree.entry(key).or_default().push(row_index);
+    }
+
+    /// Point lookup – return all row indices that match `key` exactly.
+    pub fn search(&self, key: &[u8]) -> Option<&Vec<usize>> {
+        self.tree.get(key)
+    }
+
+    /// Range scan – return all `(key, row_indices)` pairs where
+    /// `start <= key <= end`.
+    pub fn range_scan(&self, start: &[u8], end: &[u8]) -> Vec<(&Vec<u8>, &Vec<usize>)> {
+        use std::ops::RangeInclusive;
+        let range: RangeInclusive<Vec<u8>> = start.to_vec()..=end.to_vec();
+        self.tree.range(range).map(|(k, v)| (k, v)).collect()
+    }
+
+    /// Remove all row indices associated with `key`.
+    /// Returns `true` if the key existed.
+    pub fn remove(&mut self, key: &[u8]) -> bool {
+        self.tree.remove(key).is_some()
+    }
+
+    /// Return the number of distinct keys in the index.
+    pub fn len(&self) -> usize {
+        self.tree.len()
+    }
+
+    /// Return `true` if the index contains no keys.
+    pub fn is_empty(&self) -> bool {
+        self.tree.is_empty()
+    }
+
+    /// The name of the column this index covers.
+    pub fn column_name(&self) -> &str {
+        &self.column_name
+    }
+}
+
+/// Manages multiple [`BTreeIndex`] instances for the tables in a database.
+///
+/// Indexes are identified by the tuple `(table_name, column_name)`.
+#[derive(Debug, Clone)]
+pub struct IndexManager {
+    /// `(table_name, column_name)` → index
+    indexes: HashMap<(String, String), BTreeIndex>,
+}
+
+impl IndexManager {
+    /// Create an empty index manager.
+    pub fn new() -> Self {
+        Self {
+            indexes: HashMap::new(),
+        }
+    }
+
+    /// Create a new B-tree index on `table_name.column_name`.
+    ///
+    /// Returns an error if the index already exists.
+    pub fn create_index(
+        &mut self,
+        table_name: impl Into<String>,
+        column_name: impl Into<String>,
+    ) -> Result<&mut BTreeIndex> {
+        let table = table_name.into();
+        let column = column_name.into();
+        let key = (table, column.clone());
+        if self.indexes.contains_key(&key) {
+            return Err(BlazeError::analysis(format!(
+                "Index already exists on {}.{}",
+                key.0, key.1
+            )));
+        }
+        let idx = BTreeIndex::new(column);
+        self.indexes.insert(key.clone(), idx);
+        Ok(self.indexes.get_mut(&key).unwrap())
+    }
+
+    /// Drop the index on `table_name.column_name`.
+    ///
+    /// Returns an error if no such index exists.
+    pub fn drop_index(&mut self, table_name: &str, column_name: &str) -> Result<()> {
+        let key = (table_name.to_string(), column_name.to_string());
+        if self.indexes.remove(&key).is_none() {
+            return Err(BlazeError::analysis(format!(
+                "No index found on {table_name}.{column_name}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Get a reference to the index on `table_name.column_name`, if it exists.
+    pub fn get_index(&self, table_name: &str, column_name: &str) -> Option<&BTreeIndex> {
+        self.indexes
+            .get(&(table_name.to_string(), column_name.to_string()))
+    }
+
+    /// Get a mutable reference to the index on `table_name.column_name`.
+    pub fn get_index_mut(
+        &mut self,
+        table_name: &str,
+        column_name: &str,
+    ) -> Option<&mut BTreeIndex> {
+        self.indexes
+            .get_mut(&(table_name.to_string(), column_name.to_string()))
+    }
+
+    /// List all indexes as `(table_name, column_name)` pairs.
+    pub fn list_indexes(&self) -> Vec<(&str, &str)> {
+        self.indexes
+            .keys()
+            .map(|(t, c)| (t.as_str(), c.as_str()))
+            .collect()
+    }
+}
+
+impl Default for IndexManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Buffer Pool Manager
+// ---------------------------------------------------------------------------
+
+/// Statistics for the [`BufferPoolManager`].
+#[derive(Debug, Clone, Default)]
+pub struct BufferPoolStats {
+    /// Number of `get_page` calls that found the page in the pool.
+    pub hit_count: u64,
+    /// Number of `get_page` calls that did **not** find the page.
+    pub miss_count: u64,
+    /// Number of pages evicted to make room for new ones.
+    pub eviction_count: u64,
+}
+
+impl BufferPoolStats {
+    /// Cache hit rate in the range `[0.0, 1.0]`.
+    /// Returns `0.0` when no requests have been made.
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hit_count + self.miss_count;
+        if total == 0 {
+            0.0
+        } else {
+            self.hit_count as f64 / total as f64
+        }
+    }
+}
+
+/// Handle to a cached page, with access-time tracking for LRU eviction.
+#[derive(Debug, Clone)]
+pub struct PageHandle {
+    /// Unique page identifier (e.g. file offset or page number).
+    pub page_id: u64,
+    /// Raw page data.
+    pub data: Vec<u8>,
+    /// Whether the page has been modified since it was loaded.
+    pub dirty: bool,
+    /// Timestamp (epoch millis) of the last access.
+    pub last_access: u64,
+}
+
+/// A fixed-capacity page cache with LRU eviction.
+///
+/// Pages are identified by a `u64` page id. When the pool is full the
+/// least-recently-used page is evicted automatically.
+#[derive(Debug)]
+pub struct BufferPoolManager {
+    /// Maximum number of pages the pool may hold.
+    max_pages: usize,
+    /// Cached pages keyed by page id.
+    pages: HashMap<u64, PageHandle>,
+    /// Running statistics.
+    stats: BufferPoolStats,
+    /// Monotonic access counter (avoids timestamp ties).
+    access_counter: u64,
+}
+
+impl BufferPoolManager {
+    /// Create a new buffer pool that holds at most `max_pages` pages.
+    pub fn new(max_pages: usize) -> Self {
+        Self {
+            max_pages,
+            pages: HashMap::new(),
+            stats: BufferPoolStats::default(),
+            access_counter: 0,
+        }
+    }
+
+    /// Retrieve a page from the pool, updating its access order.
+    ///
+    /// Returns `None` (and increments `miss_count`) when the page is not cached.
+    pub fn get_page(&mut self, page_id: u64) -> Option<&PageHandle> {
+        if self.pages.contains_key(&page_id) {
+            self.stats.hit_count += 1;
+            self.access_counter += 1;
+            let handle = self.pages.get_mut(&page_id).unwrap();
+            handle.last_access = self.access_counter;
+            // Re-borrow as shared
+            self.pages.get(&page_id)
+        } else {
+            self.stats.miss_count += 1;
+            None
+        }
+    }
+
+    /// Insert or replace a page in the pool.
+    ///
+    /// If the pool is at capacity, the least-recently-used page is evicted
+    /// first.
+    pub fn put_page(&mut self, page_id: u64, data: Vec<u8>) {
+        if !self.pages.contains_key(&page_id) && self.pages.len() >= self.max_pages {
+            self.evict();
+        }
+        self.access_counter += 1;
+        let handle = PageHandle {
+            page_id,
+            data,
+            dirty: false,
+            last_access: self.access_counter,
+        };
+        self.pages.insert(page_id, handle);
+    }
+
+    /// Evict the least-recently-used page. Returns the evicted page id, or
+    /// `None` if the pool is empty.
+    pub fn evict(&mut self) -> Option<u64> {
+        let lru_id = self
+            .pages
+            .iter()
+            .min_by_key(|(_, h)| h.last_access)
+            .map(|(id, _)| *id);
+
+        if let Some(id) = lru_id {
+            self.pages.remove(&id);
+            self.stats.eviction_count += 1;
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    /// Remove all pages from the pool (e.g. before shutdown).
+    pub fn flush_all(&mut self) -> Vec<PageHandle> {
+        let handles: Vec<PageHandle> = self.pages.drain().map(|(_, h)| h).collect();
+        handles
+    }
+
+    /// Return a snapshot of pool statistics.
+    pub fn stats(&self) -> &BufferPoolStats {
+        &self.stats
+    }
+
+    /// Number of pages currently cached.
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Whether the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Group Commit WAL
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`GroupCommitWal`] batching behaviour.
+#[derive(Debug, Clone)]
+pub struct GroupCommitConfig {
+    /// Maximum number of entries to accumulate before a forced flush.
+    pub max_batch_size: usize,
+    /// Maximum delay in milliseconds before a forced flush.
+    pub max_delay_ms: u64,
+}
+
+impl Default for GroupCommitConfig {
+    fn default() -> Self {
+        Self {
+            max_batch_size: 64,
+            max_delay_ms: 10,
+        }
+    }
+}
+
+/// Statistics for [`GroupCommitWal`].
+#[derive(Debug, Clone, Default)]
+pub struct GroupCommitStats {
+    /// Total number of individual entries committed.
+    pub total_commits: u64,
+    /// Number of group-flush operations performed.
+    pub group_commits: u64,
+    /// Average entries per group commit (computed).
+    pub entries_per_commit: f64,
+}
+
+/// A group-commit wrapper around [`WriteAheadLog`].
+///
+/// Entries are buffered in memory and flushed together when the batch reaches
+/// `max_batch_size` or when the caller explicitly invokes [`force_flush`].
+///
+/// [`force_flush`]: GroupCommitWal::force_flush
+pub struct GroupCommitWal {
+    /// Underlying WAL.
+    wal: WriteAheadLog,
+    /// Buffered entries waiting to be flushed.
+    pending: Vec<WalEntry>,
+    /// Batching configuration.
+    config: GroupCommitConfig,
+    /// Running statistics.
+    stats: GroupCommitStats,
+}
+
+impl std::fmt::Debug for GroupCommitWal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupCommitWal")
+            .field("pending_len", &self.pending.len())
+            .field("config", &self.config)
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
+impl GroupCommitWal {
+    /// Create a new group-commit WAL wrapping an existing [`WriteAheadLog`].
+    pub fn new(wal: WriteAheadLog, config: GroupCommitConfig) -> Self {
+        Self {
+            wal,
+            pending: Vec::new(),
+            config,
+            stats: GroupCommitStats::default(),
+        }
+    }
+
+    /// Append an entry. The entry is buffered and will be written to the
+    /// underlying WAL when the batch is full or [`force_flush`] is called.
+    ///
+    /// [`force_flush`]: GroupCommitWal::force_flush
+    pub fn append(&mut self, entry: WalEntry) -> Result<()> {
+        self.pending.push(entry);
+        if self.pending.len() >= self.config.max_batch_size {
+            self.force_flush()?;
+        }
+        Ok(())
+    }
+
+    /// Flush all pending entries to the underlying WAL immediately.
+    pub fn force_flush(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let count = self.pending.len() as u64;
+        let entries: Vec<WalEntry> = self.pending.drain(..).collect();
+        for entry in &entries {
+            self.wal.append(entry)?;
+        }
+        self.wal.flush()?;
+        self.stats.total_commits += count;
+        self.stats.group_commits += 1;
+        self.stats.entries_per_commit = if self.stats.group_commits > 0 {
+            self.stats.total_commits as f64 / self.stats.group_commits as f64
+        } else {
+            0.0
+        };
+        Ok(())
+    }
+
+    /// Number of entries currently buffered.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Return a snapshot of group-commit statistics.
+    pub fn stats(&self) -> &GroupCommitStats {
+        &self.stats
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental Checkpoint Manager
+// ---------------------------------------------------------------------------
+
+/// Statistics for [`IncrementalCheckpointManager`].
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointStats {
+    /// Total number of checkpoint operations (incremental + full).
+    pub total_checkpoints: u64,
+    /// Number of incremental (partial) checkpoints.
+    pub incremental_checkpoints: u64,
+    /// Cumulative number of tables saved across all checkpoints.
+    pub tables_saved: u64,
+    /// Cumulative bytes saved by skipping unchanged tables in incremental
+    /// checkpoints (estimated by counting skipped tables).
+    pub bytes_saved: u64,
+}
+
+/// Tracks which tables have been modified since the last checkpoint so that
+/// only dirty tables need to be persisted.
+///
+/// Works alongside a [`SnapshotManager`] to write the actual Arrow IPC
+/// snapshots.
+pub struct IncrementalCheckpointManager {
+    /// Snapshot manager used for writing table data.
+    snapshot_manager: SnapshotManager,
+    /// Set of table names that have been modified since the last checkpoint.
+    dirty: std::collections::HashSet<String>,
+    /// Running statistics.
+    stats: CheckpointStats,
+}
+
+impl std::fmt::Debug for IncrementalCheckpointManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncrementalCheckpointManager")
+            .field("dirty", &self.dirty)
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
+impl IncrementalCheckpointManager {
+    /// Create a new incremental checkpoint manager wrapping a
+    /// [`SnapshotManager`].
+    pub fn new(snapshot_manager: SnapshotManager) -> Self {
+        Self {
+            snapshot_manager,
+            dirty: std::collections::HashSet::new(),
+            stats: CheckpointStats::default(),
+        }
+    }
+
+    /// Mark a table as dirty so it is included in the next incremental
+    /// checkpoint.
+    pub fn mark_dirty(&mut self, table_name: impl Into<String>) {
+        self.dirty.insert(table_name.into());
+    }
+
+    /// Persist only the tables that have been marked dirty since the last
+    /// checkpoint.
+    ///
+    /// `tables` must provide all table data keyed by name; only dirty entries
+    /// are actually written.
+    pub fn checkpoint_dirty(
+        &mut self,
+        tables: &HashMap<String, Vec<RecordBatch>>,
+    ) -> Result<()> {
+        if self.dirty.is_empty() {
+            return Ok(());
+        }
+        let mut saved = 0u64;
+        let mut skipped = 0u64;
+        for (name, batches) in tables {
+            if self.dirty.contains(name) {
+                self.snapshot_manager.save_table(name, batches)?;
+                saved += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+        self.dirty.clear();
+        self.stats.total_checkpoints += 1;
+        self.stats.incremental_checkpoints += 1;
+        self.stats.tables_saved += saved;
+        self.stats.bytes_saved += skipped; // proxy metric: skipped tables
+        Ok(())
+    }
+
+    /// Persist **all** tables regardless of dirty state.
+    pub fn force_full_checkpoint(
+        &mut self,
+        tables: &HashMap<String, Vec<RecordBatch>>,
+    ) -> Result<()> {
+        for (name, batches) in tables {
+            self.snapshot_manager.save_table(name, batches)?;
+        }
+        self.dirty.clear();
+        self.stats.total_checkpoints += 1;
+        self.stats.tables_saved += tables.len() as u64;
+        Ok(())
+    }
+
+    /// Return the set of currently dirty table names.
+    pub fn dirty_tables(&self) -> Vec<&str> {
+        self.dirty.iter().map(|s| s.as_str()).collect()
+    }
+
+    /// Return a snapshot of checkpoint statistics.
+    pub fn stats(&self) -> &CheckpointStats {
+        &self.stats
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1927,5 +2447,221 @@ mod tests {
         assert_eq!(read_batches.len(), 1);
         assert_eq!(read_batches[0].num_columns(), 1);
         assert_eq!(read_batches[0].schema().field(0).name(), "id");
+    }
+
+    // -----------------------------------------------------------------------
+    // B-Tree Index Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_btree_index_insert_and_search() {
+        let mut idx = BTreeIndex::new("id");
+        idx.insert(vec![1], 0);
+        idx.insert(vec![2], 1);
+        idx.insert(vec![1], 5); // duplicate key
+
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx.search(&[1]), Some(&vec![0usize, 5]));
+        assert_eq!(idx.search(&[2]), Some(&vec![1usize]));
+        assert_eq!(idx.search(&[99]), None);
+    }
+
+    #[test]
+    fn test_btree_index_range_scan() {
+        let mut idx = BTreeIndex::new("score");
+        for i in 0u8..10 {
+            idx.insert(vec![i], i as usize);
+        }
+        let results = idx.range_scan(&[3], &[7]);
+        assert_eq!(results.len(), 5); // 3,4,5,6,7
+    }
+
+    #[test]
+    fn test_btree_index_remove() {
+        let mut idx = BTreeIndex::new("col");
+        idx.insert(vec![10], 0);
+        assert!(!idx.is_empty());
+        assert!(idx.remove(&[10]));
+        assert!(idx.is_empty());
+        assert!(!idx.remove(&[10]));
+    }
+
+    #[test]
+    fn test_index_manager_lifecycle() {
+        let mut mgr = IndexManager::new();
+        mgr.create_index("users", "id").unwrap();
+        mgr.create_index("users", "name").unwrap();
+
+        assert!(mgr.get_index("users", "id").is_some());
+        assert!(mgr.create_index("users", "id").is_err()); // duplicate
+
+        let list = mgr.list_indexes();
+        assert_eq!(list.len(), 2);
+
+        mgr.drop_index("users", "id").unwrap();
+        assert!(mgr.get_index("users", "id").is_none());
+        assert!(mgr.drop_index("users", "id").is_err()); // already gone
+    }
+
+    // -----------------------------------------------------------------------
+    // Buffer Pool Manager Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_buffer_pool_hit_and_miss() {
+        let mut pool = BufferPoolManager::new(4);
+        pool.put_page(1, vec![0xAA; 4096]);
+
+        assert!(pool.get_page(1).is_some());
+        assert!(pool.get_page(999).is_none());
+
+        assert_eq!(pool.stats().hit_count, 1);
+        assert_eq!(pool.stats().miss_count, 1);
+        assert!((pool.stats().hit_rate() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_buffer_pool_lru_eviction() {
+        let mut pool = BufferPoolManager::new(2);
+        pool.put_page(1, vec![1]);
+        pool.put_page(2, vec![2]);
+
+        // Access page 1 so page 2 becomes LRU
+        pool.get_page(1);
+
+        // Inserting page 3 should evict page 2 (the LRU)
+        pool.put_page(3, vec![3]);
+
+        assert!(pool.get_page(1).is_some());
+        assert!(pool.get_page(3).is_some());
+        assert_eq!(pool.stats().eviction_count, 1);
+    }
+
+    #[test]
+    fn test_buffer_pool_flush_all() {
+        let mut pool = BufferPoolManager::new(8);
+        pool.put_page(10, vec![10]);
+        pool.put_page(20, vec![20]);
+
+        let flushed = pool.flush_all();
+        assert_eq!(flushed.len(), 2);
+        assert!(pool.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Group Commit WAL Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_group_commit_auto_flush() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WriteAheadLog::new(tmp.path().join("gc.wal")).unwrap();
+        let config = GroupCommitConfig {
+            max_batch_size: 3,
+            max_delay_ms: 1000,
+        };
+        let mut gc = GroupCommitWal::new(wal, config);
+
+        let schema = create_test_schema();
+        let entry = WalEntry::CreateTable {
+            name: "t".into(),
+            schema,
+        };
+
+        gc.append(entry.clone()).unwrap();
+        gc.append(entry.clone()).unwrap();
+        assert_eq!(gc.pending_count(), 2);
+
+        // Third append triggers auto-flush
+        gc.append(entry).unwrap();
+        assert_eq!(gc.pending_count(), 0);
+        assert_eq!(gc.stats().group_commits, 1);
+        assert_eq!(gc.stats().total_commits, 3);
+    }
+
+    #[test]
+    fn test_group_commit_force_flush() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WriteAheadLog::new(tmp.path().join("gc2.wal")).unwrap();
+        let config = GroupCommitConfig {
+            max_batch_size: 100,
+            max_delay_ms: 10000,
+        };
+        let mut gc = GroupCommitWal::new(wal, config);
+
+        let entry = WalEntry::DropTable {
+            name: "t".into(),
+        };
+        gc.append(entry).unwrap();
+        assert_eq!(gc.pending_count(), 1);
+
+        gc.force_flush().unwrap();
+        assert_eq!(gc.pending_count(), 0);
+        assert_eq!(gc.stats().total_commits, 1);
+    }
+
+    #[test]
+    fn test_group_commit_empty_flush_noop() {
+        let tmp = TempDir::new().unwrap();
+        let wal = WriteAheadLog::new(tmp.path().join("gc3.wal")).unwrap();
+        let mut gc = GroupCommitWal::new(wal, GroupCommitConfig::default());
+
+        gc.force_flush().unwrap();
+        assert_eq!(gc.stats().group_commits, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Incremental Checkpoint Manager Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_incremental_checkpoint_dirty_only() {
+        let tmp = TempDir::new().unwrap();
+        let sm = SnapshotManager::new(tmp.path().join("snaps")).unwrap();
+        let mut mgr = IncrementalCheckpointManager::new(sm);
+
+        let batch = create_test_batch();
+        let mut tables = HashMap::new();
+        tables.insert("users".to_string(), vec![batch.clone()]);
+        tables.insert("orders".to_string(), vec![batch]);
+
+        mgr.mark_dirty("users");
+        mgr.checkpoint_dirty(&tables).unwrap();
+
+        assert_eq!(mgr.stats().incremental_checkpoints, 1);
+        assert_eq!(mgr.stats().tables_saved, 1);
+        assert!(mgr.dirty_tables().is_empty());
+    }
+
+    #[test]
+    fn test_incremental_checkpoint_full() {
+        let tmp = TempDir::new().unwrap();
+        let sm = SnapshotManager::new(tmp.path().join("snaps2")).unwrap();
+        let mut mgr = IncrementalCheckpointManager::new(sm);
+
+        let batch = create_test_batch();
+        let mut tables = HashMap::new();
+        tables.insert("a".to_string(), vec![batch.clone()]);
+        tables.insert("b".to_string(), vec![batch]);
+
+        mgr.mark_dirty("a");
+        mgr.force_full_checkpoint(&tables).unwrap();
+
+        assert_eq!(mgr.stats().total_checkpoints, 1);
+        assert_eq!(mgr.stats().incremental_checkpoints, 0);
+        assert_eq!(mgr.stats().tables_saved, 2);
+        assert!(mgr.dirty_tables().is_empty());
+    }
+
+    #[test]
+    fn test_incremental_checkpoint_no_dirty_noop() {
+        let tmp = TempDir::new().unwrap();
+        let sm = SnapshotManager::new(tmp.path().join("snaps3")).unwrap();
+        let mut mgr = IncrementalCheckpointManager::new(sm);
+
+        let tables: HashMap<String, Vec<RecordBatch>> = HashMap::new();
+        mgr.checkpoint_dirty(&tables).unwrap();
+        // No dirty tables → early return, no checkpoint counted
+        assert_eq!(mgr.stats().total_checkpoints, 0);
     }
 }
