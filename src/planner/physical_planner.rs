@@ -14,7 +14,7 @@ use crate::planner::physical_expr::{
     CaseExpr, BetweenExpr, LikeExpr, InListExpr, ScalarFunctionExpr,
     ScalarSubqueryExpr, ExistsExpr, InSubqueryExpr,
 };
-use crate::planner::physical_plan::{AggregateExpr, PhysicalPlan, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction};
+use crate::planner::physical_plan::{AggregateExpr, CopyFormat as PhysicalCopyFormat, PhysicalPlan, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction};
 use crate::types::ScalarValue;
 
 use arrow::record_batch::RecordBatch;
@@ -369,6 +369,22 @@ impl PhysicalPlanner {
                 Err(BlazeError::not_implemented(
                     "DDL/DML operations should be handled by Connection",
                 ))
+            }
+
+            LogicalPlan::Copy { input, target, format, .. } => {
+                let physical_input = self.create_physical_plan(input)?;
+                let physical_format = match format {
+                    crate::planner::logical_plan::CopyFormat::Parquet => PhysicalCopyFormat::Parquet,
+                    crate::planner::logical_plan::CopyFormat::Csv => PhysicalCopyFormat::Csv,
+                    crate::planner::logical_plan::CopyFormat::Json => PhysicalCopyFormat::Json,
+                };
+
+                Ok(PhysicalPlan::Copy {
+                    input: Box::new(physical_input),
+                    target: target.clone(),
+                    format: physical_format,
+                    schema: Arc::new(ArrowSchema::empty()),
+                })
             }
         }
     }
@@ -751,6 +767,7 @@ impl PhysicalPlanner {
             PhysicalPlan::Explain { schema, .. } => schema.clone(),
             PhysicalPlan::Window { schema, .. } => schema.clone(),
             PhysicalPlan::ExplainAnalyze { schema, .. } => schema.clone(),
+            PhysicalPlan::Copy { schema, .. } => schema.clone(),
         }
     }
 
@@ -821,6 +838,8 @@ impl PhysicalPlanner {
                     "RANK" => WindowFunction::Rank,
                     "DENSE_RANK" => WindowFunction::DenseRank,
                     "NTILE" => WindowFunction::Ntile,
+                    "PERCENT_RANK" => WindowFunction::PercentRank,
+                    "CUME_DIST" => WindowFunction::CumeDist,
                     "LAG" => WindowFunction::Lag,
                     "LEAD" => WindowFunction::Lead,
                     "FIRST_VALUE" => WindowFunction::FirstValue,
