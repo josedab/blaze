@@ -1,0 +1,143 @@
+# cbindgen configuration for Blaze C FFI
+# Generate header with: cbindgen --config cbindgen.toml --output include/blaze.h
+
+[defines]
+
+[export]
+include = ["BlazeConnection", "BlazeResult", "BlazeStatus", "BlazeColumn"]
+exclude = []
+prefix = ""
+item_types = ["functions", "types", "constants", "statics"]
+renaming_overrides_prefixing = false
+
+[export.rename]
+
+[export.mangle]
+
+[export.body]
+
+[fn]
+# Rename pattern for function names (none = no renaming)
+rename_args = "None"
+# Generate arg names in the header
+args = "vertical"
+# Sort by name
+sort_by = "Name"
+
+[struct]
+rename_fields = "None"
+derive_constructor = false
+derive_eq = false
+derive_neq = false
+derive_lt = false
+derive_lte = false
+derive_gt = false
+derive_gte = false
+
+[enum]
+rename_variants = "None"
+add_sentinel = false
+prefix_with_name = false
+derive_helper_methods = false
+derive_const_casts = false
+derive_tagged_enum_destructor = false
+derive_tagged_enum_copy_constructor = false
+must_use = null
+
+[const]
+
+[macro_expansion]
+bitflags = false
+
+[parse]
+parse_deps = false
+include = []
+exclude = []
+clean = false
+extra_bindings = []
+
+[parse.expand]
+crates = []
+all_features = false
+default_features = true
+features = ["c-ffi"]
+
+# Language output settings
+language = "C"
+
+# Add header include guard
+include_guard = "BLAZE_H"
+
+# Use #pragma once
+pragma_once = false
+
+# Add tab/spaces for indentation
+tab_width = 4
+
+# Generate documentation comments
+documentation = true
+documentation_style = "auto"
+
+# Header/trailer for the generated file
+header = """/*
+ * Blaze SQL Query Engine - C API
+ *
+ * This header provides C bindings for the Blaze query engine.
+ * All objects returned from blaze_* functions must be freed using
+ * the corresponding *_free function.
+ *
+ * Thread Safety:
+ *   - BlazeConnection is NOT thread-safe. Use separate connections per thread.
+ *   - BlazeResult can be read from multiple threads but not modified.
+ *
+ * Example:
+ *   BlazeConnection* conn = blaze_connection_new();
+ *   BlazeResult* result = blaze_query(conn, "SELECT 1 + 1");
+ *   printf("Rows: %lld\\n", blaze_result_row_count(result));
+ *   blaze_result_free(result);
+ *   blaze_connection_free(conn);
+ */
+"""
+
+trailer = """
+#ifdef __cplusplus
+}
+#endif
+"""
+
+# CPP compat
+cpp_compat = true
+
+# After-includes
+after_includes = """
+#ifdef __cplusplus
+extern "C" {
+#endif
+"""
+
+# Include version
+include_version = true
+
+# Braces style
+braces = "SameLine"
+
+# Line length limit
+line_length = 100
+
+# Struct/enum layout
+style = "Both"
+
+# Don't emit body for functions
+no_includes = false
+
+# Sys includes
+sys_includes = ["stdint.h", "stddef.h", "stdbool.h"]
+
+# Namespace (for C++)
+namespace = ""
+
+# Crate name
+crate = "blaze"
+
+# Source file location
+src = ["src/ffi/mod.rs"]
