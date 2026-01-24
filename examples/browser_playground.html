@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blaze SQL Playground</title>
+    <style>
+        :root {
+            --bg-primary: #1e1e2e;
+            --bg-secondary: #2d2d3d;
+            --bg-tertiary: #3d3d4d;
+            --text-primary: #e0e0e0;
+            --text-secondary: #a0a0a0;
+            --accent: #7c3aed;
+            --accent-light: #a78bfa;
+            --success: #10b981;
+            --error: #ef4444;
+            --border: #4a4a5a;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--accent), #5b21b6);
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo svg {
+            width: 32px;
+            height: 32px;
+        }
+
+        .logo h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .btn-primary {
+            background-color: white;
+            color: var(--accent);
+        }
+
+        .btn-primary:hover {
+            background-color: #f0f0f0;
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-secondary:hover {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-success {
+            background-color: var(--success);
+            color: white;
+        }
+
+        .btn-success:hover {
+            background-color: #059669;
+        }
+
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 250px 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 1px;
+            background-color: var(--border);
+        }
+
+        .sidebar {
+            grid-row: span 2;
+            background-color: var(--bg-secondary);
+            padding: 1rem;
+            overflow-y: auto;
+        }
+
+        .sidebar h2 {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            margin-bottom: 0.75rem;
+        }
+
+        .sidebar h2:not(:first-child) {
+            margin-top: 1.5rem;
+        }
+
+        .table-list {
+            list-style: none;
+        }
+
+        .table-item {
+            padding: 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        .table-item:hover {
+            background-color: var(--bg-tertiary);
+        }
+
+        .table-item.active {
+            background-color: var(--accent);
+            color: white;
+        }
+
+        .table-icon {
+            opacity: 0.7;
+        }
+
+        .example-list {
+            list-style: none;
+        }
+
+        .example-item {
+            padding: 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            color: var(--accent-light);
+        }
+
+        .example-item:hover {
+            background-color: var(--bg-tertiary);
+            text-decoration: underline;
+        }
+
+        .editor-panel {
+            background-color: var(--bg-secondary);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-header {
+            padding: 0.75rem 1rem;
+            background-color: var(--bg-tertiary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .panel-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+
+        .editor-container {
+            flex: 1;
+            position: relative;
+        }
+
+        #sql-editor {
+            width: 100%;
+            height: 100%;
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+            border: none;
+            padding: 1rem;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            resize: none;
+            outline: none;
+        }
+
+        #sql-editor::placeholder {
+            color: var(--text-secondary);
+        }
+
+        .results-panel {
+            background-color: var(--bg-secondary);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .results-container {
+            flex: 1;
+            overflow: auto;
+            padding: 1rem;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+
+        .results-table th {
+            background-color: var(--bg-tertiary);
+            padding: 0.75rem;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid var(--border);
+            position: sticky;
+            top: 0;
+        }
+
+        .results-table td {
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .results-table tr:hover td {
+            background-color: var(--bg-tertiary);
+        }
+
+        .null-value {
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        .status-bar {
+            padding: 0.5rem 1rem;
+            background-color: var(--bg-tertiary);
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .status-success {
+            color: var(--success);
+        }
+
+        .status-error {
+            color: var(--error);
+        }
+
+        .error-message {
+            background-color: rgba(239, 68, 68, 0.1);
+            border: 1px solid var(--error);
+            border-radius: 4px;
+            padding: 1rem;
+            color: var(--error);
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .schema-info {
+            font-size: 0.75rem;
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            background-color: var(--bg-primary);
+            border-radius: 4px;
+        }
+
+        .schema-info code {
+            display: block;
+            color: var(--text-secondary);
+            padding: 0.25rem 0;
+        }
+
+        .kbd {
+            background-color: var(--bg-tertiary);
+            padding: 0.125rem 0.375rem;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            font-family: monospace;
+            border: 1px solid var(--border);
+        }
+
+        footer {
+            background-color: var(--bg-tertiary);
+            padding: 0.5rem 2rem;
+            text-align: center;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        footer a {
+            color: var(--accent-light);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 768px) {
+            main {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto 1fr 1fr;
+            }
+
+            .sidebar {
+                grid-row: 1;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 1rem;
+                padding: 0.5rem;
+            }
+
+            .sidebar h2 {
+                width: 100%;
+                margin-top: 0 !important;
+            }
+
+            .table-list, .example-list {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+            </svg>
+            <h1>Blaze SQL Playground</h1>
+        </div>
+        <div class="header-actions">
+            <span style="font-size: 0.875rem; opacity: 0.8;">
+                <span class="kbd">Ctrl</span> + <span class="kbd">Enter</span> to run
+            </span>
+            <button class="btn btn-secondary" onclick="clearEditor()">Clear</button>
+            <button class="btn btn-primary" onclick="runQuery()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M8 5v14l11-7z"/>
+                </svg>
+                Run Query
+            </button>
+        </div>
+    </header>
+
+    <main>
+        <aside class="sidebar">
+            <h2>Tables</h2>
+            <ul class="table-list" id="table-list">
+                <!-- Populated by JavaScript -->
+            </ul>
+
+            <h2>Example Queries</h2>
+            <ul class="example-list" id="example-list">
+                <!-- Populated by JavaScript -->
+            </ul>
+        </aside>
+
+        <section class="editor-panel">
+            <div class="panel-header">
+                <span class="panel-title">SQL Editor</span>
+            </div>
+            <div class="editor-container">
+                <textarea id="sql-editor" placeholder="Enter your SQL query here...
+
+Example:
+SELECT name, department, salary
+FROM employees
+WHERE salary > 50000
+ORDER BY salary DESC"></textarea>
+            </div>
+        </section>
+
+        <section class="results-panel">
+            <div class="panel-header">
+                <span class="panel-title">Results</span>
+                <span id="result-count"></span>
+            </div>
+            <div class="results-container" id="results-container">
+                <div class="loading" id="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <span>Executing query...</span>
+                </div>
+                <div id="results-output">
+                    <p style="color: var(--text-secondary); text-align: center; padding: 2rem;">
+                        Run a query to see results here
+                    </p>
+                </div>
+            </div>
+            <div class="status-bar">
+                <span id="status-message">Ready</span>
+                <span id="execution-time"></span>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        Blaze SQL Query Engine |
+        <a href="https://github.com/your-org/blaze">GitHub</a> |
+        <a href="https://docs.blaze-sql.io">Documentation</a>
+    </footer>
+
+    <script type="module">
+        // Sample data for demonstration
+        const sampleTables = {
+            employees: {
+                schema: [
+                    { name: 'id', type: 'Int64' },
+                    { name: 'name', type: 'Utf8' },
+                    { name: 'department', type: 'Utf8' },
+                    { name: 'salary', type: 'Float64' },
+                    { name: 'hire_date', type: 'Date' }
+                ],
+                data: [
+                    { id: 1, name: 'Alice', department: 'Engineering', salary: 95000, hire_date: '2020-03-15' },
+                    { id: 2, name: 'Bob', department: 'Engineering', salary: 87000, hire_date: '2021-06-01' },
+                    { id: 3, name: 'Charlie', department: 'Sales', salary: 72000, hire_date: '2019-09-20' },
+                    { id: 4, name: 'Diana', department: 'Marketing', salary: 68000, hire_date: '2022-01-10' },
+                    { id: 5, name: 'Eve', department: 'Engineering', salary: 102000, hire_date: '2018-11-05' },
+                    { id: 6, name: 'Frank', department: 'Sales', salary: 78000, hire_date: '2020-07-22' },
+                    { id: 7, name: 'Grace', department: 'Marketing', salary: 71000, hire_date: '2021-03-30' },
+                    { id: 8, name: 'Henry', department: 'Engineering', salary: 91000, hire_date: '2019-12-01' }
+                ]
+            },
+            departments: {
+                schema: [
+                    { name: 'id', type: 'Int64' },
+                    { name: 'name', type: 'Utf8' },
+                    { name: 'budget', type: 'Float64' },
+                    { name: 'location', type: 'Utf8' }
+                ],
+                data: [
+                    { id: 1, name: 'Engineering', budget: 500000, location: 'Building A' },
+                    { id: 2, name: 'Sales', budget: 300000, location: 'Building B' },
+                    { id: 3, name: 'Marketing', budget: 200000, location: 'Building B' }
+                ]
+            },
+            orders: {
+                schema: [
+                    { name: 'id', type: 'Int64' },
+                    { name: 'product', type: 'Utf8' },
+                    { name: 'quantity', type: 'Int64' },
+                    { name: 'price', type: 'Float64' },
+                    { name: 'region', type: 'Utf8' }
+                ],
+                data: [
+                    { id: 1, product: 'Widget', quantity: 10, price: 29.99, region: 'North' },
+                    { id: 2, product: 'Gadget', quantity: 5, price: 49.99, region: 'South' },
+                    { id: 3, product: 'Widget', quantity: 15, price: 29.99, region: 'East' },
+                    { id: 4, product: 'Gizmo', quantity: 8, price: 39.99, region: 'West' },
+                    { id: 5, product: 'Gadget', quantity: 12, price: 49.99, region: 'North' },
+                    { id: 6, product: 'Widget', quantity: 20, price: 29.99, region: 'South' },
+                    { id: 7, product: 'Gizmo', quantity: 6, price: 39.99, region: 'East' }
+                ]
+            }
+        };
+
+        const exampleQueries = [
+            {
+                name: 'Basic SELECT',
+                query: 'SELECT * FROM employees'
+            },
+            {
+                name: 'Filter & Sort',
+                query: `SELECT name, salary
+FROM employees
+WHERE salary > 80000
+ORDER BY salary DESC`
+            },
+            {
+                name: 'Aggregation',
+                query: `SELECT
+    department,
+    COUNT(*) as employee_count,
+    AVG(salary) as avg_salary,
+    MAX(salary) as max_salary
+FROM employees
+GROUP BY department
+ORDER BY avg_salary DESC`
+            },
+            {
+                name: 'JOIN Query',
+                query: `SELECT
+    e.name,
+    e.salary,
+    d.name as department,
+    d.budget
+FROM employees e
+JOIN departments d ON e.department = d.name
+ORDER BY d.budget DESC`
+            },
+            {
+                name: 'Window Function',
+                query: `SELECT
+    name,
+    department,
+    salary,
+    RANK() OVER (
+        PARTITION BY department
+        ORDER BY salary DESC
+    ) as dept_rank
+FROM employees`
+            },
+            {
+                name: 'CTE Example',
+                query: `WITH high_earners AS (
+    SELECT * FROM employees
+    WHERE salary > 85000
+)
+SELECT
+    department,
+    COUNT(*) as high_earner_count
+FROM high_earners
+GROUP BY department`
+            },
+            {
+                name: 'CASE Expression',
+                query: `SELECT
+    name,
+    salary,
+    CASE
+        WHEN salary >= 90000 THEN 'Senior'
+        WHEN salary >= 75000 THEN 'Mid'
+        ELSE 'Junior'
+    END as level
+FROM employees
+ORDER BY salary DESC`
+            },
+            {
+                name: 'Product Analysis',
+                query: `SELECT
+    product,
+    SUM(quantity) as total_qty,
+    SUM(quantity * price) as revenue
+FROM orders
+GROUP BY product
+ORDER BY revenue DESC`
+            }
+        ];
+
+        // Initialize the playground
+        function init() {
+            renderTableList();
+            renderExampleList();
+            setupKeyboardShortcuts();
+        }
+
+        function renderTableList() {
+            const tableList = document.getElementById('table-list');
+            tableList.innerHTML = '';
+
+            for (const [tableName, tableInfo] of Object.entries(sampleTables)) {
+                const li = document.createElement('li');
+                li.className = 'table-item';
+                li.innerHTML = `
+                    <span class="table-icon">&#128202;</span>
+                    <span>${tableName}</span>
+                `;
+                li.onclick = () => showTableSchema(tableName, tableInfo);
+                tableList.appendChild(li);
+            }
+        }
+
+        function renderExampleList() {
+            const exampleList = document.getElementById('example-list');
+            exampleList.innerHTML = '';
+
+            for (const example of exampleQueries) {
+                const li = document.createElement('li');
+                li.className = 'example-item';
+                li.textContent = example.name;
+                li.onclick = () => loadExample(example.query);
+                exampleList.appendChild(li);
+            }
+        }
+
+        function showTableSchema(tableName, tableInfo) {
+            const items = document.querySelectorAll('.table-item');
+            items.forEach(item => item.classList.remove('active'));
+            event.currentTarget.classList.add('active');
+
+            const schemaHtml = tableInfo.schema.map(col =>
+                `<code>${col.name}: ${col.type}</code>`
+            ).join('');
+
+            const existingSchema = document.querySelector('.schema-info');
+            if (existingSchema) {
+                existingSchema.remove();
+            }
+
+            const schemaDiv = document.createElement('div');
+            schemaDiv.className = 'schema-info';
+            schemaDiv.innerHTML = `<strong>${tableName}</strong>${schemaHtml}`;
+
+            document.querySelector('.table-list').after(schemaDiv);
+        }
+
+        function loadExample(query) {
+            document.getElementById('sql-editor').value = query;
+        }
+
+        function setupKeyboardShortcuts() {
+            document.getElementById('sql-editor').addEventListener('keydown', (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    runQuery();
+                }
+            });
+        }
+
+        // Simple SQL parser and executor (simulated)
+        window.runQuery = async function() {
+            const sql = document.getElementById('sql-editor').value.trim();
+            if (!sql) return;
+
+            const loading = document.getElementById('loading');
+            const output = document.getElementById('results-output');
+            const statusMessage = document.getElementById('status-message');
+            const executionTime = document.getElementById('execution-time');
+            const resultCount = document.getElementById('result-count');
+
+            loading.style.display = 'flex';
+            output.innerHTML = '';
+
+            const startTime = performance.now();
+
+            try {
+                // Simulate async execution
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                const result = executeQuery(sql);
+                const endTime = performance.now();
+                const duration = (endTime - startTime).toFixed(2);
+
+                loading.style.display = 'none';
+
+                if (result.error) {
+                    output.innerHTML = `<div class="error-message">${result.error}</div>`;
+                    statusMessage.className = 'status-error';
+                    statusMessage.textContent = 'Error';
+                    resultCount.textContent = '';
+                } else {
+                    output.innerHTML = renderResults(result.rows, result.columns);
+                    statusMessage.className = 'status-success';
+                    statusMessage.textContent = 'Success';
+                    resultCount.textContent = `${result.rows.length} rows`;
+                }
+
+                executionTime.textContent = `${duration}ms`;
+            } catch (error) {
+                loading.style.display = 'none';
+                output.innerHTML = `<div class="error-message">${error.message}</div>`;
+                statusMessage.className = 'status-error';
+                statusMessage.textContent = 'Error';
+            }
+        };
+
+        window.clearEditor = function() {
+            document.getElementById('sql-editor').value = '';
+        };
+
+        function executeQuery(sql) {
+            // Very simple SQL parser for demonstration
+            const normalizedSql = sql.toLowerCase().trim();
+
+            // Extract table name from simple queries
+            const fromMatch = normalizedSql.match(/from\s+(\w+)/);
+            if (!fromMatch) {
+                // Try to handle SELECT without FROM (e.g., SELECT 1 + 1)
+                if (normalizedSql.startsWith('select') && !normalizedSql.includes('from')) {
+                    return {
+                        columns: ['result'],
+                        rows: [{ result: 'Expression result' }]
+                    };
+                }
+                return { error: 'Could not parse query. Please use a simple SELECT statement.' };
+            }
+
+            const tableName = fromMatch[1];
+            const table = sampleTables[tableName];
+
+            if (!table) {
+                const available = Object.keys(sampleTables).join(', ');
+                return { error: `Table '${tableName}' not found.\n\nAvailable tables: ${available}` };
+            }
+
+            let rows = [...table.data];
+            let columns = table.schema.map(s => s.name);
+
+            // Handle WHERE clause (very basic)
+            const whereMatch = normalizedSql.match(/where\s+(\w+)\s*(>|<|=|>=|<=|!=)\s*(\d+|'[^']*')/);
+            if (whereMatch) {
+                const [, field, op, value] = whereMatch;
+                const compareValue = value.replace(/'/g, '');
+                const numValue = parseFloat(compareValue);
+
+                rows = rows.filter(row => {
+                    const fieldValue = row[field];
+                    const v = isNaN(numValue) ? compareValue : numValue;
+                    switch (op) {
+                        case '>': return fieldValue > v;
+                        case '<': return fieldValue < v;
+                        case '>=': return fieldValue >= v;
+                        case '<=': return fieldValue <= v;
+                        case '=': return fieldValue == v;
+                        case '!=': return fieldValue != v;
+                        default: return true;
+                    }
+                });
+            }
+
+            // Handle GROUP BY (basic)
+            const groupByMatch = normalizedSql.match(/group\s+by\s+(\w+)/);
+            if (groupByMatch) {
+                const groupField = groupByMatch[1];
+                const groups = {};
+
+                for (const row of rows) {
+                    const key = row[groupField];
+                    if (!groups[key]) {
+                        groups[key] = [];
+                    }
+                    groups[key].push(row);
+                }
+
+                // Check for aggregate functions
+                const hasCount = normalizedSql.includes('count(');
+                const hasAvg = normalizedSql.match(/avg\((\w+)\)/);
+                const hasMax = normalizedSql.match(/max\((\w+)\)/);
+                const hasSum = normalizedSql.match(/sum\((\w+)\)/);
+
+                rows = Object.entries(groups).map(([key, groupRows]) => {
+                    const result = { [groupField]: key };
+
+                    if (hasCount) {
+                        result['count'] = groupRows.length;
+                    }
+                    if (hasAvg) {
+                        const field = hasAvg[1];
+                        result['avg_' + field] = (
+                            groupRows.reduce((sum, r) => sum + r[field], 0) / groupRows.length
+                        ).toFixed(2);
+                    }
+                    if (hasMax) {
+                        const field = hasMax[1];
+                        result['max_' + field] = Math.max(...groupRows.map(r => r[field]));
+                    }
+                    if (hasSum) {
+                        const field = hasSum[1];
+                        result['sum_' + field] = groupRows.reduce((sum, r) => sum + r[field], 0);
+                    }
+
+                    return result;
+                });
+
+                columns = Object.keys(rows[0] || {});
+            }
+
+            // Handle ORDER BY
+            const orderByMatch = normalizedSql.match(/order\s+by\s+(\w+)(\s+desc)?/);
+            if (orderByMatch) {
+                const [, field, desc] = orderByMatch;
+                rows.sort((a, b) => {
+                    if (a[field] < b[field]) return desc ? 1 : -1;
+                    if (a[field] > b[field]) return desc ? -1 : 1;
+                    return 0;
+                });
+            }
+
+            // Handle LIMIT
+            const limitMatch = normalizedSql.match(/limit\s+(\d+)/);
+            if (limitMatch) {
+                rows = rows.slice(0, parseInt(limitMatch[1]));
+            }
+
+            // Handle SELECT specific columns
+            const selectMatch = sql.match(/select\s+([\w\s,.*()]+?)\s+from/i);
+            if (selectMatch && selectMatch[1].trim() !== '*') {
+                const selectedCols = selectMatch[1]
+                    .split(',')
+                    .map(c => c.trim().split(/\s+as\s+/i))
+                    .map(([expr, alias]) => ({
+                        expr: expr.split('.').pop().toLowerCase(),
+                        alias: alias || expr.split('.').pop()
+                    }));
+
+                // Only filter columns if not aggregating
+                if (!groupByMatch) {
+                    const validCols = selectedCols
+                        .filter(c => !c.expr.includes('('))
+                        .map(c => c.expr);
+
+                    if (validCols.length > 0) {
+                        columns = validCols;
+                        rows = rows.map(row => {
+                            const newRow = {};
+                            for (const col of validCols) {
+                                newRow[col] = row[col];
+                            }
+                            return newRow;
+                        });
+                    }
+                }
+            }
+
+            return { columns, rows };
+        }
+
+        function renderResults(rows, columns) {
+            if (rows.length === 0) {
+                return '<p style="color: var(--text-secondary); padding: 1rem;">No results</p>';
+            }
+
+            const displayColumns = columns.length > 0 ? columns : Object.keys(rows[0]);
+
+            let html = '<table class="results-table"><thead><tr>';
+            for (const col of displayColumns) {
+                html += `<th>${col}</th>`;
+            }
+            html += '</tr></thead><tbody>';
+
+            for (const row of rows) {
+                html += '<tr>';
+                for (const col of displayColumns) {
+                    const value = row[col];
+                    if (value === null || value === undefined) {
+                        html += '<td><span class="null-value">NULL</span></td>';
+                    } else if (typeof value === 'number' && !Number.isInteger(value)) {
+                        html += `<td>${value.toFixed(2)}</td>`;
+                    } else {
+                        html += `<td>${value}</td>`;
+                    }
+                }
+                html += '</tr>';
+            }
+
+            html += '</tbody></table>';
+            return html;
+        }
+
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>
