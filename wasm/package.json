@@ -1,0 +1,48 @@
+{
+  "name": "@blaze-sql/wasm",
+  "version": "0.1.0",
+  "description": "WebAssembly bindings for Blaze SQL query engine",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "types/index.d.ts",
+  "files": [
+    "dist",
+    "types",
+    "pkg"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --out-dir pkg ../",
+    "build:ts": "tsc",
+    "build": "npm run build:wasm && npm run build:ts",
+    "test": "jest",
+    "clean": "rm -rf dist pkg"
+  },
+  "keywords": [
+    "sql",
+    "wasm",
+    "webassembly",
+    "database",
+    "query",
+    "arrow",
+    "parquet",
+    "analytics"
+  ],
+  "author": "Blaze SQL Authors",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blaze-sql/blaze.git",
+    "directory": "wasm"
+  },
+  "homepage": "https://blaze-sql.dev",
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0"
+  },
+  "peerDependencies": {
+    "apache-arrow": ">=14.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

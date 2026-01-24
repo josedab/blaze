@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blaze SQL Playground</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    h1 {
+      font-size: 2.5rem;
+      color: #89b4fa;
+      margin-bottom: 10px;
+    }
+
+    .subtitle {
+      color: #a6adc8;
+      font-size: 1.1rem;
+    }
+
+    .panel {
+      background: #313244;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+
+    .panel h2 {
+      color: #89b4fa;
+      font-size: 1.2rem;
+      margin-bottom: 15px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .editor {
+      width: 100%;
+      min-height: 150px;
+      background: #1e1e2e;
+      border: 1px solid #45475a;
+      border-radius: 8px;
+      padding: 15px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 14px;
+      color: #cdd6f4;
+      resize: vertical;
+      outline: none;
+    }
+
+    .editor:focus {
+      border-color: #89b4fa;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 10px;
+      margin-top: 15px;
+    }
+
+    button {
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #89b4fa;
+      color: #1e1e2e;
+    }
+
+    .btn-primary:hover {
+      background: #b4befe;
+    }
+
+    .btn-secondary {
+      background: #45475a;
+      color: #cdd6f4;
+    }
+
+    .btn-secondary:hover {
+      background: #585b70;
+    }
+
+    .results {
+      background: #1e1e2e;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 15px;
+      background: #45475a;
+    }
+
+    .results-info {
+      font-size: 12px;
+      color: #a6adc8;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 10px 15px;
+      text-align: left;
+      border-bottom: 1px solid #45475a;
+    }
+
+    th {
+      background: #313244;
+      color: #89b4fa;
+      font-weight: 600;
+    }
+
+    tr:hover {
+      background: #313244;
+    }
+
+    .error {
+      background: #45283c;
+      color: #f38ba8;
+      padding: 15px;
+      border-radius: 8px;
+    }
+
+    .samples {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 10px;
+    }
+
+    .sample-btn {
+      background: #45475a;
+      color: #cdd6f4;
+      text-align: left;
+      padding: 12px 15px;
+      font-size: 13px;
+    }
+
+    .sample-btn:hover {
+      background: #585b70;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 15px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    .status.loading {
+      background: #45475a;
+    }
+
+    .status.ready {
+      background: #273835;
+      color: #a6e3a1;
+    }
+
+    .status.error {
+      background: #45283c;
+      color: #f38ba8;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .dot.loading {
+      background: #f9e2af;
+      animation: pulse 1s infinite;
+    }
+
+    .dot.ready {
+      background: #a6e3a1;
+    }
+
+    .dot.error {
+      background: #f38ba8;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .tables-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .table-tag {
+      background: #45475a;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Blaze SQL Playground</h1>
+      <p class="subtitle">In-browser SQL query engine powered by WebAssembly</p>
+    </header>
+
+    <div id="status" class="status loading">
+      <div class="dot loading"></div>
+      <span>Loading Blaze WASM module...</span>
+    </div>
+
+    <div class="panel">
+      <h2>Sample Queries</h2>
+      <div class="samples">
+        <button class="sample-btn" onclick="loadSample('basic')">
+          Basic SELECT Query
+        </button>
+        <button class="sample-btn" onclick="loadSample('aggregate')">
+          Aggregations (COUNT, SUM)
+        </button>
+        <button class="sample-btn" onclick="loadSample('join')">
+          JOIN Query
+        </button>
+        <button class="sample-btn" onclick="loadSample('window')">
+          Window Functions
+        </button>
+        <button class="sample-btn" onclick="loadSample('cte')">
+          Common Table Expression
+        </button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>SQL Editor</h2>
+      <textarea id="editor" class="editor" placeholder="Enter your SQL query here...">SELECT
+  name,
+  department,
+  salary
+FROM employees
+WHERE salary > 50000
+ORDER BY salary DESC</textarea>
+      <div class="buttons">
+        <button class="btn-primary" onclick="runQuery()">Run Query (Ctrl+Enter)</button>
+        <button class="btn-secondary" onclick="clearResults()">Clear</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Registered Tables</h2>
+      <div id="tables" class="tables-list">
+        <span class="table-tag">Loading...</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Results</h2>
+      <div id="results" class="results">
+        <div class="results-header">
+          <span class="results-info" id="results-info">Run a query to see results</span>
+        </div>
+        <div id="results-table"></div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    // Import Blaze WASM module
+    // In a real setup, this would import from the npm package
+    // import { initBlaze, BlazeDB } from '@blaze-sql/wasm';
+
+    let db = null;
+
+    // Sample data
+    const sampleData = {
+      employees: [
+        { id: 1, name: 'Alice', department: 'Engineering', salary: 85000, hire_date: '2020-01-15' },
+        { id: 2, name: 'Bob', department: 'Engineering', salary: 92000, hire_date: '2019-06-01' },
+        { id: 3, name: 'Charlie', department: 'Sales', salary: 65000, hire_date: '2021-03-10' },
+        { id: 4, name: 'Diana', department: 'Marketing', salary: 70000, hire_date: '2020-08-22' },
+        { id: 5, name: 'Eve', department: 'Engineering', salary: 95000, hire_date: '2018-11-05' },
+        { id: 6, name: 'Frank', department: 'Sales', salary: 72000, hire_date: '2021-01-20' },
+        { id: 7, name: 'Grace', department: 'Engineering', salary: 88000, hire_date: '2019-09-15' },
+        { id: 8, name: 'Henry', department: 'Marketing', salary: 68000, hire_date: '2022-02-01' },
+      ],
+      departments: [
+        { id: 1, name: 'Engineering', budget: 500000 },
+        { id: 2, name: 'Sales', budget: 300000 },
+        { id: 3, name: 'Marketing', budget: 200000 },
+        { id: 4, name: 'HR', budget: 150000 },
+      ],
+      orders: [
+        { id: 1, customer_id: 1, amount: 1500, order_date: '2024-01-05' },
+        { id: 2, customer_id: 2, amount: 2300, order_date: '2024-01-08' },
+        { id: 3, customer_id: 1, amount: 800, order_date: '2024-01-12' },
+        { id: 4, customer_id: 3, amount: 3200, order_date: '2024-01-15' },
+        { id: 5, customer_id: 2, amount: 1100, order_date: '2024-01-18' },
+      ]
+    };
+
+    // Sample queries
+    const samples = {
+      basic: `SELECT
+  name,
+  department,
+  salary
+FROM employees
+WHERE salary > 50000
+ORDER BY salary DESC`,
+
+      aggregate: `SELECT
+  department,
+  COUNT(*) as employee_count,
+  AVG(salary) as avg_salary,
+  MAX(salary) as max_salary,
+  MIN(salary) as min_salary
+FROM employees
+GROUP BY department
+ORDER BY avg_salary DESC`,
+
+      join: `SELECT
+  e.name,
+  e.department,
+  d.budget,
+  e.salary
+FROM employees e
+JOIN departments d ON e.department = d.name
+ORDER BY d.budget DESC, e.salary DESC`,
+
+      window: `SELECT
+  name,
+  department,
+  salary,
+  ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) as dept_rank,
+  RANK() OVER (ORDER BY salary DESC) as company_rank
+FROM employees`,
+
+      cte: `WITH dept_stats AS (
+  SELECT
+    department,
+    AVG(salary) as avg_salary
+  FROM employees
+  GROUP BY department
+)
+SELECT
+  e.name,
+  e.department,
+  e.salary,
+  ds.avg_salary as dept_avg,
+  e.salary - ds.avg_salary as diff_from_avg
+FROM employees e
+JOIN dept_stats ds ON e.department = ds.department
+ORDER BY diff_from_avg DESC`
+    };
+
+    // Initialize the database
+    async function init() {
+      const statusEl = document.getElementById('status');
+
+      try {
+        // Simulate WASM initialization
+        // In production, this would be: await initBlaze();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Create mock database (in production, use BlazeDB)
+        db = createMockDB();
+
+        // Register sample data
+        for (const [name, data] of Object.entries(sampleData)) {
+          db.registerJson(name, data);
+        }
+
+        updateTablesList();
+
+        statusEl.className = 'status ready';
+        statusEl.innerHTML = '<div class="dot ready"></div><span>Blaze ready</span>';
+      } catch (error) {
+        statusEl.className = 'status error';
+        statusEl.innerHTML = `<div class="dot error"></div><span>Error: ${error.message}</span>`;
+      }
+    }
+
+    // Mock database for demo (replace with actual BlazeDB in production)
+    function createMockDB() {
+      const tables = {};
+
+      return {
+        registerJson(name, data) {
+          tables[name] = data;
+          return data.length;
+        },
+
+        listTables() {
+          return Object.keys(tables);
+        },
+
+        query(sql) {
+          // Simple query simulation for demo
+          // In production, the actual WASM module handles this
+          const start = Date.now();
+
+          // Parse table name from query
+          const fromMatch = sql.match(/FROM\s+(\w+)/i);
+          const tableName = fromMatch ? fromMatch[1] : null;
+
+          if (!tableName || !tables[tableName]) {
+            throw new Error(`Table not found: ${tableName}`);
+          }
+
+          let rows = [...tables[tableName]];
+
+          // Simple WHERE clause parsing
+          const whereMatch = sql.match(/WHERE\s+(\w+)\s*(>|<|=|>=|<=)\s*(\d+)/i);
+          if (whereMatch) {
+            const [, field, op, value] = whereMatch;
+            const numValue = Number(value);
+            rows = rows.filter(row => {
+              const fieldValue = row[field];
+              switch (op) {
+                case '>': return fieldValue > numValue;
+                case '<': return fieldValue < numValue;
+                case '=': return fieldValue === numValue;
+                case '>=': return fieldValue >= numValue;
+                case '<=': return fieldValue <= numValue;
+                default: return true;
+              }
+            });
+          }
+
+          // Simple ORDER BY parsing
+          const orderMatch = sql.match(/ORDER\s+BY\s+(\w+)\s*(ASC|DESC)?/i);
+          if (orderMatch) {
+            const [, field, order] = orderMatch;
+            const asc = !order || order.toUpperCase() === 'ASC';
+            rows.sort((a, b) => {
+              if (a[field] < b[field]) return asc ? -1 : 1;
+              if (a[field] > b[field]) return asc ? 1 : -1;
+              return 0;
+            });
+          }
+
+          return {
+            rows,
+            columns: Object.keys(tables[tableName][0] || {}).map(name => ({
+              name,
+              type: 'string',
+              nullable: true
+            })),
+            rowCount: rows.length,
+            executionTimeMs: Date.now() - start
+          };
+        }
+      };
+    }
+
+    function updateTablesList() {
+      const tablesEl = document.getElementById('tables');
+      const tables = db.listTables();
+
+      tablesEl.innerHTML = tables
+        .map(name => `<span class="table-tag">${name}</span>`)
+        .join('');
+    }
+
+    window.loadSample = function(name) {
+      document.getElementById('editor').value = samples[name];
+    };
+
+    window.runQuery = function() {
+      const sql = document.getElementById('editor').value;
+      const resultsInfo = document.getElementById('results-info');
+      const resultsTable = document.getElementById('results-table');
+
+      try {
+        const result = db.query(sql);
+
+        resultsInfo.textContent = `${result.rowCount} rows | ${result.executionTimeMs}ms`;
+
+        if (result.rows.length === 0) {
+          resultsTable.innerHTML = '<p style="padding: 20px; color: #a6adc8;">No results</p>';
+          return;
+        }
+
+        const columns = Object.keys(result.rows[0]);
+
+        let html = '<table><thead><tr>';
+        for (const col of columns) {
+          html += `<th>${col}</th>`;
+        }
+        html += '</tr></thead><tbody>';
+
+        for (const row of result.rows.slice(0, 100)) {
+          html += '<tr>';
+          for (const col of columns) {
+            const value = row[col];
+            html += `<td>${value !== null && value !== undefined ? value : 'null'}</td>`;
+          }
+          html += '</tr>';
+        }
+
+        html += '</tbody></table>';
+
+        if (result.rows.length > 100) {
+          html += `<p style="padding: 10px 15px; color: #a6adc8; font-size: 12px;">Showing 100 of ${result.rows.length} rows</p>`;
+        }
+
+        resultsTable.innerHTML = html;
+      } catch (error) {
+        resultsInfo.textContent = 'Error';
+        resultsTable.innerHTML = `<div class="error">${error.message}</div>`;
+      }
+    };
+
+    window.clearResults = function() {
+      document.getElementById('results-info').textContent = 'Run a query to see results';
+      document.getElementById('results-table').innerHTML = '';
+    };
+
+    // Keyboard shortcut
+    document.getElementById('editor').addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'Enter') {
+        e.preventDefault();
+        runQuery();
+      }
+    });
+
+    // Initialize on load
+    init();
+  </script>
+</body>
+</html>
