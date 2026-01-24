@@ -101,7 +101,8 @@ fn main() -> Result<()> {
               <li>Full SQL:2016 support with JOINs, CTEs, and window functions</li>
               <li>Native Apache Arrow for zero-copy data processing</li>
               <li>Read Parquet, CSV, and Delta Lake files directly</li>
-              <li>Python bindings for seamless integration</li>
+              <li>Export to Parquet, CSV, or JSON with COPY TO</li>
+              <li>Multi-platform: Rust, Python, WASM, Node.js, C FFI</li>
             </ul>
           </div>
           <div className="col col--6">
@@ -228,8 +229,8 @@ function UseCases() {
             <div className={styles.useCase}>
               <h3>ETL Pipelines</h3>
               <p>
-                Process Parquet and CSV files with SQL. Transform data
-                efficiently with vectorized execution.
+                Process Parquet and CSV files with SQL. Export results
+                with COPY TO for downstream systems.
               </p>
             </div>
           </div>
@@ -239,6 +240,35 @@ function UseCases() {
               <p>
                 Use Python bindings for fast local analytics. Works with
                 PyArrow, Pandas, and Polars.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className="row" style={{marginTop: '1rem'}}>
+          <div className="col col--4">
+            <div className={styles.useCase}>
+              <h3>Browser Analytics</h3>
+              <p>
+                Run SQL queries in the browser with WASM. Build
+                interactive data exploration tools.
+              </p>
+            </div>
+          </div>
+          <div className="col col--4">
+            <div className={styles.useCase}>
+              <h3>CLI Tools</h3>
+              <p>
+                Interactive REPL and script execution. Query files directly
+                from the command line.
+              </p>
+            </div>
+          </div>
+          <div className="col col--4">
+            <div className={styles.useCase}>
+              <h3>Embedded Systems</h3>
+              <p>
+                C FFI bindings for embedding in any language.
+                Minimal footprint, maximum performance.
               </p>
             </div>
           </div>

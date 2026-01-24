@@ -12,6 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+#### SQL Functions
+- **String Functions**: REPLACE, LEFT, RIGHT, LPAD, RPAD, REVERSE, SPLIT_PART, REGEXP_MATCH, REGEXP_REPLACE
+- **Date/Time Functions**: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DATE_ADD, DATE_SUB, DATE_DIFF, TO_DATE, TO_TIMESTAMP
+- **Utility Functions**: GREATEST, LEAST, IFNULL, NVL
+- **Window Functions**: NTILE, PERCENT_RANK, CUME_DIST, NTH_VALUE
+
+#### CLI Enhancements
+- SQL file execution: `blaze script.sql`
+- Direct query execution: `blaze -c "SELECT 1"`
+- Output formats: `--format json|csv|table|arrow`
+- Output to file: `--output results.csv`
+- Session commands: `.timer`, `.mode`, `.output`
+
+#### COPY TO Syntax
+- Export query results to Parquet: `COPY (SELECT ...) TO 'file.parquet'`
+- Export to CSV: `COPY (SELECT ...) TO 'file.csv' WITH (FORMAT CSV)`
+- Export to JSON: `COPY (SELECT ...) TO 'file.json' WITH (FORMAT JSON)`
+
+#### Language Bindings
+- **WASM Package** (`@blaze-sql/wasm`): Run Blaze in the browser
+- **Node.js Package** (`@blaze-sql/node`): Node.js wrapper with filesystem integration
+- **C FFI**: C header file and FFI bindings for embedding in other languages
+
+#### Developer Experience
+- Comprehensive benchmark suite with Criterion
+- Python Jupyter notebook example with PyArrow/Pandas/Polars integration
+- Interactive browser playground
+- Advanced query examples (window functions, CTEs, subqueries)
+- Error message suggestions using edit distance ("Did you mean...?")
+
+#### Documentation
 - Documentation website with Docusaurus
 - Comprehensive troubleshooting guide
 - Production best practices guide
@@ -183,15 +215,15 @@ No security updates in the current version.
 Features planned for future releases:
 
 ### Short Term
-- [ ] Additional window functions (NTILE, PERCENT_RANK, CUME_DIST)
-- [ ] More scalar functions (REPLACE, REGEXP_*)
+- [x] Additional window functions (NTILE, PERCENT_RANK, CUME_DIST) - **Completed**
+- [x] More scalar functions (REPLACE, REGEXP_*) - **Completed**
 - [ ] Improved Parquet filter pushdown
 
 ### Medium Term
-- [ ] Parquet write support
+- [x] Parquet write support (via COPY TO) - **Completed**
 - [ ] Persistent storage option
 - [ ] Thread-safe connection pool
-- [ ] WebAssembly support
+- [x] WebAssembly support - **Completed**
 
 ### Long Term
 - [ ] Distributed query execution

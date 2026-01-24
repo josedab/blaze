@@ -30,12 +30,23 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Guides',
       items: [
+        'guides/cli-usage',
         'guides/working-with-files',
+        'guides/data-export',
         'guides/window-functions',
         'guides/prepared-statements',
-        'guides/python-integration',
         'guides/memory-management',
         'guides/production-best-practices',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Language Bindings',
+      items: [
+        'guides/python-integration',
+        'guides/wasm-integration',
+        'guides/nodejs-integration',
+        'guides/c-ffi-integration',
       ],
     },
     {
