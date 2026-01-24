@@ -1319,6 +1319,513 @@ pub enum DownsampleAgg {
     Last,
 }
 
+/// Delta-of-delta encoder for timestamp compression.
+/// Exploits temporal correlation: timestamps in time series data
+/// are typically regularly spaced, so delta-of-delta values are
+/// mostly zero or very small.
+pub struct DeltaDeltaEncoder {
+    prev_value: i64,
+    prev_delta: i64,
+    encoded: Vec<i64>,
+}
+
+impl DeltaDeltaEncoder {
+    pub fn new() -> Self {
+        Self {
+            prev_value: 0,
+            prev_delta: 0,
+            encoded: Vec::new(),
+        }
+    }
+
+    /// Encodes a value using delta-of-delta.
+    pub fn encode(&mut self, value: i64) {
+        if self.encoded.is_empty() {
+            self.encoded.push(value);
+            self.prev_value = value;
+        } else if self.encoded.len() == 1 {
+            let delta = value - self.prev_value;
+            self.encoded.push(delta);
+            self.prev_delta = delta;
+            self.prev_value = value;
+        } else {
+            let delta = value - self.prev_value;
+            let delta_of_delta = delta - self.prev_delta;
+            self.encoded.push(delta_of_delta);
+            self.prev_delta = delta;
+            self.prev_value = value;
+        }
+    }
+
+    /// Returns the encoded values.
+    pub fn finish(self) -> Vec<i64> {
+        self.encoded
+    }
+
+    /// Decodes back to original values.
+    pub fn decode(encoded: &[i64]) -> Vec<i64> {
+        if encoded.is_empty() {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(encoded.len());
+        result.push(encoded[0]);
+        if encoded.len() == 1 {
+            return result;
+        }
+        let mut prev_delta = encoded[1];
+        result.push(encoded[0] + prev_delta);
+        for &dod in &encoded[2..] {
+            let delta = prev_delta + dod;
+            let value = *result.last().unwrap() + delta;
+            result.push(value);
+            prev_delta = delta;
+        }
+        result
+    }
+
+    /// Ratio of original vs encoded size.
+    pub fn compression_ratio(original_len: usize, encoded: &[i64]) -> f64 {
+        if encoded.is_empty() {
+            return 1.0;
+        }
+        let orig_bytes = original_len * std::mem::size_of::<i64>();
+        // Estimate encoded size: non-zero values need full i64, zeros need ~1 bit.
+        // For simplicity, count zeros as 1 byte and non-zeros as 8 bytes.
+        let encoded_bytes: usize = encoded
+            .iter()
+            .map(|&v| if v == 0 { 1 } else { std::mem::size_of::<i64>() })
+            .sum();
+        if encoded_bytes == 0 {
+            return 1.0;
+        }
+        orig_bytes as f64 / encoded_bytes as f64
+    }
+}
+
+/// Result of flushing an ingestion buffer.
+#[derive(Debug, Clone)]
+pub struct IngestionFlushResult {
+    pub timestamps: Vec<i64>,
+    pub values: Vec<f64>,
+    pub labels: Vec<String>,
+    pub count: usize,
+}
+
+/// High-throughput ingestion buffer for time-series data.
+/// Accepts out-of-order data, buffers until flush threshold, and
+/// sorts by timestamp before flushing.
+pub struct IngestionBuffer {
+    timestamps: Vec<i64>,
+    values: Vec<f64>,
+    labels: Vec<String>,
+    flush_threshold: usize,
+    total_ingested: u64,
+    total_flushed: u64,
+}
+
+impl IngestionBuffer {
+    pub fn new(flush_threshold: usize) -> Self {
+        Self {
+            timestamps: Vec::new(),
+            values: Vec::new(),
+            labels: Vec::new(),
+            flush_threshold,
+            total_ingested: 0,
+            total_flushed: 0,
+        }
+    }
+
+    /// Adds a single data point.
+    pub fn ingest(&mut self, timestamp: i64, value: f64, label: impl Into<String>) {
+        self.timestamps.push(timestamp);
+        self.values.push(value);
+        self.labels.push(label.into());
+        self.total_ingested += 1;
+    }
+
+    /// Adds multiple data points.
+    pub fn ingest_batch(&mut self, timestamps: &[i64], values: &[f64], label: impl Into<String>) {
+        let label = label.into();
+        for i in 0..timestamps.len().min(values.len()) {
+            self.timestamps.push(timestamps[i]);
+            self.values.push(values[i]);
+            self.labels.push(label.clone());
+        }
+        self.total_ingested += timestamps.len().min(values.len()) as u64;
+    }
+
+    /// Returns true if buffer size >= flush_threshold.
+    pub fn should_flush(&self) -> bool {
+        self.timestamps.len() >= self.flush_threshold
+    }
+
+    /// Sorts by timestamp and returns sorted data, resets buffer.
+    pub fn flush(&mut self) -> IngestionFlushResult {
+        let count = self.timestamps.len();
+
+        // Build index permutation sorted by timestamp
+        let mut indices: Vec<usize> = (0..count).collect();
+        indices.sort_by_key(|&i| self.timestamps[i]);
+
+        let timestamps: Vec<i64> = indices.iter().map(|&i| self.timestamps[i]).collect();
+        let values: Vec<f64> = indices.iter().map(|&i| self.values[i]).collect();
+        let labels: Vec<String> = indices.iter().map(|&i| self.labels[i].clone()).collect();
+
+        self.timestamps.clear();
+        self.values.clear();
+        self.labels.clear();
+        self.total_flushed += count as u64;
+
+        IngestionFlushResult {
+            timestamps,
+            values,
+            labels,
+            count,
+        }
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.timestamps.len()
+    }
+
+    pub fn total_ingested(&self) -> u64 {
+        self.total_ingested
+    }
+
+    pub fn total_flushed(&self) -> u64 {
+        self.total_flushed
+    }
+}
+
+/// Runtime metrics for time-series operations.
+#[derive(Debug, Clone, Default)]
+pub struct TimeSeriesMetrics {
+    pub total_points_ingested: u64,
+    pub total_points_queried: u64,
+    pub total_compactions: u64,
+    pub total_retentions_applied: u64,
+    pub avg_ingestion_rate_per_sec: f64,
+    pub avg_query_latency_ms: f64,
+    pub active_segments: usize,
+    pub total_bytes_stored: u64,
+}
+
+impl TimeSeriesMetrics {
+    pub fn record_ingestion(&mut self, points: u64, duration_ms: f64) {
+        self.total_points_ingested += points;
+        if duration_ms > 0.0 {
+            let rate = (points as f64 / duration_ms) * 1000.0;
+            // Exponential moving average for ingestion rate
+            if self.avg_ingestion_rate_per_sec == 0.0 {
+                self.avg_ingestion_rate_per_sec = rate;
+            } else {
+                self.avg_ingestion_rate_per_sec =
+                    self.avg_ingestion_rate_per_sec * 0.8 + rate * 0.2;
+            }
+        }
+    }
+
+    pub fn record_query(&mut self, points: u64, latency_ms: f64) {
+        self.total_points_queried += points;
+        if self.avg_query_latency_ms == 0.0 {
+            self.avg_query_latency_ms = latency_ms;
+        } else {
+            self.avg_query_latency_ms = self.avg_query_latency_ms * 0.8 + latency_ms * 0.2;
+        }
+    }
+
+    /// Returns bytes per point (storage efficiency).
+    pub fn storage_efficiency(&self) -> f64 {
+        if self.total_points_ingested == 0 {
+            return 0.0;
+        }
+        self.total_bytes_stored as f64 / self.total_points_ingested as f64
+    }
+}
+
+/// Interpolation methods for filling missing time-series values.
+pub struct InterpolationEngine;
+
+impl InterpolationEngine {
+    /// Linear interpolation between two known points.
+    pub fn linear(t1: i64, v1: f64, t2: i64, v2: f64, t: i64) -> f64 {
+        if t1 == t2 {
+            return v1;
+        }
+        let ratio = (t - t1) as f64 / (t2 - t1) as f64;
+        v1 + ratio * (v2 - v1)
+    }
+
+    /// Step interpolation (last observation carried forward).
+    pub fn locf(values: &[Option<f64>]) -> Vec<f64> {
+        let mut result = Vec::with_capacity(values.len());
+        let mut last = 0.0;
+        for v in values {
+            match v {
+                Some(val) => {
+                    last = *val;
+                    result.push(*val);
+                }
+                None => result.push(last),
+            }
+        }
+        result
+    }
+
+    /// Next observation carried backward.
+    pub fn nocb(values: &[Option<f64>]) -> Vec<f64> {
+        let mut result = vec![0.0; values.len()];
+        let mut next = 0.0;
+        for i in (0..values.len()).rev() {
+            match values[i] {
+                Some(val) => {
+                    next = val;
+                    result[i] = val;
+                }
+                None => result[i] = next,
+            }
+        }
+        result
+    }
+
+    /// Fill with a constant value.
+    pub fn constant(values: &[Option<f64>], fill_value: f64) -> Vec<f64> {
+        values
+            .iter()
+            .map(|v| v.unwrap_or(fill_value))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: ASOF JOIN + time_bucket + GENERATE_SERIES
+// ---------------------------------------------------------------------------
+
+/// Executor for ASOF JOIN operations.
+pub struct AsofJoinExecutor {
+    config: AsofJoinConfig,
+}
+
+impl AsofJoinExecutor {
+    pub fn new(config: AsofJoinConfig) -> Self {
+        Self { config }
+    }
+
+    /// Execute an ASOF join between two sorted timestamp arrays.
+    /// For each left timestamp, finds the closest matching right timestamp.
+    pub fn execute(
+        &self,
+        left_times: &[i64],
+        right_times: &[i64],
+    ) -> Vec<Option<usize>> {
+        left_times.iter().map(|&lt| {
+            self.find_match(lt, right_times)
+        }).collect()
+    }
+
+    fn find_match(&self, left_time: i64, right_times: &[i64]) -> Option<usize> {
+        let tolerance = self.config.tolerance.unwrap_or(i64::MAX);
+        
+        match self.config.direction {
+            AsofDirection::Backward => {
+                // Find the latest right time <= left_time
+                let pos = right_times.partition_point(|&t| t <= left_time);
+                if pos > 0 {
+                    let idx = pos - 1;
+                    if (left_time - right_times[idx]).abs() <= tolerance {
+                        return Some(idx);
+                    }
+                }
+                None
+            }
+            AsofDirection::Forward => {
+                // Find the earliest right time >= left_time
+                let pos = right_times.partition_point(|&t| t < left_time);
+                if pos < right_times.len() {
+                    if (right_times[pos] - left_time).abs() <= tolerance {
+                        return Some(pos);
+                    }
+                }
+                None
+            }
+            AsofDirection::Nearest => {
+                let pos = right_times.partition_point(|&t| t < left_time);
+                let candidates = [
+                    pos.checked_sub(1).map(|i| (i, (left_time - right_times[i]).abs())),
+                    if pos < right_times.len() { Some((pos, (right_times[pos] - left_time).abs())) } else { None },
+                ];
+                candidates.iter()
+                    .filter_map(|&c| c)
+                    .filter(|&(_, diff)| diff <= tolerance)
+                    .min_by_key(|&(_, diff)| diff)
+                    .map(|(idx, _)| idx)
+            }
+        }
+    }
+}
+
+/// Time bucket function that truncates timestamps to bucket boundaries.
+pub struct TimeBucket;
+
+impl TimeBucket {
+    /// Truncate a timestamp (microseconds since epoch) to the nearest bucket boundary.
+    pub fn bucket(timestamp_us: i64, interval_us: i64) -> i64 {
+        if interval_us <= 0 { return timestamp_us; }
+        (timestamp_us / interval_us) * interval_us
+    }
+
+    /// Bucket with an origin offset.
+    pub fn bucket_with_origin(timestamp_us: i64, interval_us: i64, origin_us: i64) -> i64 {
+        if interval_us <= 0 { return timestamp_us; }
+        let shifted = timestamp_us - origin_us;
+        (shifted / interval_us) * interval_us + origin_us
+    }
+
+    /// Common interval values in microseconds.
+    pub fn interval_us(unit: &str) -> Option<i64> {
+        match unit.to_lowercase().as_str() {
+            "second" | "1s" => Some(1_000_000),
+            "minute" | "1m" => Some(60_000_000),
+            "hour" | "1h" => Some(3_600_000_000),
+            "day" | "1d" => Some(86_400_000_000),
+            "week" | "1w" => Some(604_800_000_000),
+            _ => None,
+        }
+    }
+}
+
+/// Generate a series of timestamps.
+pub struct GenerateSeries;
+
+impl GenerateSeries {
+    /// Generate timestamps from start to stop (inclusive) with the given step.
+    pub fn generate(start_us: i64, stop_us: i64, step_us: i64) -> Vec<i64> {
+        if step_us <= 0 || start_us > stop_us {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        let mut current = start_us;
+        while current <= stop_us {
+            result.push(current);
+            current += step_us;
+        }
+        result
+    }
+
+    /// Generate timestamps for a specific number of buckets.
+    pub fn generate_n(start_us: i64, step_us: i64, count: usize) -> Vec<i64> {
+        (0..count).map(|i| start_us + (i as i64) * step_us).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Streaming Ingestion API + Out-of-Order + Retention Enforcer
+// ---------------------------------------------------------------------------
+
+/// Streaming ingestion API with out-of-order handling.
+pub struct StreamingIngestionApi {
+    buffer: Vec<TimestampedRow>,
+    sort_buffer_size: usize,
+    watermark: i64,
+    late_rows_dropped: u64,
+    rows_ingested: u64,
+}
+
+/// A row with a timestamp for ingestion.
+#[derive(Debug, Clone)]
+pub struct TimestampedRow {
+    pub timestamp_us: i64,
+    pub values: Vec<f64>,
+}
+
+impl StreamingIngestionApi {
+    pub fn new(sort_buffer_size: usize) -> Self {
+        Self {
+            buffer: Vec::with_capacity(sort_buffer_size),
+            sort_buffer_size,
+            watermark: 0,
+            late_rows_dropped: 0,
+            rows_ingested: 0,
+        }
+    }
+
+    /// Ingest a row. Returns true if accepted, false if late (dropped).
+    pub fn ingest(&mut self, row: TimestampedRow) -> bool {
+        self.rows_ingested += 1;
+        if row.timestamp_us < self.watermark {
+            self.late_rows_dropped += 1;
+            return false;
+        }
+        self.buffer.push(row);
+        
+        // Sort and flush if buffer is full
+        if self.buffer.len() >= self.sort_buffer_size {
+            self.sort_buffer();
+        }
+        true
+    }
+
+    /// Sort the buffer by timestamp.
+    fn sort_buffer(&mut self) {
+        self.buffer.sort_by_key(|r| r.timestamp_us);
+    }
+
+    /// Flush sorted rows up to the given watermark.
+    pub fn flush(&mut self, new_watermark: i64) -> Vec<TimestampedRow> {
+        self.sort_buffer();
+        self.watermark = new_watermark;
+        let (flushed, remaining): (Vec<_>, Vec<_>) = self.buffer
+            .drain(..)
+            .partition(|r| r.timestamp_us <= new_watermark);
+        self.buffer = remaining;
+        flushed
+    }
+
+    pub fn buffer_size(&self) -> usize { self.buffer.len() }
+    pub fn late_rows_dropped(&self) -> u64 { self.late_rows_dropped }
+    pub fn rows_ingested(&self) -> u64 { self.rows_ingested }
+    pub fn watermark(&self) -> i64 { self.watermark }
+}
+
+/// Enforces retention policies on time-series data.
+pub struct RetentionEnforcer {
+    policy: RetentionPolicy,
+    last_enforced: std::time::Instant,
+    rows_deleted: u64,
+}
+
+impl RetentionEnforcer {
+    pub fn new(policy: RetentionPolicy) -> Self {
+        Self {
+            policy,
+            last_enforced: std::time::Instant::now(),
+            rows_deleted: 0,
+        }
+    }
+
+    /// Determine which rows to delete based on the retention policy.
+    /// Returns the cutoff timestamp - rows before this should be deleted.
+    pub fn compute_cutoff(&self, current_time_us: i64) -> i64 {
+        let max_age_us = self.policy.max_age.num_microseconds().unwrap_or(i64::MAX);
+        current_time_us - max_age_us
+    }
+
+    /// Count rows that would be affected by enforcement.
+    pub fn count_expired_rows(&self, timestamps: &[i64], current_time_us: i64) -> usize {
+        let cutoff = self.compute_cutoff(current_time_us);
+        timestamps.iter().filter(|&&t| t < cutoff).count()
+    }
+
+    /// Record that rows were deleted during enforcement.
+    pub fn record_enforcement(&mut self, rows_deleted: u64) {
+        self.rows_deleted += rows_deleted;
+        self.last_enforced = std::time::Instant::now();
+    }
+
+    pub fn total_rows_deleted(&self) -> u64 { self.rows_deleted }
+    pub fn policy(&self) -> &RetentionPolicy { &self.policy }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1901,5 +2408,252 @@ mod tests {
             DownsampleAgg::Sum,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delta_delta_encode_decode() {
+        let values = vec![100, 205, 315, 420, 530];
+        let mut encoder = DeltaDeltaEncoder::new();
+        for &v in &values {
+            encoder.encode(v);
+        }
+        let encoded = encoder.finish();
+        let decoded = DeltaDeltaEncoder::decode(&encoded);
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn test_delta_delta_regular_timestamps() {
+        // Regularly spaced timestamps: delta-of-delta should be all zeros after first two
+        let values: Vec<i64> = (0..10).map(|i| 1000 + i * 100).collect();
+        let mut encoder = DeltaDeltaEncoder::new();
+        for &v in &values {
+            encoder.encode(v);
+        }
+        let encoded = encoder.finish();
+        // After first value and first delta, all delta-of-deltas should be 0
+        for &dod in &encoded[2..] {
+            assert_eq!(dod, 0);
+        }
+        let decoded = DeltaDeltaEncoder::decode(&encoded);
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn test_delta_delta_compression_ratio() {
+        // Regular timestamps should compress well
+        let values: Vec<i64> = (0..100).map(|i| 1_000_000 + i * 1000).collect();
+        let mut encoder = DeltaDeltaEncoder::new();
+        for &v in &values {
+            encoder.encode(v);
+        }
+        let encoded = encoder.finish();
+        let ratio = DeltaDeltaEncoder::compression_ratio(values.len(), &encoded);
+        assert!(ratio > 1.0, "Regular timestamps should compress well, got ratio {ratio}");
+    }
+
+    #[test]
+    fn test_ingestion_buffer_basic() {
+        let mut buf = IngestionBuffer::new(100);
+        buf.ingest(1000, 1.0, "cpu");
+        buf.ingest(2000, 2.0, "cpu");
+        assert_eq!(buf.pending_count(), 2);
+        assert_eq!(buf.total_ingested(), 2);
+        assert!(!buf.should_flush());
+    }
+
+    #[test]
+    fn test_ingestion_buffer_flush() {
+        let mut buf = IngestionBuffer::new(3);
+        buf.ingest(3000, 3.0, "cpu");
+        buf.ingest(1000, 1.0, "cpu");
+        buf.ingest(2000, 2.0, "cpu");
+        assert!(buf.should_flush());
+        let result = buf.flush();
+        assert_eq!(result.count, 3);
+        assert_eq!(result.timestamps, vec![1000, 2000, 3000]);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0]);
+        assert_eq!(buf.pending_count(), 0);
+        assert_eq!(buf.total_flushed(), 3);
+    }
+
+    #[test]
+    fn test_ingestion_buffer_batch() {
+        let mut buf = IngestionBuffer::new(100);
+        buf.ingest_batch(&[100, 200, 300], &[1.0, 2.0, 3.0], "mem");
+        assert_eq!(buf.pending_count(), 3);
+        assert_eq!(buf.total_ingested(), 3);
+    }
+
+    #[test]
+    fn test_ingestion_buffer_out_of_order_sorted() {
+        let mut buf = IngestionBuffer::new(100);
+        buf.ingest(500, 5.0, "a");
+        buf.ingest(100, 1.0, "b");
+        buf.ingest(300, 3.0, "c");
+        buf.ingest(200, 2.0, "d");
+        buf.ingest(400, 4.0, "e");
+        let result = buf.flush();
+        assert_eq!(result.timestamps, vec![100, 200, 300, 400, 500]);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(result.labels, vec!["b", "d", "c", "e", "a"]);
+    }
+
+    #[test]
+    fn test_timeseries_metrics_recording() {
+        let mut metrics = TimeSeriesMetrics::default();
+        metrics.record_ingestion(1000, 100.0);
+        assert_eq!(metrics.total_points_ingested, 1000);
+        assert!(metrics.avg_ingestion_rate_per_sec > 0.0);
+
+        metrics.record_query(500, 5.0);
+        assert_eq!(metrics.total_points_queried, 500);
+        assert!((metrics.avg_query_latency_ms - 5.0).abs() < f64::EPSILON);
+
+        metrics.total_bytes_stored = 8000;
+        let eff = metrics.storage_efficiency();
+        assert!((eff - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_interpolation_linear() {
+        let v = InterpolationEngine::linear(0, 0.0, 10, 100.0, 5);
+        assert!((v - 50.0).abs() < f64::EPSILON);
+        let v2 = InterpolationEngine::linear(0, 0.0, 10, 100.0, 0);
+        assert!((v2 - 0.0).abs() < f64::EPSILON);
+        let v3 = InterpolationEngine::linear(0, 0.0, 10, 100.0, 10);
+        assert!((v3 - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_interpolation_locf() {
+        let values = vec![Some(1.0), None, None, Some(4.0), None];
+        let filled = InterpolationEngine::locf(&values);
+        assert_eq!(filled, vec![1.0, 1.0, 1.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn test_interpolation_nocb() {
+        let values = vec![None, None, Some(3.0), None, Some(5.0)];
+        let filled = InterpolationEngine::nocb(&values);
+        assert_eq!(filled, vec![3.0, 3.0, 3.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn test_interpolation_constant() {
+        let values = vec![Some(1.0), None, Some(3.0), None];
+        let filled = InterpolationEngine::constant(&values, -1.0);
+        assert_eq!(filled, vec![1.0, -1.0, 3.0, -1.0]);
+    }
+
+    #[test]
+    fn test_asof_join_executor_backward() {
+        let config = AsofJoinConfig { direction: AsofDirection::Backward, tolerance: None };
+        let executor = AsofJoinExecutor::new(config);
+        let left = vec![10, 20, 30];
+        let right = vec![5, 15, 25, 35];
+        let matches = executor.execute(&left, &right);
+        assert_eq!(matches[0], Some(0)); // 10 -> 5
+        assert_eq!(matches[1], Some(1)); // 20 -> 15
+        assert_eq!(matches[2], Some(2)); // 30 -> 25
+    }
+
+    #[test]
+    fn test_asof_join_executor_forward() {
+        let config = AsofJoinConfig { direction: AsofDirection::Forward, tolerance: None };
+        let executor = AsofJoinExecutor::new(config);
+        let left = vec![10, 20, 30];
+        let right = vec![5, 15, 25, 35];
+        let matches = executor.execute(&left, &right);
+        assert_eq!(matches[0], Some(1)); // 10 -> 15
+        assert_eq!(matches[1], Some(2)); // 20 -> 25
+        assert_eq!(matches[2], Some(3)); // 30 -> 35
+    }
+
+    #[test]
+    fn test_asof_join_executor_nearest() {
+        let config = AsofJoinConfig { direction: AsofDirection::Nearest, tolerance: None };
+        let executor = AsofJoinExecutor::new(config);
+        let left = vec![12];
+        let right = vec![5, 10, 15, 20];
+        let matches = executor.execute(&left, &right);
+        assert_eq!(matches[0], Some(1)); // 12 nearest to 10
+    }
+
+    #[test]
+    fn test_asof_join_executor_tolerance() {
+        let config = AsofJoinConfig { direction: AsofDirection::Backward, tolerance: Some(3) };
+        let executor = AsofJoinExecutor::new(config);
+        let left = vec![10, 100];
+        let right = vec![8, 50];
+        let matches = executor.execute(&left, &right);
+        assert_eq!(matches[0], Some(0)); // 10-8=2 <= 3
+        assert_eq!(matches[1], None);    // 100-50=50 > 3
+    }
+
+    #[test]
+    fn test_time_bucket_truncation() {
+        let hour = 3_600_000_000i64;
+        let ts = hour + 1_800_000_000; // 1.5 hours
+        assert_eq!(TimeBucket::bucket(ts, hour), hour);
+    }
+
+    #[test]
+    fn test_time_bucket_interval_lookup() {
+        assert_eq!(TimeBucket::interval_us("second"), Some(1_000_000));
+        assert_eq!(TimeBucket::interval_us("hour"), Some(3_600_000_000));
+        assert_eq!(TimeBucket::interval_us("unknown"), None);
+    }
+
+    #[test]
+    fn test_generate_series_range() {
+        let series = GenerateSeries::generate(0, 1_000_000, 250_000);
+        assert_eq!(series.len(), 5); // 0, 250k, 500k, 750k, 1M
+        assert_eq!(series[0], 0);
+        assert_eq!(series[4], 1_000_000);
+    }
+
+    #[test]
+    fn test_generate_series_n() {
+        let series = GenerateSeries::generate_n(100, 10, 5);
+        assert_eq!(series, vec![100, 110, 120, 130, 140]);
+    }
+
+    #[test]
+    fn test_streaming_ingestion() {
+        let mut api = StreamingIngestionApi::new(10);
+        assert!(api.ingest(TimestampedRow { timestamp_us: 100, values: vec![1.0] }));
+        assert!(api.ingest(TimestampedRow { timestamp_us: 200, values: vec![2.0] }));
+        assert_eq!(api.buffer_size(), 2);
+        
+        let flushed = api.flush(150);
+        assert_eq!(flushed.len(), 1); // Only ts=100
+        assert_eq!(api.buffer_size(), 1); // ts=200 remains
+    }
+
+    #[test]
+    fn test_streaming_ingestion_late_data() {
+        let mut api = StreamingIngestionApi::new(100);
+        api.flush(100); // Set watermark to 100
+        assert!(!api.ingest(TimestampedRow { timestamp_us: 50, values: vec![1.0] }));
+        assert_eq!(api.late_rows_dropped(), 1);
+    }
+
+    #[test]
+    fn test_retention_enforcer() {
+        let policy = RetentionPolicy::delete_after(Duration::hours(1), "ts");
+        let enforcer = RetentionEnforcer::new(policy);
+        let current = 7200_000_000i64; // 2 hours in microseconds
+        let cutoff = enforcer.compute_cutoff(current);
+        assert_eq!(cutoff, 3600_000_000); // 1 hour in microseconds
+    }
+
+    #[test]
+    fn test_retention_count_expired() {
+        let policy = RetentionPolicy::delete_after(Duration::seconds(100), "ts");
+        let enforcer = RetentionEnforcer::new(policy);
+        let timestamps = vec![50_000_000, 80_000_000, 150_000_000, 200_000_000];
+        let expired = enforcer.count_expired_rows(&timestamps, 200_000_000);
+        assert_eq!(expired, 2); // 50M and 80M are before cutoff (100M)
     }
 }
