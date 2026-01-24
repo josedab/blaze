@@ -13,7 +13,7 @@ mod optimizer;
 
 pub use logical_plan::{LogicalPlan, LogicalPlanBuilder, JoinType, TimeTravelSpec};
 pub use logical_expr::{LogicalExpr, Column, AggregateExpr as LogicalAggregateExpr, WindowExpr, SortExpr as LogicalSortExpr, AggregateFunc, BinaryOp, UnaryOp};
-pub use physical_plan::{PhysicalPlan, AggregateExpr, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction, ExecutionStats};
+pub use physical_plan::{PhysicalPlan, AggregateExpr, SortExpr, WindowExpr as PhysicalWindowExpr, WindowFunction, ExecutionStats, CopyFormat};
 pub use physical_expr::{
     PhysicalExpr, ColumnExpr, LiteralExpr, BinaryExpr, BitwiseNotExpr, CastExpr,
     CaseExpr, BetweenExpr, LikeExpr, InListExpr, ScalarFunctionExpr,

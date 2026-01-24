@@ -143,6 +143,7 @@ pub mod json;
 pub mod lakehouse;
 pub mod nlq;
 pub mod optimizer;
+pub mod output;
 pub mod parallel;
 pub mod planner;
 pub mod prepared;
@@ -153,6 +154,10 @@ pub mod streaming;
 pub mod timeseries;
 pub mod types;
 pub mod wasm;
+
+// C FFI bindings (conditional on feature)
+#[cfg(feature = "c-ffi")]
+pub mod ffi;
 
 // Python bindings (conditional on feature)
 #[cfg(feature = "python")]

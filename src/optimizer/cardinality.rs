@@ -132,6 +132,11 @@ impl CardinalityEstimator {
             }
             LogicalPlan::Delete { .. } => Ok(0),
             LogicalPlan::Update { .. } => Ok(0),
+            LogicalPlan::Copy { input, .. } => {
+                // Copy returns 1 row indicating success/count
+                let _ = self.estimate_plan(input, stats_manager)?;
+                Ok(1)
+            }
         }
     }
 

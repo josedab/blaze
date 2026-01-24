@@ -225,6 +225,10 @@ impl Executor {
                     schema,
                 )
             }
+            PhysicalPlan::Copy { input, target, format, .. } => {
+                let input_batches = self.execute_plan(input)?;
+                self.execute_copy(&input_batches, target, format)
+            }
         }
     }
 
@@ -349,6 +353,14 @@ impl Executor {
                     schema,
                 )?
             }
+            PhysicalPlan::Copy { input, target, format, .. } => {
+                let (input_batches, child_stats) = self.execute_with_stats(input)?;
+                stats.children.push(child_stats);
+                stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
+                stats.add_metric("target", target);
+                stats.add_metric("format", &format!("{:?}", format));
+                self.execute_copy(&input_batches, target, format)?
+            }
         };
 
         let elapsed = start.elapsed();
@@ -381,6 +393,7 @@ impl Executor {
             PhysicalPlan::Explain { .. } => "Explain".to_string(),
             PhysicalPlan::Window { .. } => "Window".to_string(),
             PhysicalPlan::ExplainAnalyze { .. } => "ExplainAnalyze".to_string(),
+            PhysicalPlan::Copy { target, .. } => format!("Copy({})", target),
         }
     }
 
@@ -655,6 +668,53 @@ impl Executor {
         input_batches: Vec<RecordBatch>,
     ) -> Result<Vec<RecordBatch>> {
         WindowOperator::execute(window_exprs, schema, input_batches)
+    }
+
+    fn execute_copy(
+        &self,
+        batches: &[RecordBatch],
+        target: &str,
+        format: &crate::planner::CopyFormat,
+    ) -> Result<Vec<RecordBatch>> {
+        use std::fs::File;
+
+        if batches.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let schema = batches[0].schema();
+        let file = File::create(target)?;
+
+        match format {
+            crate::planner::CopyFormat::Parquet => {
+                use parquet::arrow::ArrowWriter;
+                let mut writer = ArrowWriter::try_new(file, schema.clone(), None)?;
+                for batch in batches {
+                    writer.write(batch)?;
+                }
+                writer.close()?;
+            }
+            crate::planner::CopyFormat::Csv => {
+                use arrow::csv::WriterBuilder;
+                let mut writer = WriterBuilder::new()
+                    .with_header(true)
+                    .build(file);
+                for batch in batches {
+                    writer.write(batch)?;
+                }
+            }
+            crate::planner::CopyFormat::Json => {
+                use arrow::json::LineDelimitedWriter;
+                let mut writer = LineDelimitedWriter::new(file);
+                for batch in batches {
+                    writer.write(batch)?;
+                }
+                writer.finish()?;
+            }
+        }
+
+        // Return empty result - COPY TO doesn't return data
+        Ok(vec![])
     }
 }
 
