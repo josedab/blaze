@@ -7,9 +7,9 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Array, Int64Array, Float64Array, StringArray};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use arrow::csv::{Reader as CsvReader, ReaderBuilder};
-use arrow::datatypes::{Schema as ArrowSchema, DataType};
+use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
 use crate::catalog::{ColumnStatistics, TableProvider, TableStatistics, TableType};
@@ -131,11 +131,11 @@ impl CsvTable {
         use arrow::array::BooleanArray;
         use arrow::compute::filter_record_batch;
 
-        let mut reader = self.create_reader()?;
+        let reader = self.create_reader()?;
         let mut result = Vec::new();
         let mut rows_collected = 0;
 
-        while let Some(batch_result) = reader.next() {
+        for batch_result in reader {
             let batch = batch_result?;
 
             // Apply filters first (before projection) since filters may reference
@@ -146,7 +146,8 @@ impl CsvTable {
                 let mut current_batch = batch;
                 for filter_expr in filters {
                     let filter_result = filter_expr.evaluate(&current_batch)?;
-                    if let Some(bool_array) = filter_result.as_any().downcast_ref::<BooleanArray>() {
+                    if let Some(bool_array) = filter_result.as_any().downcast_ref::<BooleanArray>()
+                    {
                         current_batch = filter_record_batch(&current_batch, bool_array)?;
                     }
                     // If filter result is not boolean, skip it (shouldn't happen with valid filters)
@@ -162,7 +163,10 @@ impl CsvTable {
             // Apply projection
             let projected = match projection {
                 Some(indices) => {
-                    let columns: Vec<_> = indices.iter().map(|&i| filtered_batch.column(i).clone()).collect();
+                    let columns: Vec<_> = indices
+                        .iter()
+                        .map(|&i| filtered_batch.column(i).clone())
+                        .collect();
                     let fields: Vec<_> = indices
                         .iter()
                         .map(|&i| filtered_batch.schema().field(i).clone())
@@ -195,7 +199,7 @@ impl CsvTable {
 
     /// Compute statistics by reading the file
     fn compute_statistics(&self) -> Result<TableStatistics> {
-        let mut reader = self.create_reader()?;
+        let reader = self.create_reader()?;
         let mut total_rows = 0usize;
         let mut total_bytes = 0usize;
         let num_columns = self.schema.len();
@@ -206,7 +210,7 @@ impl CsvTable {
         let mut max_values: Vec<Option<String>> = vec![None; num_columns];
         let mut distinct_sets: Vec<HashSet<String>> = vec![HashSet::new(); num_columns];
 
-        while let Some(batch_result) = reader.next() {
+        for batch_result in reader {
             let batch = batch_result?;
             total_rows += batch.num_rows();
             total_bytes += batch.get_array_memory_size();

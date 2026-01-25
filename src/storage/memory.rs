@@ -126,7 +126,8 @@ impl TableProvider for MemoryTable {
         for batch in batches.iter() {
             let projected = match projection {
                 Some(indices) => {
-                    let columns: Vec<_> = indices.iter().map(|&i| batch.column(i).clone()).collect();
+                    let columns: Vec<_> =
+                        indices.iter().map(|&i| batch.column(i).clone()).collect();
                     let fields: Vec<_> = indices
                         .iter()
                         .map(|&i| batch.schema().field(i).clone())
