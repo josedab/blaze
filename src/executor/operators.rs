@@ -6,9 +6,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float64Array, Float32Array, Int32Array, Int64Array,
-    Int16Array, Int8Array, UInt32Array, UInt64Array, Date32Array, Date64Array,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, RecordBatch, StringArray, new_null_array,
+    new_null_array, Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch, StringArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt32Array, UInt64Array,
 };
 use arrow::compute;
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
@@ -19,14 +20,13 @@ use crate::planner::JoinType;
 /// Helper to downcast an array with a proper error message.
 /// Use this instead of `.unwrap()` on downcasts for better error reporting.
 fn try_downcast<'a, T: 'static>(array: &'a ArrayRef, expected_type: &str) -> Result<&'a T> {
-    array
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| BlazeError::type_error(format!(
+    array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        BlazeError::type_error(format!(
             "Failed to downcast array to {}. Actual type: {:?}",
             expected_type,
             array.data_type()
-        )))
+        ))
+    })
 }
 
 /// Hash table for hash join operations.
@@ -177,19 +177,29 @@ impl JoinHashTable {
                 use arrow::datatypes::TimeUnit;
                 let value: i64 = match unit {
                     TimeUnit::Second => {
-                        let arr = try_downcast::<TimestampSecondArray>(array, "TimestampSecondArray")?;
+                        let arr =
+                            try_downcast::<TimestampSecondArray>(array, "TimestampSecondArray")?;
                         arr.value(row)
                     }
                     TimeUnit::Millisecond => {
-                        let arr = try_downcast::<TimestampMillisecondArray>(array, "TimestampMillisecondArray")?;
+                        let arr = try_downcast::<TimestampMillisecondArray>(
+                            array,
+                            "TimestampMillisecondArray",
+                        )?;
                         arr.value(row)
                     }
                     TimeUnit::Microsecond => {
-                        let arr = try_downcast::<TimestampMicrosecondArray>(array, "TimestampMicrosecondArray")?;
+                        let arr = try_downcast::<TimestampMicrosecondArray>(
+                            array,
+                            "TimestampMicrosecondArray",
+                        )?;
                         arr.value(row)
                     }
                     TimeUnit::Nanosecond => {
-                        let arr = try_downcast::<TimestampNanosecondArray>(array, "TimestampNanosecondArray")?;
+                        let arr = try_downcast::<TimestampNanosecondArray>(
+                            array,
+                            "TimestampNanosecondArray",
+                        )?;
                         arr.value(row)
                     }
                 };
@@ -356,12 +366,7 @@ impl HashJoinOperator {
     ) -> Result<Vec<RecordBatch>> {
         // Early return for empty inputs
         if left_batches.is_empty() || right_batches.is_empty() {
-            return Self::handle_empty_input(
-                left_batches,
-                right_batches,
-                join_type,
-                output_schema,
-            );
+            return Self::handle_empty_input(left_batches, right_batches, join_type, output_schema);
         }
 
         // Build phase: create hash table from right (build) side
@@ -588,7 +593,7 @@ impl HashJoinOperator {
                     hash_table,
                     col_idx,
                     right_indices,
-                    &output_schema.field(left_num_cols + col_idx).data_type(),
+                    output_schema.field(left_num_cols + col_idx).data_type(),
                 )?;
                 columns.push(taken);
             }
@@ -602,9 +607,8 @@ impl HashJoinOperator {
         use arrow::array::UInt32Array;
         use arrow::compute::take;
 
-        let indices_array = UInt32Array::from(
-            indices.iter().map(|&i| i as u32).collect::<Vec<_>>()
-        );
+        let indices_array =
+            UInt32Array::from(indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
 
         Ok(take(array.as_ref(), &indices_array, None)?)
     }
@@ -921,9 +925,7 @@ impl SortMergeJoinOperator {
     fn sort_indices(key_arrays: &[ArrayRef]) -> Result<Vec<usize>> {
         use arrow::compute::SortColumn;
 
-        let num_rows = key_arrays.first()
-            .map(|a| a.len())
-            .unwrap_or(0);
+        let num_rows = key_arrays.first().map(|a| a.len()).unwrap_or(0);
 
         if key_arrays.is_empty() || num_rows == 0 {
             return Ok(Vec::new());
@@ -1092,8 +1094,10 @@ impl SortMergeJoinOperator {
                     let mut left_end = i + 1;
                     while left_end < left_sorted.len() {
                         let cmp = Self::compare_keys(
-                            left_keys, left_keys,
-                            left_sorted[left_end], left_row
+                            left_keys,
+                            left_keys,
+                            left_sorted[left_end],
+                            left_row,
                         )?;
                         if cmp != Ordering::Equal {
                             break;
@@ -1105,8 +1109,10 @@ impl SortMergeJoinOperator {
                     let mut right_end = j + 1;
                     while right_end < right_sorted.len() {
                         let cmp = Self::compare_keys(
-                            right_keys, right_keys,
-                            right_sorted[right_end], right_row
+                            right_keys,
+                            right_keys,
+                            right_sorted[right_end],
+                            right_row,
                         )?;
                         if cmp != Ordering::Equal {
                             break;
@@ -1120,7 +1126,10 @@ impl SortMergeJoinOperator {
                         for rj in j..right_end {
                             let r_row = right_sorted[rj];
                             match join_type {
-                                JoinType::Inner | JoinType::Left | JoinType::Right | JoinType::Full => {
+                                JoinType::Inner
+                                | JoinType::Left
+                                | JoinType::Right
+                                | JoinType::Full => {
                                     output_left.push(Some(l_row));
                                     output_right.push(Some(r_row));
                                 }
@@ -1379,7 +1388,8 @@ impl CrossJoinOperator {
             return Err(BlazeError::resource_exhausted(format!(
                 "Cross join would produce {} rows, exceeding limit of {}. \
                 Consider adding a WHERE clause or using a different join strategy.",
-                total_rows, Self::MAX_CROSS_JOIN_ROWS
+                total_rows,
+                Self::MAX_CROSS_JOIN_ROWS
             )));
         }
 
@@ -1850,11 +1860,59 @@ impl Default for ApproxCountDistinctAccumulator {
 impl Accumulator for ApproxCountDistinctAccumulator {
     fn update(&mut self, values: &ArrayRef) -> Result<()> {
         match values.data_type() {
+            DataType::Int8 => {
+                let arr = try_downcast::<Int8Array>(values, "Int8Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_i64(arr.value(i) as i64);
+                    }
+                }
+            }
+            DataType::Int16 => {
+                let arr = try_downcast::<Int16Array>(values, "Int16Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_i64(arr.value(i) as i64);
+                    }
+                }
+            }
+            DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(values, "Int32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_i32(arr.value(i));
+                    }
+                }
+            }
             DataType::Int64 => {
                 let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
                 for i in 0..arr.len() {
                     if !arr.is_null(i) {
                         self.hll.add_i64(arr.value(i));
+                    }
+                }
+            }
+            DataType::UInt32 => {
+                let arr = try_downcast::<UInt32Array>(values, "UInt32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_u64(arr.value(i) as u64);
+                    }
+                }
+            }
+            DataType::UInt64 => {
+                let arr = try_downcast::<UInt64Array>(values, "UInt64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_u64(arr.value(i));
+                    }
+                }
+            }
+            DataType::Float32 => {
+                let arr = try_downcast::<Float32Array>(values, "Float32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_f64(arr.value(i) as f64);
                     }
                 }
             }
@@ -1874,8 +1932,24 @@ impl Accumulator for ApproxCountDistinctAccumulator {
                     }
                 }
             }
+            DataType::Date32 => {
+                let arr = try_downcast::<Date32Array>(values, "Date32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_i64(arr.value(i) as i64);
+                    }
+                }
+            }
+            DataType::Date64 => {
+                let arr = try_downcast::<Date64Array>(values, "Date64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.hll.add_i64(arr.value(i));
+                    }
+                }
+            }
             _ => {
-                // Hash the array as bytes for other types
+                // For any other type, hash the string representation
                 for i in 0..values.len() {
                     if !values.is_null(i) {
                         self.hll.add(&i);
@@ -1887,7 +1961,10 @@ impl Accumulator for ApproxCountDistinctAccumulator {
     }
 
     fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
-        if let Some(other) = other.as_any().downcast_ref::<ApproxCountDistinctAccumulator>() {
+        if let Some(other) = other
+            .as_any()
+            .downcast_ref::<ApproxCountDistinctAccumulator>()
+        {
             self.hll.merge(&other.hll);
         }
         Ok(())
@@ -1935,8 +2012,56 @@ impl Default for ApproxPercentileAccumulator {
 impl Accumulator for ApproxPercentileAccumulator {
     fn update(&mut self, values: &ArrayRef) -> Result<()> {
         match values.data_type() {
+            DataType::Int8 => {
+                let arr = try_downcast::<Int8Array>(values, "Int8Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.tdigest.add(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Int16 => {
+                let arr = try_downcast::<Int16Array>(values, "Int16Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.tdigest.add(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(values, "Int32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.tdigest.add(arr.value(i) as f64);
+                    }
+                }
+            }
             DataType::Int64 => {
                 let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.tdigest.add(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::UInt32 => {
+                let arr = try_downcast::<UInt32Array>(values, "UInt32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.tdigest.add(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::UInt64 => {
+                let arr = try_downcast::<UInt64Array>(values, "UInt64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.tdigest.add(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Float32 => {
+                let arr = try_downcast::<Float32Array>(values, "Float32Array")?;
                 for i in 0..arr.len() {
                     if !arr.is_null(i) {
                         self.tdigest.add(arr.value(i) as f64);
@@ -1951,7 +2076,12 @@ impl Accumulator for ApproxPercentileAccumulator {
                     }
                 }
             }
-            _ => {} // Ignore non-numeric types
+            _ => {
+                return Err(BlazeError::execution(format!(
+                    "APPROX_PERCENTILE does not support type {:?}",
+                    values.data_type()
+                )));
+            }
         }
         Ok(())
     }
@@ -1991,8 +2121,6 @@ impl HashAggregateOperator {
         output_schema: &Arc<ArrowSchema>,
         input_batches: Vec<RecordBatch>,
     ) -> Result<Vec<RecordBatch>> {
-        
-
         // Handle case with no grouping (global aggregates)
         if group_by.is_empty() {
             return Self::execute_global_aggregate(aggr_exprs, output_schema, input_batches);
@@ -2029,10 +2157,8 @@ impl HashAggregateOperator {
 
                 let entry = groups.entry(hash).or_insert_with(|| {
                     // Extract group key values for this row
-                    let key_values: Vec<ArrayRef> = group_arrays
-                        .iter()
-                        .map(|arr| arr.slice(row, 1))
-                        .collect();
+                    let key_values: Vec<ArrayRef> =
+                        group_arrays.iter().map(|arr| arr.slice(row, 1)).collect();
 
                     // Create accumulators for this group
                     let accumulators: Vec<Box<dyn Accumulator>> = aggr_exprs
@@ -2072,8 +2198,6 @@ impl HashAggregateOperator {
         output_schema: &Arc<ArrowSchema>,
         input_batches: Vec<RecordBatch>,
     ) -> Result<Vec<RecordBatch>> {
-        
-
         // Create single set of accumulators
         let mut accumulators: Vec<Box<dyn Accumulator>> = aggr_exprs
             .iter()
@@ -2193,7 +2317,8 @@ impl SortOperator {
         }
 
         // Evaluate sort expressions and build sort columns
-        let mut sort_columns: Vec<arrow::compute::SortColumn> = Vec::with_capacity(sort_exprs.len());
+        let mut sort_columns: Vec<arrow::compute::SortColumn> =
+            Vec::with_capacity(sort_exprs.len());
 
         for expr in sort_exprs {
             let values = expr.expr.evaluate(&combined)?;
@@ -2213,9 +2338,7 @@ impl SortOperator {
         let sorted_columns: Result<Vec<ArrayRef>> = combined
             .columns()
             .iter()
-            .map(|col| {
-                Ok(take(col.as_ref(), &indices, None)?)
-            })
+            .map(|col| Ok(take(col.as_ref(), &indices, None)?))
             .collect();
 
         Ok(vec![RecordBatch::try_new(schema, sorted_columns?)?])
@@ -2351,8 +2474,6 @@ impl WindowOperator {
         schema: &Arc<ArrowSchema>,
         input_batches: Vec<RecordBatch>,
     ) -> Result<Vec<RecordBatch>> {
-        
-
         if input_batches.is_empty() {
             return Ok(vec![RecordBatch::new_empty(schema.clone())]);
         }
@@ -2426,35 +2547,73 @@ impl WindowOperator {
             WindowFunction::RowNumber => {
                 Self::compute_row_number(&partitions, sorted_indices.as_ref(), num_rows)
             }
-            WindowFunction::Rank => {
-                Self::compute_rank(&partitions, order_by, batch, sorted_indices.as_ref(), num_rows)
-            }
-            WindowFunction::DenseRank => {
-                Self::compute_dense_rank(&partitions, order_by, batch, sorted_indices.as_ref(), num_rows)
-            }
+            WindowFunction::Rank => Self::compute_rank(
+                &partitions,
+                order_by,
+                batch,
+                sorted_indices.as_ref(),
+                num_rows,
+            ),
+            WindowFunction::DenseRank => Self::compute_dense_rank(
+                &partitions,
+                order_by,
+                batch,
+                sorted_indices.as_ref(),
+                num_rows,
+            ),
             WindowFunction::Ntile => {
                 Self::compute_ntile(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
             }
-            WindowFunction::PercentRank => {
-                Self::compute_percent_rank(&partitions, order_by, batch, sorted_indices.as_ref(), num_rows)
-            }
-            WindowFunction::CumeDist => {
-                Self::compute_cume_dist(&partitions, order_by, batch, sorted_indices.as_ref(), num_rows)
-            }
+            WindowFunction::PercentRank => Self::compute_percent_rank(
+                &partitions,
+                order_by,
+                batch,
+                sorted_indices.as_ref(),
+                num_rows,
+            ),
+            WindowFunction::CumeDist => Self::compute_cume_dist(
+                &partitions,
+                order_by,
+                batch,
+                sorted_indices.as_ref(),
+                num_rows,
+            ),
             WindowFunction::Lead => {
                 let offset = Self::get_offset_arg(args, batch, 1)?;
-                Self::compute_lead_lag(args, batch, &partitions, sorted_indices.as_ref(), offset, num_rows)
+                Self::compute_lead_lag(
+                    args,
+                    batch,
+                    &partitions,
+                    sorted_indices.as_ref(),
+                    offset,
+                    num_rows,
+                )
             }
             WindowFunction::Lag => {
                 let offset = Self::get_offset_arg(args, batch, 1)?;
-                Self::compute_lead_lag(args, batch, &partitions, sorted_indices.as_ref(), -(offset as i64), num_rows)
+                Self::compute_lead_lag(
+                    args,
+                    batch,
+                    &partitions,
+                    sorted_indices.as_ref(),
+                    -offset,
+                    num_rows,
+                )
             }
-            WindowFunction::FirstValue => {
-                Self::compute_first_value(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
-            }
-            WindowFunction::LastValue => {
-                Self::compute_last_value(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
-            }
+            WindowFunction::FirstValue => Self::compute_first_value(
+                args,
+                batch,
+                &partitions,
+                sorted_indices.as_ref(),
+                num_rows,
+            ),
+            WindowFunction::LastValue => Self::compute_last_value(
+                args,
+                batch,
+                &partitions,
+                sorted_indices.as_ref(),
+                num_rows,
+            ),
             WindowFunction::NthValue => {
                 Self::compute_nth_value(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
             }
@@ -2638,21 +2797,26 @@ impl WindowOperator {
                         }
                     }
                     TimeUnit::Millisecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                        if let Some(arr) =
+                            array.as_any().downcast_ref::<TimestampMillisecondArray>()
+                        {
                             arr.value(a) == arr.value(b)
                         } else {
                             false
                         }
                     }
                     TimeUnit::Microsecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                        if let Some(arr) =
+                            array.as_any().downcast_ref::<TimestampMicrosecondArray>()
+                        {
                             arr.value(a) == arr.value(b)
                         } else {
                             false
                         }
                     }
                     TimeUnit::Nanosecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>()
+                        {
                             arr.value(a) == arr.value(b)
                         } else {
                             false
@@ -2674,8 +2838,8 @@ impl WindowOperator {
 
     /// Hash a single row from multiple arrays.
     fn hash_row(arrays: &[ArrayRef], row: usize) -> u64 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
 
         let mut hasher = DefaultHasher::new();
         for array in arrays {
@@ -2761,17 +2925,22 @@ impl WindowOperator {
                         }
                     }
                     TimeUnit::Millisecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                        if let Some(arr) =
+                            array.as_any().downcast_ref::<TimestampMillisecondArray>()
+                        {
                             arr.value(row).hash(hasher);
                         }
                     }
                     TimeUnit::Microsecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                        if let Some(arr) =
+                            array.as_any().downcast_ref::<TimestampMicrosecondArray>()
+                        {
                             arr.value(row).hash(hasher);
                         }
                     }
                     TimeUnit::Nanosecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>()
+                        {
                             arr.value(row).hash(hasher);
                         }
                     }
@@ -2779,7 +2948,10 @@ impl WindowOperator {
             }
             // For unsupported types, use string representation
             _ => {
-                let value_str = format!("{:?}", arrow::util::display::array_value_to_string(array, row));
+                let value_str = format!(
+                    "{:?}",
+                    arrow::util::display::array_value_to_string(array, row)
+                );
                 value_str.hash(hasher);
             }
         }
@@ -2806,7 +2978,11 @@ impl WindowOperator {
                 indices.sort_by(|&a, &b| {
                     for (i, sort_expr) in order_by.iter().enumerate() {
                         let cmp = Self::compare_values(&sort_keys[i], a, b);
-                        let cmp = if sort_expr.ascending { cmp } else { cmp.reverse() };
+                        let cmp = if sort_expr.ascending {
+                            cmp
+                        } else {
+                            cmp.reverse()
+                        };
                         if cmp != std::cmp::Ordering::Equal {
                             return cmp;
                         }
@@ -2887,14 +3063,18 @@ impl WindowOperator {
             }
             DataType::Float32 => {
                 if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-                    arr.value(a).partial_cmp(&arr.value(b)).unwrap_or(Ordering::Equal)
+                    arr.value(a)
+                        .partial_cmp(&arr.value(b))
+                        .unwrap_or(Ordering::Equal)
                 } else {
                     Ordering::Equal
                 }
             }
             DataType::Float64 => {
                 if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-                    arr.value(a).partial_cmp(&arr.value(b)).unwrap_or(Ordering::Equal)
+                    arr.value(a)
+                        .partial_cmp(&arr.value(b))
+                        .unwrap_or(Ordering::Equal)
                 } else {
                     Ordering::Equal
                 }
@@ -2931,21 +3111,26 @@ impl WindowOperator {
                         }
                     }
                     TimeUnit::Millisecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                        if let Some(arr) =
+                            array.as_any().downcast_ref::<TimestampMillisecondArray>()
+                        {
                             arr.value(a).cmp(&arr.value(b))
                         } else {
                             Ordering::Equal
                         }
                     }
                     TimeUnit::Microsecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                        if let Some(arr) =
+                            array.as_any().downcast_ref::<TimestampMicrosecondArray>()
+                        {
                             arr.value(a).cmp(&arr.value(b))
                         } else {
                             Ordering::Equal
                         }
                     }
                     TimeUnit::Nanosecond => {
-                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                        if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>()
+                        {
                             arr.value(a).cmp(&arr.value(b))
                         } else {
                             Ordering::Equal
@@ -3118,7 +3303,9 @@ impl WindowOperator {
         num_rows: usize,
     ) -> Result<ArrayRef> {
         if args.is_empty() {
-            return Err(BlazeError::analysis("LAG/LEAD requires at least one argument"));
+            return Err(BlazeError::analysis(
+                "LAG/LEAD requires at least one argument",
+            ));
         }
 
         let value_array = args[0].evaluate(batch)?;
@@ -3177,7 +3364,9 @@ impl WindowOperator {
 
             let first_idx = indices[0];
             let first_value = if !value_array.is_null(first_idx) {
-                value_array.as_any().downcast_ref::<Int64Array>()
+                value_array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .map(|arr| Some(arr.value(first_idx)))
                     .unwrap_or(None)
             } else {
@@ -3219,7 +3408,9 @@ impl WindowOperator {
 
             let last_idx = indices[indices.len() - 1];
             let last_value = if !value_array.is_null(last_idx) {
-                value_array.as_any().downcast_ref::<Int64Array>()
+                value_array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .map(|arr| Some(arr.value(last_idx)))
                     .unwrap_or(None)
             } else {
@@ -3246,7 +3437,7 @@ impl WindowOperator {
         let n_buckets = if !args.is_empty() {
             let n_array = args[0].evaluate(batch)?;
             if let Some(int_arr) = n_array.as_any().downcast_ref::<Int64Array>() {
-                if int_arr.len() > 0 && !int_arr.is_null(0) {
+                if !int_arr.is_empty() && !int_arr.is_null(0) {
                     int_arr.value(0).max(1) as usize
                 } else {
                     1
@@ -3393,7 +3584,8 @@ impl WindowOperator {
                 let mut j = i + 1;
                 while j < indices.len() {
                     let same = sort_keys.iter().all(|key| {
-                        Self::compare_values(key, indices[i], indices[j]) == std::cmp::Ordering::Equal
+                        Self::compare_values(key, indices[i], indices[j])
+                            == std::cmp::Ordering::Equal
                     });
                     if !same {
                         break;
@@ -3431,7 +3623,7 @@ impl WindowOperator {
         // Get the n value (1-indexed position)
         let n_array = args[1].evaluate(batch)?;
         let n = if let Some(int_arr) = n_array.as_any().downcast_ref::<Int64Array>() {
-            if int_arr.len() > 0 && !int_arr.is_null(0) {
+            if !int_arr.is_empty() && !int_arr.is_null(0) {
                 int_arr.value(0) as usize
             } else {
                 1
@@ -3460,7 +3652,9 @@ impl WindowOperator {
             // Get the nth value (1-indexed, so n-1 for 0-indexed)
             let nth_idx = indices[n - 1];
             let nth_value = if !value_array.is_null(nth_idx) {
-                value_array.as_any().downcast_ref::<Int64Array>()
+                value_array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .map(|arr| Some(arr.value(nth_idx)))
                     .unwrap_or(None)
             } else {
@@ -3495,18 +3689,20 @@ impl WindowOperator {
         let mut result = vec![0.0f64; num_rows];
 
         for partition_rows in partitions {
-
             let agg_value = match agg_func {
                 AggregateFunc::Count => partition_rows.len() as f64,
                 AggregateFunc::Sum => {
                     if let Some(arr) = &value_array {
                         if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            partition_rows.iter()
+                            partition_rows
+                                .iter()
                                 .filter(|&&i| !int_arr.is_null(i))
                                 .map(|&i| int_arr.value(i) as f64)
                                 .sum()
-                        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float64Array>() {
-                            partition_rows.iter()
+                        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float64Array>()
+                        {
+                            partition_rows
+                                .iter()
                                 .filter(|&&i| !float_arr.is_null(i))
                                 .map(|&i| float_arr.value(i))
                                 .sum()
@@ -3520,7 +3716,8 @@ impl WindowOperator {
                 AggregateFunc::Avg => {
                     if let Some(arr) = &value_array {
                         if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            let values: Vec<f64> = partition_rows.iter()
+                            let values: Vec<f64> = partition_rows
+                                .iter()
                                 .filter(|&&i| !int_arr.is_null(i))
                                 .map(|&i| int_arr.value(i) as f64)
                                 .collect();
@@ -3529,8 +3726,10 @@ impl WindowOperator {
                             } else {
                                 values.iter().sum::<f64>() / values.len() as f64
                             }
-                        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float64Array>() {
-                            let values: Vec<f64> = partition_rows.iter()
+                        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float64Array>()
+                        {
+                            let values: Vec<f64> = partition_rows
+                                .iter()
                                 .filter(|&&i| !float_arr.is_null(i))
                                 .map(|&i| float_arr.value(i))
                                 .collect();
@@ -3549,10 +3748,13 @@ impl WindowOperator {
                 AggregateFunc::Min => {
                     if let Some(arr) = &value_array {
                         if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            partition_rows.iter()
+                            partition_rows
+                                .iter()
                                 .filter(|&&i| !int_arr.is_null(i))
                                 .map(|&i| int_arr.value(i) as f64)
-                                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                                .min_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                })
                                 .unwrap_or(0.0)
                         } else {
                             0.0
@@ -3564,10 +3766,13 @@ impl WindowOperator {
                 AggregateFunc::Max => {
                     if let Some(arr) = &value_array {
                         if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            partition_rows.iter()
+                            partition_rows
+                                .iter()
                                 .filter(|&&i| !int_arr.is_null(i))
                                 .map(|&i| int_arr.value(i) as f64)
-                                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                                .max_by(|a, b| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                })
                                 .unwrap_or(0.0)
                         } else {
                             0.0
@@ -3591,8 +3796,8 @@ impl WindowOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::{Field, Schema};
     use crate::planner::ColumnExpr;
+    use arrow::datatypes::{Field, Schema};
 
     fn create_test_batch(
         schema: Arc<ArrowSchema>,
@@ -3615,10 +3820,7 @@ mod tests {
     #[test]
     fn test_hash_join_inner() {
         // Left table: users (id, name)
-        let left_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
         let left_batch = create_test_batch(
             left_schema.clone(),
             vec![1, 2, 3],
@@ -3645,8 +3847,7 @@ mod tests {
         ]);
 
         // Key expressions
-        let left_key: Arc<dyn crate::planner::PhysicalExpr> =
-            Arc::new(ColumnExpr::new("id", 0));
+        let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
         let right_key: Arc<dyn crate::planner::PhysicalExpr> =
             Arc::new(ColumnExpr::new("user_id", 0));
 
@@ -3667,10 +3868,7 @@ mod tests {
 
     #[test]
     fn test_hash_join_left_outer() {
-        let left_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
         let left_batch = create_test_batch(
             left_schema.clone(),
             vec![1, 2, 3],
@@ -3681,11 +3879,8 @@ mod tests {
             ("user_id", DataType::Int64),
             ("product", DataType::Utf8),
         ]);
-        let right_batch = create_test_batch(
-            right_schema.clone(),
-            vec![1, 2],
-            vec!["Widget", "Gadget"],
-        );
+        let right_batch =
+            create_test_batch(right_schema.clone(), vec![1, 2], vec!["Widget", "Gadget"]);
 
         let output_schema = make_schema(vec![
             ("id", DataType::Int64),
@@ -3694,8 +3889,7 @@ mod tests {
             ("product", DataType::Utf8),
         ]);
 
-        let left_key: Arc<dyn crate::planner::PhysicalExpr> =
-            Arc::new(ColumnExpr::new("id", 0));
+        let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
         let right_key: Arc<dyn crate::planner::PhysicalExpr> =
             Arc::new(ColumnExpr::new("user_id", 0));
 
@@ -3722,15 +3916,8 @@ mod tests {
 
     #[test]
     fn test_hash_join_right_outer() {
-        let left_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
-        let left_batch = create_test_batch(
-            left_schema.clone(),
-            vec![1, 2],
-            vec!["Alice", "Bob"],
-        );
+        let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
+        let left_batch = create_test_batch(left_schema.clone(), vec![1, 2], vec!["Alice", "Bob"]);
 
         let right_schema = make_schema(vec![
             ("user_id", DataType::Int64),
@@ -3749,8 +3936,7 @@ mod tests {
             ("product", DataType::Utf8),
         ]);
 
-        let left_key: Arc<dyn crate::planner::PhysicalExpr> =
-            Arc::new(ColumnExpr::new("id", 0));
+        let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
         let right_key: Arc<dyn crate::planner::PhysicalExpr> =
             Arc::new(ColumnExpr::new("user_id", 0));
 
@@ -3771,10 +3957,7 @@ mod tests {
 
     #[test]
     fn test_hash_join_left_semi() {
-        let left_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
         let left_batch = create_test_batch(
             left_schema.clone(),
             vec![1, 2, 3],
@@ -3792,13 +3975,9 @@ mod tests {
         );
 
         // Semi join only returns left columns
-        let output_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let output_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
 
-        let left_key: Arc<dyn crate::planner::PhysicalExpr> =
-            Arc::new(ColumnExpr::new("id", 0));
+        let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
         let right_key: Arc<dyn crate::planner::PhysicalExpr> =
             Arc::new(ColumnExpr::new("user_id", 0));
 
@@ -3822,10 +4001,7 @@ mod tests {
 
     #[test]
     fn test_hash_join_left_anti() {
-        let left_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
         let left_batch = create_test_batch(
             left_schema.clone(),
             vec![1, 2, 3],
@@ -3843,13 +4019,9 @@ mod tests {
         );
 
         // Anti join only returns left columns
-        let output_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let output_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
 
-        let left_key: Arc<dyn crate::planner::PhysicalExpr> =
-            Arc::new(ColumnExpr::new("id", 0));
+        let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
         let right_key: Arc<dyn crate::planner::PhysicalExpr> =
             Arc::new(ColumnExpr::new("user_id", 0));
 
@@ -3876,35 +4048,25 @@ mod tests {
 
     #[test]
     fn test_cross_join() {
-        let left_schema = make_schema(vec![
-            ("a", DataType::Int64),
-        ]);
+        let left_schema = make_schema(vec![("a", DataType::Int64)]);
         let left_batch = RecordBatch::try_new(
             left_schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef],
         )
         .unwrap();
 
-        let right_schema = make_schema(vec![
-            ("b", DataType::Int64),
-        ]);
+        let right_schema = make_schema(vec![("b", DataType::Int64)]);
         let right_batch = RecordBatch::try_new(
             right_schema.clone(),
             vec![Arc::new(Int64Array::from(vec![10, 20, 30])) as ArrayRef],
         )
         .unwrap();
 
-        let output_schema = make_schema(vec![
-            ("a", DataType::Int64),
-            ("b", DataType::Int64),
-        ]);
+        let output_schema = make_schema(vec![("a", DataType::Int64), ("b", DataType::Int64)]);
 
-        let result = CrossJoinOperator::execute(
-            vec![left_batch],
-            vec![right_batch],
-            &output_schema,
-        )
-        .unwrap();
+        let result =
+            CrossJoinOperator::execute(vec![left_batch], vec![right_batch], &output_schema)
+                .unwrap();
 
         // 2 x 3 = 6 rows
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
@@ -3912,8 +4074,16 @@ mod tests {
 
         // Verify the pattern: (1,10), (1,20), (1,30), (2,10), (2,20), (2,30)
         let batch = &result[0];
-        let a_col = batch.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-        let b_col = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let a_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let b_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
 
         assert_eq!(a_col.value(0), 1);
         assert_eq!(b_col.value(0), 10);
@@ -3927,28 +4097,20 @@ mod tests {
 
     #[test]
     fn test_hash_join_empty_inputs() {
-        let left_schema = make_schema(vec![
-            ("id", DataType::Int64),
-        ]);
-        let right_schema = make_schema(vec![
-            ("id", DataType::Int64),
-        ]);
-        let output_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("id", DataType::Int64),
-        ]);
+        let left_schema = make_schema(vec![("id", DataType::Int64)]);
+        let _right_schema = make_schema(vec![("id", DataType::Int64)]);
+        let output_schema = make_schema(vec![("id", DataType::Int64), ("id", DataType::Int64)]);
 
-        let left_key: Arc<dyn crate::planner::PhysicalExpr> =
-            Arc::new(ColumnExpr::new("id", 0));
-        let right_key: Arc<dyn crate::planner::PhysicalExpr> =
-            Arc::new(ColumnExpr::new("id", 0));
+        let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
+        let right_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
 
         // Inner join with empty right = empty
         let result = HashJoinOperator::execute(
             vec![RecordBatch::try_new(
                 left_schema.clone(),
                 vec![Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef],
-            ).unwrap()],
+            )
+            .unwrap()],
             vec![],
             JoinType::Inner,
             &[left_key.clone()],
@@ -3963,7 +4125,8 @@ mod tests {
             vec![RecordBatch::try_new(
                 left_schema.clone(),
                 vec![Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef],
-            ).unwrap()],
+            )
+            .unwrap()],
             vec![],
             JoinType::Left,
             &[left_key],
