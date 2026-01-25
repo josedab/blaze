@@ -4,15 +4,17 @@ use std::sync::Arc;
 
 use crate::catalog::{CatalogList, ResolvedTableRef, TableRef};
 use crate::error::{BlazeError, Result};
-use crate::sql::{self, Statement};
 use crate::sql::parser::Expr;
+use crate::sql::{self, Statement};
 use crate::types::{DataType, Field, ScalarValue, Schema};
 
 use super::logical_expr::{
-    AggregateExpr, AggregateFunc, BinaryOp, Column, LogicalExpr, SortExpr, UnaryOp,
-    WindowExpr, WindowFrame, WindowFrameBound, WindowFrameUnits,
+    AggregateExpr, AggregateFunc, BinaryOp, Column, LogicalExpr, SortExpr, UnaryOp, WindowExpr,
+    WindowFrame, WindowFrameBound, WindowFrameUnits,
 };
-use super::logical_plan::{JoinType, LogicalPlan, LogicalPlanBuilder, SetOperation, TimeTravelSpec};
+use super::logical_plan::{
+    JoinType, LogicalPlan, LogicalPlanBuilder, SetOperation, TimeTravelSpec,
+};
 
 /// Maximum allowed depth for nested queries/expressions to prevent stack overflow.
 const MAX_PLAN_DEPTH: usize = 128;
@@ -45,7 +47,11 @@ impl BindContext {
     }
 
     pub fn get_cte(&self, name: &str) -> Option<&LogicalPlan> {
-        self.ctes.iter().rev().find(|(n, _)| n == name).map(|(_, p)| p)
+        self.ctes
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, p)| p)
     }
 
     /// Increment depth and return error if exceeded.
@@ -121,6 +127,15 @@ impl Binder {
         self.bind_expr(expr, ctx)
     }
 
+    /// Bind a parsed Query to a LogicalPlan (public API for CTAS).
+    pub fn bind_query_public(
+        &self,
+        query: sql::parser::Query,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
+        self.bind_query(query, ctx)
+    }
+
     fn bind_statement(&self, stmt: Statement, ctx: &mut BindContext) -> Result<LogicalPlan> {
         match stmt {
             Statement::Query(query) => self.bind_query(*query, ctx),
@@ -152,7 +167,7 @@ impl Binder {
         }
     }
 
-    fn bind_copy(&self, copy: sql::parser::Copy, ctx: &mut BindContext) -> Result<LogicalPlan> {
+    fn bind_copy(&self, copy: sql::parser::Copy, _ctx: &mut BindContext) -> Result<LogicalPlan> {
         use super::logical_plan::{CopyFormat, CopyOptions};
 
         // Only COPY TO is supported for now
@@ -163,8 +178,12 @@ impl Binder {
         // Determine the target path
         let target = match copy.target {
             sql::parser::CopyTarget::File(filename) => filename,
-            sql::parser::CopyTarget::Stdout => return Err(BlazeError::not_implemented("COPY TO STDOUT not supported")),
-            sql::parser::CopyTarget::Stdin => return Err(BlazeError::analysis("COPY TO STDIN is invalid")),
+            sql::parser::CopyTarget::Stdout => {
+                return Err(BlazeError::not_implemented("COPY TO STDOUT not supported"))
+            }
+            sql::parser::CopyTarget::Stdin => {
+                return Err(BlazeError::analysis("COPY TO STDIN is invalid"))
+            }
         };
 
         // Build a scan from the table
@@ -182,7 +201,8 @@ impl Binder {
             }
         } else {
             // Project specific columns
-            let projection: Vec<usize> = copy.columns
+            let projection: Vec<usize> = copy
+                .columns
                 .iter()
                 .filter_map(|c| schema.index_of(c.as_str()))
                 .collect();
@@ -217,7 +237,8 @@ impl Binder {
         for (key, value) in &copy.options {
             match key.to_lowercase().as_str() {
                 "header" => options.header = value.to_lowercase() == "true",
-                "delimiter" => options.delimiter = value.chars().next(),
+                "delimiter" => options.delimiter = value.bytes().next(),
+                "compression" => options.compression = Some(value.clone()),
                 _ => {} // Ignore unknown options
             }
         }
@@ -239,7 +260,11 @@ impl Binder {
         result
     }
 
-    fn bind_query_inner(&self, query: sql::parser::Query, ctx: &mut BindContext) -> Result<LogicalPlan> {
+    fn bind_query_inner(
+        &self,
+        query: sql::parser::Query,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
         // Handle CTEs
         if let Some(with) = query.with {
             for cte in with.ctes {
@@ -282,7 +307,11 @@ impl Binder {
         Ok(plan)
     }
 
-    fn bind_set_expr(&self, set_expr: sql::parser::SetExpr, ctx: &mut BindContext) -> Result<LogicalPlan> {
+    fn bind_set_expr(
+        &self,
+        set_expr: sql::parser::SetExpr,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
         match set_expr {
             sql::parser::SetExpr::Select(select) => self.bind_select(*select, ctx),
             sql::parser::SetExpr::Union { left, right, all } => {
@@ -345,7 +374,11 @@ impl Binder {
         }
     }
 
-    fn bind_select(&self, select: sql::parser::Select, ctx: &mut BindContext) -> Result<LogicalPlan> {
+    fn bind_select(
+        &self,
+        select: sql::parser::Select,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
         // 1. Bind FROM clause
         let mut plan = self.bind_from(&select.from, ctx)?;
 
@@ -411,7 +444,9 @@ impl Binder {
                 // aggregate expressions with column references to the aggregate output
                 let new_projection = self.rewrite_aggregate_refs(&projection, &aggr_exprs_clone);
                 if !new_projection.is_empty() {
-                    plan = LogicalPlanBuilder::from(plan).project(new_projection)?.build();
+                    plan = LogicalPlanBuilder::from(plan)
+                        .project(new_projection)?
+                        .build();
                 }
             }
         } else if has_window {
@@ -441,9 +476,12 @@ impl Binder {
 
                 // Apply final projection to select only the requested columns
                 // Replace window expressions with column references
-                let final_projection = self.rewrite_window_refs(&projection, &window_exprs, &input_schema);
+                let final_projection =
+                    self.rewrite_window_refs(&projection, &window_exprs, &input_schema);
                 if !final_projection.is_empty() {
-                    plan = LogicalPlanBuilder::from(plan).project(final_projection)?.build();
+                    plan = LogicalPlanBuilder::from(plan)
+                        .project(final_projection)?
+                        .build();
                 }
             }
         } else {
@@ -504,8 +542,14 @@ impl Binder {
                 expr: Box::new(self.replace_window_with_column(expr, window_exprs, input_schema)),
                 alias: alias.clone(),
             },
-            LogicalExpr::Case { expr, when_then_exprs, else_expr } => LogicalExpr::Case {
-                expr: expr.as_ref().map(|e| Box::new(self.replace_window_with_column(e, window_exprs, input_schema))),
+            LogicalExpr::Case {
+                expr,
+                when_then_exprs,
+                else_expr,
+            } => LogicalExpr::Case {
+                expr: expr.as_ref().map(|e| {
+                    Box::new(self.replace_window_with_column(e, window_exprs, input_schema))
+                }),
                 when_then_exprs: when_then_exprs
                     .iter()
                     .map(|(when, then)| {
@@ -515,7 +559,9 @@ impl Binder {
                         )
                     })
                     .collect(),
-                else_expr: else_expr.as_ref().map(|e| Box::new(self.replace_window_with_column(e, window_exprs, input_schema))),
+                else_expr: else_expr.as_ref().map(|e| {
+                    Box::new(self.replace_window_with_column(e, window_exprs, input_schema))
+                }),
             },
             _ => expr.clone(),
         }
@@ -587,7 +633,11 @@ impl Binder {
         ctx: &mut BindContext,
     ) -> Result<LogicalPlan> {
         match factor {
-            sql::parser::TableFactor::Table { name, alias, time_travel } => {
+            sql::parser::TableFactor::Table {
+                name,
+                alias,
+                time_travel,
+            } => {
                 // First check if this is a CTE reference
                 let table_name = name.last().map(|s| s.as_str()).unwrap_or("");
                 if let Some(cte_plan) = ctx.get_cte(table_name) {
@@ -704,8 +754,8 @@ impl Binder {
 
     /// Evaluate a timestamp expression to get a concrete DateTime value.
     fn eval_timestamp_expr(&self, expr: &LogicalExpr) -> Result<chrono::DateTime<chrono::Utc>> {
-        use chrono::{DateTime, NaiveDateTime, Utc};
         use crate::types::TimeUnit;
+        use chrono::{DateTime, NaiveDateTime, Utc};
 
         match expr {
             LogicalExpr::Literal(ScalarValue::Utf8(Some(s))) => {
@@ -725,7 +775,11 @@ impl Binder {
                     s
                 )))
             }
-            LogicalExpr::Literal(ScalarValue::Timestamp { value: Some(ts), unit, .. }) => {
+            LogicalExpr::Literal(ScalarValue::Timestamp {
+                value: Some(ts),
+                unit,
+                ..
+            }) => {
                 // Convert timestamp value based on unit
                 let micros = match unit {
                     TimeUnit::Second => ts * 1_000_000,
@@ -762,9 +816,11 @@ impl Binder {
                 }
             }
             sql::parser::SelectItem::Wildcard => Ok(LogicalExpr::Wildcard),
-            sql::parser::SelectItem::QualifiedWildcard(qualifier) => Ok(LogicalExpr::QualifiedWildcard {
-                qualifier: qualifier.join("."),
-            }),
+            sql::parser::SelectItem::QualifiedWildcard(qualifier) => {
+                Ok(LogicalExpr::QualifiedWildcard {
+                    qualifier: qualifier.join("."),
+                })
+            }
         }
     }
 
@@ -784,7 +840,9 @@ impl Binder {
                 let bound_expr = self.bind_expr(*expr, ctx)?;
                 match op {
                     sql::parser::UnaryOperator::Not => Ok(LogicalExpr::Not(Box::new(bound_expr))),
-                    sql::parser::UnaryOperator::Minus => Ok(LogicalExpr::Negative(Box::new(bound_expr))),
+                    sql::parser::UnaryOperator::Minus => {
+                        Ok(LogicalExpr::Negative(Box::new(bound_expr)))
+                    }
                     sql::parser::UnaryOperator::Plus => Ok(bound_expr),
                     sql::parser::UnaryOperator::BitwiseNot => Ok(LogicalExpr::UnaryExpr {
                         op: UnaryOp::BitwiseNot,
@@ -1027,7 +1085,9 @@ impl Binder {
                 if i >= 0 {
                     Ok(i as u64)
                 } else {
-                    Err(BlazeError::analysis("Window frame bound must be non-negative"))
+                    Err(BlazeError::analysis(
+                        "Window frame bound must be non-negative",
+                    ))
                 }
             }
             _ => Err(BlazeError::analysis(
@@ -1043,11 +1103,17 @@ impl Binder {
             sql::parser::Literal::Integer(i) => Ok(ScalarValue::Int64(Some(i))),
             sql::parser::Literal::Float(f) => Ok(ScalarValue::Float64(Some(f))),
             sql::parser::Literal::String(s) => Ok(ScalarValue::Utf8(Some(s))),
-            sql::parser::Literal::Interval { .. } => Err(BlazeError::not_implemented("Interval literals")),
+            sql::parser::Literal::Interval { .. } => {
+                Err(BlazeError::not_implemented("Interval literals"))
+            }
         }
     }
 
-    fn bind_function(&self, func: sql::parser::FunctionCall, ctx: &mut BindContext) -> Result<LogicalExpr> {
+    fn bind_function(
+        &self,
+        func: sql::parser::FunctionCall,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalExpr> {
         let name = func.name.last().cloned().unwrap_or_default();
         let args: Vec<LogicalExpr> = func
             .args
@@ -1058,7 +1124,11 @@ impl Binder {
         Ok(LogicalExpr::ScalarFunction { name, args })
     }
 
-    fn bind_order_by(&self, order_by: sql::parser::OrderByExpr, ctx: &mut BindContext) -> Result<SortExpr> {
+    fn bind_order_by(
+        &self,
+        order_by: sql::parser::OrderByExpr,
+        ctx: &mut BindContext,
+    ) -> Result<SortExpr> {
         let expr = self.bind_expr(order_by.expr, ctx)?;
         Ok(SortExpr::new(
             expr,
@@ -1097,7 +1167,11 @@ impl Binder {
         })
     }
 
-    fn bind_insert(&self, insert: sql::parser::Insert, ctx: &mut BindContext) -> Result<LogicalPlan> {
+    fn bind_insert(
+        &self,
+        insert: sql::parser::Insert,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
         let table_ref = TableRef::from_parts(&insert.table_name)?;
         let resolved = table_ref.resolve(&self.default_catalog, &self.default_schema);
 
@@ -1135,7 +1209,11 @@ impl Binder {
         })
     }
 
-    fn bind_update(&self, update: sql::parser::Update, ctx: &mut BindContext) -> Result<LogicalPlan> {
+    fn bind_update(
+        &self,
+        update: sql::parser::Update,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
         let table_ref = TableRef::from_parts(&update.table_name)?;
         let resolved = table_ref.resolve(&self.default_catalog, &self.default_schema);
 
@@ -1145,7 +1223,10 @@ impl Binder {
             .map(|(col, expr)| Ok((col, self.bind_expr(expr, ctx)?)))
             .collect::<Result<Vec<_>>>()?;
 
-        let predicate = update.selection.map(|e| self.bind_expr(e, ctx)).transpose()?;
+        let predicate = update
+            .selection
+            .map(|e| self.bind_expr(e, ctx))
+            .transpose()?;
 
         Ok(LogicalPlan::Update {
             table_ref: resolved,
@@ -1155,11 +1236,18 @@ impl Binder {
         })
     }
 
-    fn bind_delete(&self, delete: sql::parser::Delete, ctx: &mut BindContext) -> Result<LogicalPlan> {
+    fn bind_delete(
+        &self,
+        delete: sql::parser::Delete,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
         let table_ref = TableRef::from_parts(&delete.table_name)?;
         let resolved = table_ref.resolve(&self.default_catalog, &self.default_schema);
 
-        let predicate = delete.selection.map(|e| self.bind_expr(e, ctx)).transpose()?;
+        let predicate = delete
+            .selection
+            .map(|e| self.bind_expr(e, ctx))
+            .transpose()?;
 
         Ok(LogicalPlan::Delete {
             table_ref: resolved,
@@ -1191,10 +1279,18 @@ impl Binder {
                 if let Some(table) = schema.table(&table_ref.table) {
                     return Ok(table.schema().clone());
                 }
+                // Table not found — provide suggestions from available tables
+                let available = schema.table_names();
+                return Err(BlazeError::catalog_with_suggestions(
+                    &table_ref.table,
+                    &available,
+                ));
             }
         }
-        // Return empty schema for now if table not found
-        Ok(Schema::empty())
+        Err(BlazeError::catalog(format!(
+            "Table '{}' not found (schema '{}' in catalog '{}')",
+            table_ref.table, table_ref.schema, table_ref.catalog
+        )))
     }
 
     fn convert_join_type(&self, join_type: sql::parser::JoinType) -> JoinType {
@@ -1233,7 +1329,10 @@ impl Binder {
         }
     }
 
-    fn convert_aggregate_func(&self, func: &sql::parser::AggregateFunction) -> Result<AggregateFunc> {
+    fn convert_aggregate_func(
+        &self,
+        func: &sql::parser::AggregateFunction,
+    ) -> Result<AggregateFunc> {
         match func {
             sql::parser::AggregateFunction::Count => Ok(AggregateFunc::Count),
             sql::parser::AggregateFunction::Sum => Ok(AggregateFunc::Sum),
@@ -1244,7 +1343,9 @@ impl Binder {
             sql::parser::AggregateFunction::Last => Ok(AggregateFunc::Last),
             sql::parser::AggregateFunction::ArrayAgg => Ok(AggregateFunc::ArrayAgg),
             sql::parser::AggregateFunction::StringAgg => Ok(AggregateFunc::StringAgg),
-            sql::parser::AggregateFunction::ApproxCountDistinct => Ok(AggregateFunc::ApproxCountDistinct),
+            sql::parser::AggregateFunction::ApproxCountDistinct => {
+                Ok(AggregateFunc::ApproxCountDistinct)
+            }
             sql::parser::AggregateFunction::ApproxPercentile => Ok(AggregateFunc::ApproxPercentile),
             sql::parser::AggregateFunction::ApproxMedian => Ok(AggregateFunc::ApproxMedian),
             _ => Err(BlazeError::not_implemented(format!(
@@ -1292,7 +1393,11 @@ impl Binder {
                 self.has_aggregate(left) || self.has_aggregate(right)
             }
             sql::parser::Expr::Function(func) => {
-                let name = func.name.last().map(|s| s.to_uppercase()).unwrap_or_default();
+                let name = func
+                    .name
+                    .last()
+                    .map(|s| s.to_uppercase())
+                    .unwrap_or_default();
                 matches!(
                     name.as_str(),
                     "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "FIRST" | "LAST"
@@ -1310,11 +1415,22 @@ impl Binder {
             }
             sql::parser::Expr::UnaryOp { expr, .. } => self.has_window(expr),
             sql::parser::Expr::Nested(inner) => self.has_window(inner),
-            sql::parser::Expr::Case { operand, conditions, results, else_result } => {
-                operand.as_ref().map(|e| self.has_window(e)).unwrap_or(false)
+            sql::parser::Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                operand
+                    .as_ref()
+                    .map(|e| self.has_window(e))
+                    .unwrap_or(false)
                     || conditions.iter().any(|e| self.has_window(e))
                     || results.iter().any(|e| self.has_window(e))
-                    || else_result.as_ref().map(|e| self.has_window(e)).unwrap_or(false)
+                    || else_result
+                        .as_ref()
+                        .map(|e| self.has_window(e))
+                        .unwrap_or(false)
             }
             _ => false,
         }
@@ -1356,7 +1472,10 @@ impl Binder {
     fn collect_windows(&self, expr: &LogicalExpr, windows: &mut Vec<LogicalExpr>) {
         match expr {
             LogicalExpr::Window(_) => {
-                if !windows.iter().any(|w| format!("{:?}", w) == format!("{:?}", expr)) {
+                if !windows
+                    .iter()
+                    .any(|w| format!("{:?}", w) == format!("{:?}", expr))
+                {
                     windows.push(expr.clone());
                 }
             }
@@ -1370,7 +1489,11 @@ impl Binder {
             LogicalExpr::Alias { expr, .. } => {
                 self.collect_windows(expr, windows);
             }
-            LogicalExpr::Case { expr, when_then_exprs, else_expr } => {
+            LogicalExpr::Case {
+                expr,
+                when_then_exprs,
+                else_expr,
+            } => {
                 if let Some(e) = expr {
                     self.collect_windows(e, windows);
                 }
@@ -1398,15 +1521,13 @@ impl Binder {
     /// Check if an expression is a group by column reference.
     fn is_group_by_column(&self, expr: &LogicalExpr, group_by: &[LogicalExpr]) -> bool {
         match expr {
-            LogicalExpr::Column(col) => {
-                group_by.iter().any(|gb| {
-                    if let LogicalExpr::Column(gb_col) = gb {
-                        gb_col.name == col.name
-                    } else {
-                        false
-                    }
-                })
-            }
+            LogicalExpr::Column(col) => group_by.iter().any(|gb| {
+                if let LogicalExpr::Column(gb_col) = gb {
+                    gb_col.name == col.name
+                } else {
+                    false
+                }
+            }),
             LogicalExpr::Alias { expr, .. } => self.is_group_by_column(expr, group_by),
             _ => false,
         }
@@ -1438,7 +1559,7 @@ impl Binder {
             },
             LogicalExpr::BinaryExpr { left, op, right } => LogicalExpr::BinaryExpr {
                 left: Box::new(self.rewrite_expr_aggregate_refs(left)),
-                op: op.clone(),
+                op: *op,
                 right: Box::new(self.rewrite_expr_aggregate_refs(right)),
             },
             LogicalExpr::Cast { expr, data_type } => LogicalExpr::Cast {
@@ -1515,6 +1636,20 @@ mod tests {
         Binder::new(catalog_list)
     }
 
+    fn create_binder_with_table(table_name: &str, fields: Vec<(&str, crate::types::DataType)>) -> Binder {
+        use crate::types::{Field, Schema};
+        use crate::storage::MemoryTable;
+
+        let schema = Schema::new(
+            fields.into_iter().map(|(name, dt)| Field::new(name, dt, true)).collect()
+        );
+        let table = MemoryTable::new(schema, vec![]);
+        let catalog_list = Arc::new(CatalogList::default());
+        let catalog = catalog_list.catalog("default").unwrap();
+        catalog.register_table(table_name, Arc::new(table)).unwrap();
+        Binder::new(catalog_list)
+    }
+
     #[test]
     fn test_bind_simple_select() {
         let binder = create_binder();
@@ -1526,7 +1661,10 @@ mod tests {
 
     #[test]
     fn test_bind_select_from_table() {
-        let binder = create_binder();
+        let binder = create_binder_with_table("users", vec![
+            ("id", crate::types::DataType::Int64),
+            ("name", crate::types::DataType::Utf8),
+        ]);
         let stmt = sql::parser::Parser::parse_one("SELECT * FROM users").unwrap();
         let plan = binder.bind(stmt).unwrap();
 
@@ -1536,7 +1674,10 @@ mod tests {
 
     #[test]
     fn test_bind_select_with_filter() {
-        let binder = create_binder();
+        let binder = create_binder_with_table("users", vec![
+            ("id", crate::types::DataType::Int64),
+            ("name", crate::types::DataType::Utf8),
+        ]);
         let stmt = sql::parser::Parser::parse_one("SELECT * FROM users WHERE id > 10").unwrap();
         let plan = binder.bind(stmt).unwrap();
 
@@ -1545,11 +1686,22 @@ mod tests {
 
     #[test]
     fn test_bind_aggregate() {
-        let binder = create_binder();
+        let binder = create_binder_with_table("orders", vec![
+            ("id", crate::types::DataType::Int64),
+            ("amount", crate::types::DataType::Float64),
+        ]);
         let stmt = sql::parser::Parser::parse_one("SELECT COUNT(*) FROM orders").unwrap();
         let plan = binder.bind(stmt).unwrap();
 
         let display = format!("{}", plan);
         assert!(display.contains("Aggregate") || display.contains("Projection"));
+    }
+
+    #[test]
+    fn test_bind_table_not_found_error() {
+        let binder = create_binder();
+        let stmt = sql::parser::Parser::parse_one("SELECT * FROM nonexistent").unwrap();
+        let err = binder.bind(stmt).unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 }

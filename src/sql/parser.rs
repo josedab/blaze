@@ -36,6 +36,18 @@ pub enum Statement {
     ShowTables,
     /// COPY statement for data import/export
     Copy(Copy),
+    /// BEGIN TRANSACTION
+    BeginTransaction,
+    /// COMMIT
+    Commit,
+    /// ROLLBACK
+    Rollback,
+    /// SAVEPOINT name
+    Savepoint(String),
+    /// RELEASE SAVEPOINT name
+    ReleaseSavepoint(String),
+    /// ROLLBACK TO SAVEPOINT name
+    RollbackToSavepoint(String),
 }
 
 /// A SELECT query.
@@ -615,7 +627,9 @@ impl Parser {
                                 names.0.first().map(|i| i.to_string()).unwrap_or_default()
                             }
                             sql_ast::AssignmentTarget::Tuple(_) => {
-                                return Err(BlazeError::not_implemented("Tuple assignment targets"));
+                                return Err(BlazeError::not_implemented(
+                                    "Tuple assignment targets",
+                                ));
                             }
                         };
                         Ok((target_name, Self::convert_expr(a.value)?))
@@ -632,25 +646,36 @@ impl Parser {
             sql_ast::Statement::Delete(delete) => {
                 // In newer sqlparser, from is a FromTable enum
                 let table_name = match &delete.from {
-                    sql_ast::FromTable::WithFromKeyword(tables) => {
-                        tables.first().map(|f| match &f.relation {
-                            sql_ast::TableFactor::Table { name, .. } => Self::convert_object_name(name),
+                    sql_ast::FromTable::WithFromKeyword(tables) => tables
+                        .first()
+                        .map(|f| match &f.relation {
+                            sql_ast::TableFactor::Table { name, .. } => {
+                                Self::convert_object_name(name)
+                            }
                             _ => vec![],
-                        }).unwrap_or_default()
-                    }
-                    sql_ast::FromTable::WithoutKeyword(tables) => {
-                        tables.first().map(|f| match &f.relation {
-                            sql_ast::TableFactor::Table { name, .. } => Self::convert_object_name(name),
+                        })
+                        .unwrap_or_default(),
+                    sql_ast::FromTable::WithoutKeyword(tables) => tables
+                        .first()
+                        .map(|f| match &f.relation {
+                            sql_ast::TableFactor::Table { name, .. } => {
+                                Self::convert_object_name(name)
+                            }
                             _ => vec![],
-                        }).unwrap_or_default()
-                    }
+                        })
+                        .unwrap_or_default(),
                 };
                 Ok(Statement::Delete(Delete {
                     table_name,
                     selection: delete.selection.map(Self::convert_expr).transpose()?,
                 }))
             }
-            sql_ast::Statement::Explain { statement, analyze, verbose, .. } => {
+            sql_ast::Statement::Explain {
+                statement,
+                analyze,
+                verbose,
+                ..
+            } => {
                 let inner_stmt = Self::convert_statement(*statement)?;
                 if analyze {
                     Ok(Statement::ExplainAnalyze {
@@ -662,22 +687,87 @@ impl Parser {
                 }
             }
             sql_ast::Statement::ShowTables { .. } => Ok(Statement::ShowTables),
+            sql_ast::Statement::Copy {
+                source,
+                to,
+                target,
+                options,
+                ..
+            } => {
+                let (table_name, columns) = match source {
+                    sql_ast::CopySource::Table {
+                        table_name,
+                        columns,
+                    } => {
+                        let name = table_name.0.iter().map(|i| i.to_string()).collect();
+                        let cols = columns.iter().map(|i| i.to_string()).collect();
+                        (name, cols)
+                    }
+                    _ => return Err(BlazeError::not_implemented("COPY from query")),
+                };
+                let direction = if to {
+                    CopyDirection::To
+                } else {
+                    CopyDirection::From
+                };
+                let copy_target = match target {
+                    sql_ast::CopyTarget::File { filename } => CopyTarget::File(filename),
+                    sql_ast::CopyTarget::Stdin => CopyTarget::Stdin,
+                    sql_ast::CopyTarget::Stdout => CopyTarget::Stdout,
+                    _ => return Err(BlazeError::not_implemented("COPY target type")),
+                };
+                let opts: Vec<(String, String)> = options
+                    .iter()
+                    .filter_map(|opt| match opt {
+                        sql_ast::CopyOption::Format(f) => {
+                            Some(("format".to_string(), f.to_string()))
+                        }
+                        sql_ast::CopyOption::Delimiter(d) => {
+                            Some(("delimiter".to_string(), d.to_string()))
+                        }
+                        sql_ast::CopyOption::Header(h) => {
+                            Some(("header".to_string(), h.to_string()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Statement::Copy(Copy {
+                    table_name,
+                    columns,
+                    target: copy_target,
+                    direction,
+                    format: None,
+                    options: opts,
+                }))
+            }
             sql_ast::Statement::SetVariable {
                 variables, value, ..
             } => {
                 let name = variables
                     .first()
                     .map(|v| match v {
-                        sql_ast::ObjectName(parts) => {
-                            parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".")
-                        }
+                        sql_ast::ObjectName(parts) => parts
+                            .iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join("."),
                     })
                     .unwrap_or_default();
-                let val = value
-                    .first()
-                    .map(|e| format!("{}", e))
-                    .unwrap_or_default();
+                let val = value.first().map(|e| format!("{}", e)).unwrap_or_default();
                 Ok(Statement::SetVariable { name, value: val })
+            }
+            sql_ast::Statement::StartTransaction { .. } => Ok(Statement::BeginTransaction),
+            sql_ast::Statement::Commit { .. } => Ok(Statement::Commit),
+            sql_ast::Statement::Rollback { savepoint, .. } => {
+                if let Some(sp) = savepoint {
+                    Ok(Statement::RollbackToSavepoint(sp.to_string()))
+                } else {
+                    Ok(Statement::Rollback)
+                }
+            }
+            sql_ast::Statement::Savepoint { name } => Ok(Statement::Savepoint(name.to_string())),
+            sql_ast::Statement::ReleaseSavepoint { name } => {
+                Ok(Statement::ReleaseSavepoint(name.to_string()))
             }
             _ => Err(BlazeError::not_implemented(format!(
                 "Statement type: {:?}",
@@ -749,9 +839,7 @@ impl Parser {
                 let all = matches!(set_quantifier, sql_ast::SetQuantifier::All);
                 match op {
                     sql_ast::SetOperator::Union => Ok(SetExpr::Union { left, right, all }),
-                    sql_ast::SetOperator::Intersect => {
-                        Ok(SetExpr::Intersect { left, right, all })
-                    }
+                    sql_ast::SetOperator::Intersect => Ok(SetExpr::Intersect { left, right, all }),
                     sql_ast::SetOperator::Except => Ok(SetExpr::Except { left, right, all }),
                 }
             }
@@ -817,9 +905,9 @@ impl Parser {
                 alias: Some(alias.to_string()),
             }),
             sql_ast::SelectItem::Wildcard(_) => Ok(SelectItem::Wildcard),
-            sql_ast::SelectItem::QualifiedWildcard(name, _) => {
-                Ok(SelectItem::QualifiedWildcard(Self::convert_object_name(&name)))
-            }
+            sql_ast::SelectItem::QualifiedWildcard(name, _) => Ok(SelectItem::QualifiedWildcard(
+                Self::convert_object_name(&name),
+            )),
         }
     }
 
@@ -836,9 +924,14 @@ impl Parser {
 
     fn convert_table_factor(factor: sql_ast::TableFactor) -> Result<TableFactor> {
         match factor {
-            sql_ast::TableFactor::Table { name, alias, version, .. } => {
+            sql_ast::TableFactor::Table {
+                name,
+                alias,
+                version,
+                ..
+            } => {
                 // Convert time travel specification
-                let time_travel = version.map(|v| Self::convert_table_version(v)).transpose()?;
+                let time_travel = version.map(Self::convert_table_version).transpose()?;
                 Ok(TableFactor::Table {
                     name: Self::convert_object_name(&name),
                     alias: alias.map(Self::convert_table_alias),
@@ -854,7 +947,9 @@ impl Parser {
             sql_ast::TableFactor::TableFunction { expr: _, alias: _ } => {
                 // TableFunction in newer sqlparser has an expr field, not name/args
                 // For now, we'll extract what we can from the expression
-                Err(BlazeError::not_implemented("Table functions are not yet supported"))
+                Err(BlazeError::not_implemented(
+                    "Table functions are not yet supported",
+                ))
             }
             sql_ast::TableFactor::NestedJoin {
                 table_with_joins, ..
@@ -977,7 +1072,10 @@ impl Parser {
                 results,
                 else_result,
             } => Ok(Expr::Case {
-                operand: operand.map(|e| Self::convert_expr(*e)).transpose()?.map(Box::new),
+                operand: operand
+                    .map(|e| Self::convert_expr(*e))
+                    .transpose()?
+                    .map(Box::new),
                 conditions: conditions
                     .into_iter()
                     .map(Self::convert_expr)
@@ -991,7 +1089,9 @@ impl Parser {
                     .transpose()?
                     .map(Box::new),
             }),
-            sql_ast::Expr::Cast { expr, data_type, .. } => Ok(Expr::Cast {
+            sql_ast::Expr::Cast {
+                expr, data_type, ..
+            } => Ok(Expr::Cast {
                 expr: Box::new(Self::convert_expr(*expr)?),
                 data_type: format!("{}", data_type),
             }),
@@ -1003,7 +1103,11 @@ impl Parser {
                 expr: Box::new(Self::convert_expr(*expr)?),
                 negated: true,
             }),
-            sql_ast::Expr::InList { expr, list, negated } => Ok(Expr::InList {
+            sql_ast::Expr::InList {
+                expr,
+                list,
+                negated,
+            } => Ok(Expr::InList {
                 expr: Box::new(Self::convert_expr(*expr)?),
                 list: list
                     .into_iter()
@@ -1065,7 +1169,10 @@ impl Parser {
                     .collect::<Result<Vec<_>>>()?,
             )),
             sql_ast::Expr::Wildcard(_) => Ok(Expr::Wildcard),
-            _ => Err(BlazeError::not_implemented(format!("Expression: {:?}", expr))),
+            _ => Err(BlazeError::not_implemented(format!(
+                "Expression: {:?}",
+                expr
+            ))),
         }
     }
 
@@ -1086,9 +1193,9 @@ impl Parser {
             }
             sql_ast::Value::SingleQuotedString(s)
             | sql_ast::Value::DoubleQuotedString(s)
-            | sql_ast::Value::DollarQuotedString(sql_ast::DollarQuotedString { value: s, .. }) => {
-                Ok(Literal::String(s))
-            }
+            | sql_ast::Value::DollarQuotedString(sql_ast::DollarQuotedString {
+                value: s, ..
+            }) => Ok(Literal::String(s)),
             _ => Err(BlazeError::not_implemented(format!("Value: {:?}", value))),
         }
     }
@@ -1173,7 +1280,10 @@ impl Parser {
 
         let distinct = match &func.args {
             sql_ast::FunctionArguments::List(arg_list) => {
-                matches!(arg_list.duplicate_treatment, Some(sql_ast::DuplicateTreatment::Distinct))
+                matches!(
+                    arg_list.duplicate_treatment,
+                    Some(sql_ast::DuplicateTreatment::Distinct)
+                )
             }
             _ => false,
         };
@@ -1212,7 +1322,10 @@ impl Parser {
                         .into_iter()
                         .map(Self::convert_order_by)
                         .collect::<Result<Vec<_>>>()?,
-                    frame: spec.window_frame.map(Self::convert_window_frame).transpose()?,
+                    frame: spec
+                        .window_frame
+                        .map(Self::convert_window_frame)
+                        .transpose()?,
                 }),
                 sql_ast::WindowType::NamedWindow(_) => Ok(base_expr), // Named window references are resolved later
             };
@@ -1249,7 +1362,10 @@ impl Parser {
                     .into_iter()
                     .map(Self::convert_order_by)
                     .collect::<Result<Vec<_>>>()?,
-                frame: ws.window_frame.map(Self::convert_window_frame).transpose()?,
+                frame: ws
+                    .window_frame
+                    .map(Self::convert_window_frame)
+                    .transpose()?,
             }),
             sql_ast::NamedWindowExpr::NamedWindow(_) => Err(BlazeError::not_implemented(
                 "Named window references in window definitions",

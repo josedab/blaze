@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::types::Schema;
 
-use super::logical_expr::{BinaryOp, LogicalExpr, Column};
+use super::logical_expr::{BinaryOp, Column, LogicalExpr};
 use super::logical_plan::LogicalPlan;
 
 /// A rule that transforms a logical plan.
@@ -123,7 +123,11 @@ impl PredicatePushdown {
             }
 
             // Recursively optimize children
-            LogicalPlan::Projection { exprs, input, schema } => {
+            LogicalPlan::Projection {
+                exprs,
+                input,
+                schema,
+            } => {
                 let optimized_input = self.optimize_plan(input)?;
                 Ok(LogicalPlan::Projection {
                     exprs: exprs.clone(),
@@ -132,7 +136,12 @@ impl PredicatePushdown {
                 })
             }
 
-            LogicalPlan::Aggregate { group_by, aggr_exprs, input, schema } => {
+            LogicalPlan::Aggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                schema,
+            } => {
                 let optimized_input = self.optimize_plan(input)?;
                 Ok(LogicalPlan::Aggregate {
                     group_by: group_by.clone(),
@@ -159,7 +168,14 @@ impl PredicatePushdown {
                 })
             }
 
-            LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                schema,
+            } => {
                 let optimized_left = self.optimize_plan(left)?;
                 let optimized_right = self.optimize_plan(right)?;
                 Ok(LogicalPlan::Join {
@@ -172,7 +188,11 @@ impl PredicatePushdown {
                 })
             }
 
-            LogicalPlan::CrossJoin { left, right, schema } => {
+            LogicalPlan::CrossJoin {
+                left,
+                right,
+                schema,
+            } => {
                 let optimized_left = self.optimize_plan(left)?;
                 let optimized_right = self.optimize_plan(right)?;
                 Ok(LogicalPlan::CrossJoin {
@@ -196,7 +216,13 @@ impl PredicatePushdown {
     fn push_down_filter(&self, predicate: LogicalExpr, input: LogicalPlan) -> Result<LogicalPlan> {
         match input {
             // Push filter into table scan
-            LogicalPlan::TableScan { table_ref, projection, mut filters, schema, time_travel } => {
+            LogicalPlan::TableScan {
+                table_ref,
+                projection,
+                mut filters,
+                schema,
+                time_travel,
+            } => {
                 // Add the predicate to the scan's filters
                 filters.push(predicate);
                 Ok(LogicalPlan::TableScan {
@@ -209,7 +235,11 @@ impl PredicatePushdown {
             }
 
             // Push through projection if predicate only references output columns
-            LogicalPlan::Projection { exprs, input, schema } => {
+            LogicalPlan::Projection {
+                exprs,
+                input,
+                schema,
+            } => {
                 // Check if we can push through
                 if self.can_push_through_projection(&predicate, &exprs) {
                     // Rewrite predicate in terms of input columns
@@ -224,13 +254,20 @@ impl PredicatePushdown {
                     // Can't push through, keep filter on top
                     Ok(LogicalPlan::Filter {
                         predicate,
-                        input: Arc::new(LogicalPlan::Projection { exprs, input, schema }),
+                        input: Arc::new(LogicalPlan::Projection {
+                            exprs,
+                            input,
+                            schema,
+                        }),
                     })
                 }
             }
 
             // Push through another filter (combine predicates)
-            LogicalPlan::Filter { predicate: inner_pred, input } => {
+            LogicalPlan::Filter {
+                predicate: inner_pred,
+                input,
+            } => {
                 let combined = LogicalExpr::BinaryExpr {
                     left: Box::new(predicate),
                     op: BinaryOp::And,
@@ -240,7 +277,14 @@ impl PredicatePushdown {
             }
 
             // Push through join - split predicate and push to appropriate side
-            LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                schema,
+            } => {
                 let left_schema = left.schema();
                 let right_schema = right.schema();
 
@@ -253,12 +297,12 @@ impl PredicatePushdown {
                 for pred in predicates {
                     let columns = self.extract_columns(&pred);
 
-                    let is_left_only = columns.iter().all(|c|
-                        left_schema.index_of(&c.name).is_some()
-                    );
-                    let is_right_only = columns.iter().all(|c|
-                        right_schema.index_of(&c.name).is_some()
-                    );
+                    let is_left_only = columns
+                        .iter()
+                        .all(|c| left_schema.index_of(&c.name).is_some());
+                    let is_right_only = columns
+                        .iter()
+                        .all(|c| right_schema.index_of(&c.name).is_some());
 
                     if is_left_only {
                         left_predicates.push(pred);
@@ -306,12 +350,10 @@ impl PredicatePushdown {
             }
 
             // Can't push through aggregate - keep filter on top
-            LogicalPlan::Aggregate { .. } => {
-                Ok(LogicalPlan::Filter {
-                    predicate,
-                    input: Arc::new(input),
-                })
-            }
+            LogicalPlan::Aggregate { .. } => Ok(LogicalPlan::Filter {
+                predicate,
+                input: Arc::new(input),
+            }),
 
             // Default: can't push, keep filter on top
             _ => Ok(LogicalPlan::Filter {
@@ -329,7 +371,11 @@ impl PredicatePushdown {
     }
 
     /// Rewrite a predicate for pushing through a projection.
-    fn rewrite_for_projection(&self, predicate: &LogicalExpr, _exprs: &[LogicalExpr]) -> LogicalExpr {
+    fn rewrite_for_projection(
+        &self,
+        predicate: &LogicalExpr,
+        _exprs: &[LogicalExpr],
+    ) -> LogicalExpr {
         // For simplicity, return the predicate as-is
         // A full implementation would map output columns to input expressions
         predicate.clone()
@@ -338,7 +384,11 @@ impl PredicatePushdown {
     /// Split a predicate into conjunctions (AND-ed terms).
     fn split_conjunction(&self, predicate: &LogicalExpr) -> Vec<LogicalExpr> {
         match predicate {
-            LogicalExpr::BinaryExpr { left, op: BinaryOp::And, right } => {
+            LogicalExpr::BinaryExpr {
+                left,
+                op: BinaryOp::And,
+                right,
+            } => {
                 let mut result = self.split_conjunction(left);
                 result.extend(self.split_conjunction(right));
                 result
@@ -391,12 +441,19 @@ impl PredicatePushdown {
             LogicalExpr::Alias { expr, .. } => {
                 self.collect_columns(expr, columns);
             }
-            LogicalExpr::Between { expr, low, high, .. } => {
+            LogicalExpr::Between {
+                expr, low, high, ..
+            } => {
                 self.collect_columns(expr, columns);
                 self.collect_columns(low, columns);
                 self.collect_columns(high, columns);
             }
-            LogicalExpr::Like { expr, pattern, escape, .. } => {
+            LogicalExpr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
                 self.collect_columns(expr, columns);
                 self.collect_columns(pattern, columns);
                 if let Some(esc) = escape {
@@ -409,7 +466,11 @@ impl PredicatePushdown {
                     self.collect_columns(item, columns);
                 }
             }
-            LogicalExpr::Case { expr, when_then_exprs, else_expr } => {
+            LogicalExpr::Case {
+                expr,
+                when_then_exprs,
+                else_expr,
+            } => {
                 if let Some(e) = expr {
                     self.collect_columns(e, columns);
                 }
@@ -428,7 +489,11 @@ impl PredicatePushdown {
     /// Optimize children of a plan node.
     fn optimize_children(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
         match plan {
-            LogicalPlan::SubqueryAlias { input, alias, schema } => {
+            LogicalPlan::SubqueryAlias {
+                input,
+                alias,
+                schema,
+            } => {
                 let optimized = self.optimize_plan(input)?;
                 Ok(LogicalPlan::SubqueryAlias {
                     input: Arc::new(optimized),
@@ -442,7 +507,13 @@ impl PredicatePushdown {
                     input: Arc::new(optimized),
                 })
             }
-            LogicalPlan::SetOperation { op, left, right, schema, all } => {
+            LogicalPlan::SetOperation {
+                op,
+                left,
+                right,
+                schema,
+                all,
+            } => {
                 let optimized_left = self.optimize_plan(left)?;
                 let optimized_right = self.optimize_plan(right)?;
                 Ok(LogicalPlan::SetOperation {
@@ -548,7 +619,12 @@ impl ProjectionPushdown {
                 self.collect_expr_columns(predicate, columns);
                 self.collect_columns_recursive(input, columns);
             }
-            LogicalPlan::Aggregate { group_by, aggr_exprs, input, .. } => {
+            LogicalPlan::Aggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                ..
+            } => {
                 for expr in group_by {
                     self.collect_expr_columns(expr, columns);
                 }
@@ -565,7 +641,13 @@ impl ProjectionPushdown {
                 }
                 self.collect_columns_recursive(input, columns);
             }
-            LogicalPlan::Join { left, right, on, filter, .. } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                on,
+                filter,
+                ..
+            } => {
                 for (l, r) in on {
                     self.collect_expr_columns(l, columns);
                     self.collect_expr_columns(r, columns);
@@ -621,7 +703,11 @@ impl ProjectionPushdown {
                     self.collect_expr_columns(arg, columns);
                 }
             }
-            LogicalExpr::Case { expr, when_then_exprs, else_expr } => {
+            LogicalExpr::Case {
+                expr,
+                when_then_exprs,
+                else_expr,
+            } => {
                 if let Some(e) = expr {
                     self.collect_expr_columns(e, columns);
                 }
@@ -642,9 +728,19 @@ impl ProjectionPushdown {
         }
     }
 
-    fn optimize_with_required(&self, plan: &LogicalPlan, required: &[String]) -> Result<LogicalPlan> {
+    fn optimize_with_required(
+        &self,
+        plan: &LogicalPlan,
+        required: &[String],
+    ) -> Result<LogicalPlan> {
         match plan {
-            LogicalPlan::TableScan { table_ref, projection, filters, schema, time_travel } => {
+            LogicalPlan::TableScan {
+                table_ref,
+                projection,
+                filters,
+                schema,
+                time_travel,
+            } => {
                 // Create projection based on required columns
                 if projection.is_some() {
                     // Already has projection, don't modify
@@ -687,7 +783,11 @@ impl ProjectionPushdown {
                 })
             }
 
-            LogicalPlan::Projection { exprs, input, schema } => {
+            LogicalPlan::Projection {
+                exprs,
+                input,
+                schema,
+            } => {
                 let optimized = self.optimize_with_required(input, required)?;
                 Ok(LogicalPlan::Projection {
                     exprs: exprs.clone(),
@@ -705,7 +805,12 @@ impl ProjectionPushdown {
 
     fn optimize_children(&self, plan: &LogicalPlan, required: &[String]) -> Result<LogicalPlan> {
         match plan {
-            LogicalPlan::Aggregate { group_by, aggr_exprs, input, schema } => {
+            LogicalPlan::Aggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                schema,
+            } => {
                 let optimized = self.optimize_with_required(input, required)?;
                 Ok(LogicalPlan::Aggregate {
                     group_by: group_by.clone(),
@@ -729,7 +834,14 @@ impl ProjectionPushdown {
                     input: Arc::new(optimized),
                 })
             }
-            LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                schema,
+            } => {
                 let left_opt = self.optimize_with_required(left, required)?;
                 let right_opt = self.optimize_with_required(right, required)?;
                 Ok(LogicalPlan::Join {
@@ -772,12 +884,16 @@ impl ConstantFolding {
                 let optimized_input = self.fold_plan(input)?;
 
                 // If predicate is always true, remove the filter
-                if let LogicalExpr::Literal(crate::types::ScalarValue::Boolean(Some(true))) = &folded_pred {
+                if let LogicalExpr::Literal(crate::types::ScalarValue::Boolean(Some(true))) =
+                    &folded_pred
+                {
                     return Ok(optimized_input);
                 }
 
                 // If predicate is always false, return empty
-                if let LogicalExpr::Literal(crate::types::ScalarValue::Boolean(Some(false))) = &folded_pred {
+                if let LogicalExpr::Literal(crate::types::ScalarValue::Boolean(Some(false))) =
+                    &folded_pred
+                {
                     return Ok(LogicalPlan::EmptyRelation {
                         produce_one_row: false,
                         schema: input.schema().clone(),
@@ -790,7 +906,11 @@ impl ConstantFolding {
                 })
             }
 
-            LogicalPlan::Projection { exprs, input, schema } => {
+            LogicalPlan::Projection {
+                exprs,
+                input,
+                schema,
+            } => {
                 let folded_exprs: Vec<_> = exprs.iter().map(|e| self.fold_expr(e)).collect();
                 let optimized_input = self.fold_plan(input)?;
                 Ok(LogicalPlan::Projection {
@@ -814,7 +934,9 @@ impl ConstantFolding {
                 let folded_right = self.fold_expr(right);
 
                 // Try to evaluate if both are literals
-                if let (LogicalExpr::Literal(l), LogicalExpr::Literal(r)) = (&folded_left, &folded_right) {
+                if let (LogicalExpr::Literal(l), LogicalExpr::Literal(r)) =
+                    (&folded_left, &folded_right)
+                {
                     if let Some(result) = self.eval_binary(l, op, r) {
                         return LogicalExpr::Literal(result);
                     }
@@ -824,37 +946,61 @@ impl ConstantFolding {
                 match op {
                     BinaryOp::And => {
                         // x AND true = x
-                        if matches!(&folded_right, LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))) {
+                        if matches!(
+                            &folded_right,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))
+                        ) {
                             return folded_left;
                         }
                         // true AND x = x
-                        if matches!(&folded_left, LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))) {
+                        if matches!(
+                            &folded_left,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))
+                        ) {
                             return folded_right;
                         }
                         // x AND false = false
-                        if matches!(&folded_right, LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))) {
+                        if matches!(
+                            &folded_right,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))
+                        ) {
                             return LogicalExpr::Literal(ScalarValue::Boolean(Some(false)));
                         }
                         // false AND x = false
-                        if matches!(&folded_left, LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))) {
+                        if matches!(
+                            &folded_left,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))
+                        ) {
                             return LogicalExpr::Literal(ScalarValue::Boolean(Some(false)));
                         }
                     }
                     BinaryOp::Or => {
                         // x OR false = x
-                        if matches!(&folded_right, LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))) {
+                        if matches!(
+                            &folded_right,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))
+                        ) {
                             return folded_left;
                         }
                         // false OR x = x
-                        if matches!(&folded_left, LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))) {
+                        if matches!(
+                            &folded_left,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))
+                        ) {
                             return folded_right;
                         }
                         // x OR true = true
-                        if matches!(&folded_right, LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))) {
+                        if matches!(
+                            &folded_right,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))
+                        ) {
                             return LogicalExpr::Literal(ScalarValue::Boolean(Some(true)));
                         }
                         // true OR x = true
-                        if matches!(&folded_left, LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))) {
+                        if matches!(
+                            &folded_left,
+                            LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))
+                        ) {
                             return LogicalExpr::Literal(ScalarValue::Boolean(Some(true)));
                         }
                     }
@@ -891,35 +1037,36 @@ impl ConstantFolding {
         }
     }
 
-    fn eval_binary(&self, left: &crate::types::ScalarValue, op: &BinaryOp, right: &crate::types::ScalarValue) -> Option<crate::types::ScalarValue> {
+    fn eval_binary(
+        &self,
+        left: &crate::types::ScalarValue,
+        op: &BinaryOp,
+        right: &crate::types::ScalarValue,
+    ) -> Option<crate::types::ScalarValue> {
         use crate::types::ScalarValue;
 
         match (left, right) {
-            (ScalarValue::Int64(Some(l)), ScalarValue::Int64(Some(r))) => {
-                match op {
-                    BinaryOp::Plus => Some(ScalarValue::Int64(Some(l + r))),
-                    BinaryOp::Minus => Some(ScalarValue::Int64(Some(l - r))),
-                    BinaryOp::Multiply => Some(ScalarValue::Int64(Some(l * r))),
-                    BinaryOp::Divide if *r != 0 => Some(ScalarValue::Int64(Some(l / r))),
-                    BinaryOp::Modulo if *r != 0 => Some(ScalarValue::Int64(Some(l % r))),
-                    BinaryOp::Eq => Some(ScalarValue::Boolean(Some(l == r))),
-                    BinaryOp::NotEq => Some(ScalarValue::Boolean(Some(l != r))),
-                    BinaryOp::Lt => Some(ScalarValue::Boolean(Some(l < r))),
-                    BinaryOp::LtEq => Some(ScalarValue::Boolean(Some(l <= r))),
-                    BinaryOp::Gt => Some(ScalarValue::Boolean(Some(l > r))),
-                    BinaryOp::GtEq => Some(ScalarValue::Boolean(Some(l >= r))),
-                    _ => None,
-                }
-            }
-            (ScalarValue::Boolean(Some(l)), ScalarValue::Boolean(Some(r))) => {
-                match op {
-                    BinaryOp::And => Some(ScalarValue::Boolean(Some(*l && *r))),
-                    BinaryOp::Or => Some(ScalarValue::Boolean(Some(*l || *r))),
-                    BinaryOp::Eq => Some(ScalarValue::Boolean(Some(l == r))),
-                    BinaryOp::NotEq => Some(ScalarValue::Boolean(Some(l != r))),
-                    _ => None,
-                }
-            }
+            (ScalarValue::Int64(Some(l)), ScalarValue::Int64(Some(r))) => match op {
+                BinaryOp::Plus => Some(ScalarValue::Int64(Some(l + r))),
+                BinaryOp::Minus => Some(ScalarValue::Int64(Some(l - r))),
+                BinaryOp::Multiply => Some(ScalarValue::Int64(Some(l * r))),
+                BinaryOp::Divide if *r != 0 => Some(ScalarValue::Int64(Some(l / r))),
+                BinaryOp::Modulo if *r != 0 => Some(ScalarValue::Int64(Some(l % r))),
+                BinaryOp::Eq => Some(ScalarValue::Boolean(Some(l == r))),
+                BinaryOp::NotEq => Some(ScalarValue::Boolean(Some(l != r))),
+                BinaryOp::Lt => Some(ScalarValue::Boolean(Some(l < r))),
+                BinaryOp::LtEq => Some(ScalarValue::Boolean(Some(l <= r))),
+                BinaryOp::Gt => Some(ScalarValue::Boolean(Some(l > r))),
+                BinaryOp::GtEq => Some(ScalarValue::Boolean(Some(l >= r))),
+                _ => None,
+            },
+            (ScalarValue::Boolean(Some(l)), ScalarValue::Boolean(Some(r))) => match op {
+                BinaryOp::And => Some(ScalarValue::Boolean(Some(*l && *r))),
+                BinaryOp::Or => Some(ScalarValue::Boolean(Some(*l || *r))),
+                BinaryOp::Eq => Some(ScalarValue::Boolean(Some(l == r))),
+                BinaryOp::NotEq => Some(ScalarValue::Boolean(Some(l != r))),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -936,7 +1083,12 @@ impl ConstantFolding {
 
     fn fold_children(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
         match plan {
-            LogicalPlan::Aggregate { group_by, aggr_exprs, input, schema } => {
+            LogicalPlan::Aggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                schema,
+            } => {
                 let optimized = self.fold_plan(input)?;
                 Ok(LogicalPlan::Aggregate {
                     group_by: group_by.clone(),
@@ -960,7 +1112,14 @@ impl ConstantFolding {
                     input: Arc::new(optimized),
                 })
             }
-            LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                schema,
+            } => {
                 let left_opt = self.fold_plan(left)?;
                 let right_opt = self.fold_plan(right)?;
                 let folded_filter = filter.as_ref().map(|f| self.fold_expr(f));
@@ -1007,7 +1166,11 @@ impl SimplifyExpressions {
                     input: Arc::new(optimized_input),
                 })
             }
-            LogicalPlan::Projection { exprs, input, schema } => {
+            LogicalPlan::Projection {
+                exprs,
+                input,
+                schema,
+            } => {
                 let simplified: Vec<_> = exprs.iter().map(|e| self.simplify_expr(e)).collect();
                 let optimized_input = self.simplify_plan(input)?;
                 Ok(LogicalPlan::Projection {
@@ -1044,38 +1207,50 @@ impl SimplifyExpressions {
 
                 // x + 0 = x, x - 0 = x
                 if matches!(op, BinaryOp::Plus | BinaryOp::Minus) {
-                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) = &simplified_right {
+                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) =
+                        &simplified_right
+                    {
                         return simplified_left;
                     }
                 }
 
                 // 0 + x = x
                 if matches!(op, BinaryOp::Plus) {
-                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) = &simplified_left {
+                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) =
+                        &simplified_left
+                    {
                         return simplified_right;
                     }
                 }
 
                 // x * 1 = x, x / 1 = x
                 if matches!(op, BinaryOp::Multiply | BinaryOp::Divide) {
-                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(1))) = &simplified_right {
+                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(1))) =
+                        &simplified_right
+                    {
                         return simplified_left;
                     }
                 }
 
                 // 1 * x = x
                 if matches!(op, BinaryOp::Multiply) {
-                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(1))) = &simplified_left {
+                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(1))) =
+                        &simplified_left
+                    {
                         return simplified_right;
                     }
                 }
 
                 // x * 0 = 0, 0 * x = 0
                 if matches!(op, BinaryOp::Multiply) {
-                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) = &simplified_right {
+                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) =
+                        &simplified_right
+                    {
                         return LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0)));
                     }
-                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) = &simplified_left {
+                    if let LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0))) =
+                        &simplified_left
+                    {
                         return LogicalExpr::Literal(crate::types::ScalarValue::Int64(Some(0)));
                     }
                 }
@@ -1093,7 +1268,12 @@ impl SimplifyExpressions {
 
     fn simplify_children(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
         match plan {
-            LogicalPlan::Aggregate { group_by, aggr_exprs, input, schema } => {
+            LogicalPlan::Aggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                schema,
+            } => {
                 let optimized = self.simplify_plan(input)?;
                 Ok(LogicalPlan::Aggregate {
                     group_by: group_by.clone(),
@@ -1117,7 +1297,14 @@ impl SimplifyExpressions {
                     input: Arc::new(optimized),
                 })
             }
-            LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                schema,
+            } => {
                 let left_opt = self.simplify_plan(left)?;
                 let right_opt = self.simplify_plan(right)?;
                 Ok(LogicalPlan::Join {
@@ -1156,16 +1343,27 @@ impl EliminateLimit {
     fn eliminate_limit(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
         match plan {
             // LIMIT 0 with no offset = empty result
-            LogicalPlan::Limit { skip: 0, fetch: Some(0), input } => {
-                Ok(LogicalPlan::EmptyRelation {
-                    produce_one_row: false,
-                    schema: input.schema().clone(),
-                })
-            }
+            LogicalPlan::Limit {
+                skip: 0,
+                fetch: Some(0),
+                input,
+            } => Ok(LogicalPlan::EmptyRelation {
+                produce_one_row: false,
+                schema: input.schema().clone(),
+            }),
 
             // LIMIT on top of LIMIT - combine them
-            LogicalPlan::Limit { skip: outer_skip, fetch: outer_fetch, input } => {
-                if let LogicalPlan::Limit { skip: inner_skip, fetch: inner_fetch, input: inner_input } = input.as_ref() {
+            LogicalPlan::Limit {
+                skip: outer_skip,
+                fetch: outer_fetch,
+                input,
+            } => {
+                if let LogicalPlan::Limit {
+                    skip: inner_skip,
+                    fetch: inner_fetch,
+                    input: inner_input,
+                } = input.as_ref()
+                {
                     // Combined skip = inner_skip + outer_skip
                     let combined_skip = inner_skip + outer_skip;
 
@@ -1206,7 +1404,11 @@ impl EliminateLimit {
                     input: Arc::new(optimized),
                 })
             }
-            LogicalPlan::Projection { exprs, input, schema } => {
+            LogicalPlan::Projection {
+                exprs,
+                input,
+                schema,
+            } => {
                 let optimized = self.eliminate_limit(input)?;
                 Ok(LogicalPlan::Projection {
                     exprs: exprs.clone(),
@@ -1214,7 +1416,12 @@ impl EliminateLimit {
                     schema: schema.clone(),
                 })
             }
-            LogicalPlan::Aggregate { group_by, aggr_exprs, input, schema } => {
+            LogicalPlan::Aggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                schema,
+            } => {
                 let optimized = self.eliminate_limit(input)?;
                 Ok(LogicalPlan::Aggregate {
                     group_by: group_by.clone(),
@@ -1230,7 +1437,14 @@ impl EliminateLimit {
                     input: Arc::new(optimized),
                 })
             }
-            LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                schema,
+            } => {
                 let left_opt = self.eliminate_limit(left)?;
                 let right_opt = self.eliminate_limit(right)?;
                 Ok(LogicalPlan::Join {
@@ -1352,7 +1566,9 @@ mod tests {
         let optimized = rule.optimize(&limit).unwrap();
 
         match optimized {
-            LogicalPlan::EmptyRelation { produce_one_row, .. } => {
+            LogicalPlan::EmptyRelation {
+                produce_one_row, ..
+            } => {
                 assert!(!produce_one_row);
             }
             _ => panic!("Expected EmptyRelation plan"),
@@ -1422,10 +1638,14 @@ mod tests {
                 assert_eq!(filters.len(), 1);
                 // The filter should be simplified (no "AND true")
                 match &filters[0] {
-                    LogicalExpr::BinaryExpr { op: BinaryOp::And, .. } => {
+                    LogicalExpr::BinaryExpr {
+                        op: BinaryOp::And, ..
+                    } => {
                         panic!("AND true should have been simplified");
                     }
-                    LogicalExpr::BinaryExpr { op: BinaryOp::Gt, .. } => {}
+                    LogicalExpr::BinaryExpr {
+                        op: BinaryOp::Gt, ..
+                    } => {}
                     _ => panic!("Expected comparison expression"),
                 }
             }
