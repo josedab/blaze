@@ -30,8 +30,8 @@ use crate::catalog::CatalogList;
 use crate::error::{BlazeError, Result};
 use crate::executor::ExecutionContext;
 use crate::planner::{
-    LogicalExpr, LogicalPlan, LogicalAggregateExpr, LogicalSortExpr,
-    Optimizer, PhysicalPlanner, WindowExpr,
+    LogicalAggregateExpr, LogicalExpr, LogicalPlan, LogicalSortExpr, Optimizer, PhysicalPlanner,
+    WindowExpr,
 };
 use crate::types::ScalarValue;
 
@@ -58,6 +58,7 @@ pub struct PreparedStatement {
     /// Parameter metadata extracted from the query
     parameters: Vec<ParameterInfo>,
     /// Catalog reference for execution
+    #[allow(dead_code)]
     catalog_list: Arc<CatalogList>,
     /// Execution context
     execution_context: ExecutionContext,
@@ -188,7 +189,13 @@ fn substitute_parameters(
     params: &HashMap<usize, ScalarValue>,
 ) -> Result<LogicalPlan> {
     match plan {
-        LogicalPlan::TableScan { table_ref, projection, filters, schema, time_travel } => {
+        LogicalPlan::TableScan {
+            table_ref,
+            projection,
+            filters,
+            schema,
+            time_travel,
+        } => {
             let new_filters: Vec<_> = filters
                 .iter()
                 .map(|f| substitute_expr(f, params))
@@ -201,7 +208,11 @@ fn substitute_parameters(
                 time_travel: time_travel.clone(),
             })
         }
-        LogicalPlan::Projection { exprs, input, schema } => {
+        LogicalPlan::Projection {
+            exprs,
+            input,
+            schema,
+        } => {
             let new_input = substitute_parameters(input, params)?;
             let new_exprs: Vec<_> = exprs
                 .iter()
@@ -221,7 +232,12 @@ fn substitute_parameters(
                 predicate: new_predicate,
             })
         }
-        LogicalPlan::Aggregate { input, group_by, aggr_exprs, schema } => {
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            aggr_exprs,
+            schema,
+        } => {
             let new_input = substitute_parameters(input, params)?;
             let new_group_by: Vec<_> = group_by
                 .iter()
@@ -257,14 +273,19 @@ fn substitute_parameters(
                 fetch: *fetch,
             })
         }
-        LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+        LogicalPlan::Join {
+            left,
+            right,
+            join_type,
+            on,
+            filter,
+            schema,
+        } => {
             let new_left = substitute_parameters(left, params)?;
             let new_right = substitute_parameters(right, params)?;
             let new_on: Vec<_> = on
                 .iter()
-                .map(|(l, r)| {
-                    Ok((substitute_expr(l, params)?, substitute_expr(r, params)?))
-                })
+                .map(|(l, r)| Ok((substitute_expr(l, params)?, substitute_expr(r, params)?)))
                 .collect::<Result<_>>()?;
             let new_filter = filter
                 .as_ref()
@@ -279,7 +300,11 @@ fn substitute_parameters(
                 schema: schema.clone(),
             })
         }
-        LogicalPlan::CrossJoin { left, right, schema } => {
+        LogicalPlan::CrossJoin {
+            left,
+            right,
+            schema,
+        } => {
             let new_left = substitute_parameters(left, params)?;
             let new_right = substitute_parameters(right, params)?;
             Ok(LogicalPlan::CrossJoin {
@@ -288,7 +313,13 @@ fn substitute_parameters(
                 schema: schema.clone(),
             })
         }
-        LogicalPlan::SetOperation { left, right, op, all, schema } => {
+        LogicalPlan::SetOperation {
+            left,
+            right,
+            op,
+            all,
+            schema,
+        } => {
             let new_left = substitute_parameters(left, params)?;
             let new_right = substitute_parameters(right, params)?;
             Ok(LogicalPlan::SetOperation {
@@ -299,7 +330,11 @@ fn substitute_parameters(
                 schema: schema.clone(),
             })
         }
-        LogicalPlan::SubqueryAlias { alias, input, schema } => {
+        LogicalPlan::SubqueryAlias {
+            alias,
+            input,
+            schema,
+        } => {
             let new_input = substitute_parameters(input, params)?;
             Ok(LogicalPlan::SubqueryAlias {
                 alias: alias.clone(),
@@ -313,7 +348,11 @@ fn substitute_parameters(
                 input: Arc::new(new_input),
             })
         }
-        LogicalPlan::Window { input, window_exprs, schema } => {
+        LogicalPlan::Window {
+            input,
+            window_exprs,
+            schema,
+        } => {
             let new_input = substitute_parameters(input, params)?;
             let new_window_exprs: Vec<_> = window_exprs
                 .iter()
@@ -339,7 +378,11 @@ fn substitute_parameters(
                 values: new_values,
             })
         }
-        LogicalPlan::Insert { table_ref, input, schema } => {
+        LogicalPlan::Insert {
+            table_ref,
+            input,
+            schema,
+        } => {
             let new_input = substitute_parameters(input, params)?;
             Ok(LogicalPlan::Insert {
                 table_ref: table_ref.clone(),
@@ -347,7 +390,11 @@ fn substitute_parameters(
                 schema: schema.clone(),
             })
         }
-        LogicalPlan::Delete { table_ref, predicate, schema } => {
+        LogicalPlan::Delete {
+            table_ref,
+            predicate,
+            schema,
+        } => {
             let new_predicate = predicate
                 .as_ref()
                 .map(|p| substitute_expr(p, params))
@@ -358,12 +405,15 @@ fn substitute_parameters(
                 schema: schema.clone(),
             })
         }
-        LogicalPlan::Update { table_ref, assignments, predicate, schema } => {
+        LogicalPlan::Update {
+            table_ref,
+            assignments,
+            predicate,
+            schema,
+        } => {
             let new_assignments: Vec<_> = assignments
                 .iter()
-                .map(|(col, expr)| {
-                    Ok((col.clone(), substitute_expr(expr, params)?))
-                })
+                .map(|(col, expr)| Ok((col.clone(), substitute_expr(expr, params)?)))
                 .collect::<Result<_>>()?;
             let new_predicate = predicate
                 .as_ref()
@@ -394,12 +444,18 @@ fn substitute_parameters(
         LogicalPlan::EmptyRelation { .. } => Ok(plan.clone()),
         LogicalPlan::CreateTable { .. } => Ok(plan.clone()),
         LogicalPlan::DropTable { .. } => Ok(plan.clone()),
-        LogicalPlan::Copy { input, target, format, options, schema } => {
+        LogicalPlan::Copy {
+            input,
+            target,
+            format,
+            options,
+            schema,
+        } => {
             let new_input = substitute_parameters(input, params)?;
             Ok(LogicalPlan::Copy {
                 input: Arc::new(new_input),
                 target: target.clone(),
-                format: format.clone(),
+                format: *format,
                 options: options.clone(),
                 schema: schema.clone(),
             })
@@ -413,61 +469,55 @@ fn substitute_expr(
     params: &HashMap<usize, ScalarValue>,
 ) -> Result<LogicalExpr> {
     match expr {
-        LogicalExpr::Placeholder { id } => {
-            params
-                .get(id)
-                .map(|v| LogicalExpr::Literal(v.clone()))
-                .ok_or_else(|| {
-                    BlazeError::invalid_argument(format!("Missing parameter ${}", id))
-                })
-        }
-        LogicalExpr::BinaryExpr { left, op, right } => {
-            Ok(LogicalExpr::BinaryExpr {
-                left: Box::new(substitute_expr(left, params)?),
-                op: *op,
-                right: Box::new(substitute_expr(right, params)?),
-            })
-        }
-        LogicalExpr::UnaryExpr { op, expr: inner } => {
-            Ok(LogicalExpr::UnaryExpr {
-                op: *op,
-                expr: Box::new(substitute_expr(inner, params)?),
-            })
-        }
-        LogicalExpr::IsNull(inner) => {
-            Ok(LogicalExpr::IsNull(Box::new(substitute_expr(inner, params)?)))
-        }
-        LogicalExpr::IsNotNull(inner) => {
-            Ok(LogicalExpr::IsNotNull(Box::new(substitute_expr(inner, params)?)))
-        }
-        LogicalExpr::Not(inner) => {
-            Ok(LogicalExpr::Not(Box::new(substitute_expr(inner, params)?)))
-        }
-        LogicalExpr::Negative(inner) => {
-            Ok(LogicalExpr::Negative(Box::new(substitute_expr(inner, params)?)))
-        }
-        LogicalExpr::Cast { expr: inner, data_type } => {
-            Ok(LogicalExpr::Cast {
-                expr: Box::new(substitute_expr(inner, params)?),
-                data_type: data_type.clone(),
-            })
-        }
-        LogicalExpr::TryCast { expr: inner, data_type } => {
-            Ok(LogicalExpr::TryCast {
-                expr: Box::new(substitute_expr(inner, params)?),
-                data_type: data_type.clone(),
-            })
-        }
-        LogicalExpr::Case { expr: operand, when_then_exprs, else_expr } => {
+        LogicalExpr::Placeholder { id } => params
+            .get(id)
+            .map(|v| LogicalExpr::Literal(v.clone()))
+            .ok_or_else(|| BlazeError::invalid_argument(format!("Missing parameter ${}", id))),
+        LogicalExpr::BinaryExpr { left, op, right } => Ok(LogicalExpr::BinaryExpr {
+            left: Box::new(substitute_expr(left, params)?),
+            op: *op,
+            right: Box::new(substitute_expr(right, params)?),
+        }),
+        LogicalExpr::UnaryExpr { op, expr: inner } => Ok(LogicalExpr::UnaryExpr {
+            op: *op,
+            expr: Box::new(substitute_expr(inner, params)?),
+        }),
+        LogicalExpr::IsNull(inner) => Ok(LogicalExpr::IsNull(Box::new(substitute_expr(
+            inner, params,
+        )?))),
+        LogicalExpr::IsNotNull(inner) => Ok(LogicalExpr::IsNotNull(Box::new(substitute_expr(
+            inner, params,
+        )?))),
+        LogicalExpr::Not(inner) => Ok(LogicalExpr::Not(Box::new(substitute_expr(inner, params)?))),
+        LogicalExpr::Negative(inner) => Ok(LogicalExpr::Negative(Box::new(substitute_expr(
+            inner, params,
+        )?))),
+        LogicalExpr::Cast {
+            expr: inner,
+            data_type,
+        } => Ok(LogicalExpr::Cast {
+            expr: Box::new(substitute_expr(inner, params)?),
+            data_type: data_type.clone(),
+        }),
+        LogicalExpr::TryCast {
+            expr: inner,
+            data_type,
+        } => Ok(LogicalExpr::TryCast {
+            expr: Box::new(substitute_expr(inner, params)?),
+            data_type: data_type.clone(),
+        }),
+        LogicalExpr::Case {
+            expr: operand,
+            when_then_exprs,
+            else_expr,
+        } => {
             let new_operand = operand
                 .as_ref()
                 .map(|e| substitute_expr(e, params).map(Box::new))
                 .transpose()?;
             let new_when_then: Vec<_> = when_then_exprs
                 .iter()
-                .map(|(w, t)| {
-                    Ok((substitute_expr(w, params)?, substitute_expr(t, params)?))
-                })
+                .map(|(w, t)| Ok((substitute_expr(w, params)?, substitute_expr(t, params)?)))
                 .collect::<Result<_>>()?;
             let new_else = else_expr
                 .as_ref()
@@ -479,15 +529,23 @@ fn substitute_expr(
                 else_expr: new_else,
             })
         }
-        LogicalExpr::Between { expr: inner, negated, low, high } => {
-            Ok(LogicalExpr::Between {
-                expr: Box::new(substitute_expr(inner, params)?),
-                negated: *negated,
-                low: Box::new(substitute_expr(low, params)?),
-                high: Box::new(substitute_expr(high, params)?),
-            })
-        }
-        LogicalExpr::Like { negated, expr: inner, pattern, escape } => {
+        LogicalExpr::Between {
+            expr: inner,
+            negated,
+            low,
+            high,
+        } => Ok(LogicalExpr::Between {
+            expr: Box::new(substitute_expr(inner, params)?),
+            negated: *negated,
+            low: Box::new(substitute_expr(low, params)?),
+            high: Box::new(substitute_expr(high, params)?),
+        }),
+        LogicalExpr::Like {
+            negated,
+            expr: inner,
+            pattern,
+            escape,
+        } => {
             let new_escape = escape
                 .as_ref()
                 .map(|e| substitute_expr(e, params).map(Box::new))
@@ -499,7 +557,11 @@ fn substitute_expr(
                 escape: new_escape,
             })
         }
-        LogicalExpr::InList { expr: inner, list, negated } => {
+        LogicalExpr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => {
             let new_list: Vec<_> = list
                 .iter()
                 .map(|e| substitute_expr(e, params))
@@ -520,12 +582,12 @@ fn substitute_expr(
                 args: new_args,
             })
         }
-        LogicalExpr::Aggregate(agg) => {
-            Ok(LogicalExpr::Aggregate(substitute_aggregate_expr(agg, params)?))
-        }
-        LogicalExpr::Window(win) => {
-            Ok(LogicalExpr::Window(Box::new(substitute_window_expr(win, params)?)))
-        }
+        LogicalExpr::Aggregate(agg) => Ok(LogicalExpr::Aggregate(substitute_aggregate_expr(
+            agg, params,
+        )?)),
+        LogicalExpr::Window(win) => Ok(LogicalExpr::Window(Box::new(substitute_window_expr(
+            win, params,
+        )?))),
         LogicalExpr::ScalarSubquery(subquery) => {
             let new_subquery = substitute_parameters(subquery, params)?;
             Ok(LogicalExpr::ScalarSubquery(Arc::new(new_subquery)))
@@ -537,7 +599,11 @@ fn substitute_expr(
                 negated: *negated,
             })
         }
-        LogicalExpr::InSubquery { expr: inner, subquery, negated } => {
+        LogicalExpr::InSubquery {
+            expr: inner,
+            subquery,
+            negated,
+        } => {
             let new_inner = substitute_expr(inner, params)?;
             let new_subquery = substitute_parameters(subquery, params)?;
             Ok(LogicalExpr::InSubquery {
@@ -546,12 +612,10 @@ fn substitute_expr(
                 negated: *negated,
             })
         }
-        LogicalExpr::Alias { expr: inner, alias } => {
-            Ok(LogicalExpr::Alias {
-                expr: Box::new(substitute_expr(inner, params)?),
-                alias: alias.clone(),
-            })
-        }
+        LogicalExpr::Alias { expr: inner, alias } => Ok(LogicalExpr::Alias {
+            expr: Box::new(substitute_expr(inner, params)?),
+            alias: alias.clone(),
+        }),
         // Terminal expressions don't need substitution
         LogicalExpr::Column(_) => Ok(expr.clone()),
         LogicalExpr::Literal(_) => Ok(expr.clone()),
@@ -643,7 +707,12 @@ fn extract_parameters_from_plan(plan: &LogicalPlan, params: &mut Vec<ParameterIn
             extract_parameters_from_plan(input, params);
             extract_parameters_from_expr(predicate, params);
         }
-        LogicalPlan::Aggregate { input, group_by, aggr_exprs, .. } => {
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            aggr_exprs,
+            ..
+        } => {
             extract_parameters_from_plan(input, params);
             for expr in group_by {
                 extract_parameters_from_expr(expr, params);
@@ -666,7 +735,13 @@ fn extract_parameters_from_plan(plan: &LogicalPlan, params: &mut Vec<ParameterIn
         LogicalPlan::Limit { input, .. } => {
             extract_parameters_from_plan(input, params);
         }
-        LogicalPlan::Join { left, right, on, filter, .. } => {
+        LogicalPlan::Join {
+            left,
+            right,
+            on,
+            filter,
+            ..
+        } => {
             extract_parameters_from_plan(left, params);
             extract_parameters_from_plan(right, params);
             for (l, r) in on {
@@ -691,7 +766,11 @@ fn extract_parameters_from_plan(plan: &LogicalPlan, params: &mut Vec<ParameterIn
         LogicalPlan::Distinct { input } => {
             extract_parameters_from_plan(input, params);
         }
-        LogicalPlan::Window { input, window_exprs, .. } => {
+        LogicalPlan::Window {
+            input,
+            window_exprs,
+            ..
+        } => {
             extract_parameters_from_plan(input, params);
             for we in window_exprs {
                 extract_parameters_from_expr(we, params);
@@ -712,7 +791,11 @@ fn extract_parameters_from_plan(plan: &LogicalPlan, params: &mut Vec<ParameterIn
                 extract_parameters_from_expr(p, params);
             }
         }
-        LogicalPlan::Update { assignments, predicate, .. } => {
+        LogicalPlan::Update {
+            assignments,
+            predicate,
+            ..
+        } => {
             for (_, expr) in assignments {
                 extract_parameters_from_expr(expr, params);
             }
@@ -726,9 +809,9 @@ fn extract_parameters_from_plan(plan: &LogicalPlan, params: &mut Vec<ParameterIn
         LogicalPlan::ExplainAnalyze { plan, .. } => {
             extract_parameters_from_plan(plan, params);
         }
-        LogicalPlan::EmptyRelation { .. } |
-        LogicalPlan::CreateTable { .. } |
-        LogicalPlan::DropTable { .. } => {}
+        LogicalPlan::EmptyRelation { .. }
+        | LogicalPlan::CreateTable { .. }
+        | LogicalPlan::DropTable { .. } => {}
         LogicalPlan::Copy { input, .. } => {
             extract_parameters_from_plan(input, params);
         }
@@ -750,14 +833,20 @@ fn extract_parameters_from_expr(expr: &LogicalExpr, params: &mut Vec<ParameterIn
         LogicalExpr::UnaryExpr { expr: inner, .. } => {
             extract_parameters_from_expr(inner, params);
         }
-        LogicalExpr::IsNull(inner) | LogicalExpr::IsNotNull(inner) |
-        LogicalExpr::Not(inner) | LogicalExpr::Negative(inner) => {
+        LogicalExpr::IsNull(inner)
+        | LogicalExpr::IsNotNull(inner)
+        | LogicalExpr::Not(inner)
+        | LogicalExpr::Negative(inner) => {
             extract_parameters_from_expr(inner, params);
         }
         LogicalExpr::Cast { expr: inner, .. } | LogicalExpr::TryCast { expr: inner, .. } => {
             extract_parameters_from_expr(inner, params);
         }
-        LogicalExpr::Case { expr: operand, when_then_exprs, else_expr } => {
+        LogicalExpr::Case {
+            expr: operand,
+            when_then_exprs,
+            else_expr,
+        } => {
             if let Some(op) = operand {
                 extract_parameters_from_expr(op, params);
             }
@@ -769,19 +858,31 @@ fn extract_parameters_from_expr(expr: &LogicalExpr, params: &mut Vec<ParameterIn
                 extract_parameters_from_expr(e, params);
             }
         }
-        LogicalExpr::Between { expr: inner, low, high, .. } => {
+        LogicalExpr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
             extract_parameters_from_expr(inner, params);
             extract_parameters_from_expr(low, params);
             extract_parameters_from_expr(high, params);
         }
-        LogicalExpr::Like { expr: inner, pattern, escape, .. } => {
+        LogicalExpr::Like {
+            expr: inner,
+            pattern,
+            escape,
+            ..
+        } => {
             extract_parameters_from_expr(inner, params);
             extract_parameters_from_expr(pattern, params);
             if let Some(e) = escape {
                 extract_parameters_from_expr(e, params);
             }
         }
-        LogicalExpr::InList { expr: inner, list, .. } => {
+        LogicalExpr::InList {
+            expr: inner, list, ..
+        } => {
             extract_parameters_from_expr(inner, params);
             for e in list {
                 extract_parameters_from_expr(e, params);
@@ -818,15 +919,19 @@ fn extract_parameters_from_expr(expr: &LogicalExpr, params: &mut Vec<ParameterIn
         LogicalExpr::Exists { subquery, .. } => {
             extract_parameters_from_plan(subquery, params);
         }
-        LogicalExpr::InSubquery { expr: inner, subquery, .. } => {
+        LogicalExpr::InSubquery {
+            expr: inner,
+            subquery,
+            ..
+        } => {
             extract_parameters_from_expr(inner, params);
             extract_parameters_from_plan(subquery, params);
         }
         // Terminal expressions
-        LogicalExpr::Column(_) |
-        LogicalExpr::Literal(_) |
-        LogicalExpr::Wildcard |
-        LogicalExpr::QualifiedWildcard { .. } => {}
+        LogicalExpr::Column(_)
+        | LogicalExpr::Literal(_)
+        | LogicalExpr::Wildcard
+        | LogicalExpr::QualifiedWildcard { .. } => {}
     }
 }
 
@@ -1018,7 +1123,7 @@ mod tests {
 
         // "b" was accessed most recently, then "a", so "a" was evicted when "c" was inserted
         // Now cache contains "b" and "c"
-        assert_eq!(cache.get(&"a"), None);  // "a" was evicted (LRU)
+        assert_eq!(cache.get(&"a"), None); // "a" was evicted (LRU)
         assert_eq!(cache.get(&"b"), Some(&2));
         assert_eq!(cache.get(&"c"), Some(&3));
     }
