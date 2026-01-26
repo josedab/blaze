@@ -629,6 +629,232 @@ impl GpuMemoryManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GPU Kernel Cache
+// ---------------------------------------------------------------------------
+
+/// Caches compiled GPU kernels to avoid recompilation overhead.
+#[derive(Debug)]
+pub struct GpuKernelCache {
+    cache: std::collections::HashMap<String, CachedKernel>,
+    max_entries: usize,
+    hits: u64,
+    misses: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedKernel {
+    kernel_hash: String,
+    compiled_at: std::time::Instant,
+    use_count: u64,
+}
+
+impl GpuKernelCache {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            cache: std::collections::HashMap::new(),
+            max_entries,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Look up a kernel by its source hash.
+    pub fn get(&mut self, key: &str) -> Option<&str> {
+        if let Some(entry) = self.cache.get_mut(key) {
+            entry.use_count += 1;
+            self.hits += 1;
+            Some(&entry.kernel_hash)
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    /// Insert a compiled kernel into the cache.
+    pub fn insert(&mut self, key: String, kernel_hash: String) {
+        if self.cache.len() >= self.max_entries {
+            // Evict least-used kernel
+            if let Some(lru_key) = self
+                .cache
+                .iter()
+                .min_by_key(|(_, v)| v.use_count)
+                .map(|(k, _)| k.clone())
+            {
+                self.cache.remove(&lru_key);
+            }
+        }
+        self.cache.insert(
+            key,
+            CachedKernel {
+                kernel_hash,
+                compiled_at: std::time::Instant::now(),
+                use_count: 0,
+            },
+        );
+    }
+
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 { 0.0 } else { self.hits as f64 / total as f64 }
+    }
+    pub fn len(&self) -> usize { self.cache.len() }
+    pub fn is_empty(&self) -> bool { self.cache.is_empty() }
+}
+
+// ---------------------------------------------------------------------------
+// GPU Pipeline Executor
+// ---------------------------------------------------------------------------
+
+/// Chains multiple GPU operations into a fused pipeline to minimize data transfers.
+#[derive(Debug)]
+pub struct GpuPipeline {
+    stages: Vec<GpuPipelineStage>,
+    total_rows_processed: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GpuPipelineStage {
+    pub operation: GpuOperationType,
+    pub input_rows: u64,
+    pub output_rows: u64,
+    pub execution_time_us: u64,
+    pub memory_used: u64,
+}
+
+impl GpuPipeline {
+    pub fn new() -> Self {
+        Self {
+            stages: Vec::new(),
+            total_rows_processed: 0,
+        }
+    }
+
+    /// Add a stage to the pipeline.
+    pub fn add_stage(&mut self, operation: GpuOperationType) {
+        self.stages.push(GpuPipelineStage {
+            operation,
+            input_rows: 0,
+            output_rows: 0,
+            execution_time_us: 0,
+            memory_used: 0,
+        });
+    }
+
+    /// Record execution stats for a stage.
+    pub fn record_stage_stats(
+        &mut self,
+        stage_idx: usize,
+        input_rows: u64,
+        output_rows: u64,
+        time_us: u64,
+        memory: u64,
+    ) {
+        if let Some(stage) = self.stages.get_mut(stage_idx) {
+            stage.input_rows = input_rows;
+            stage.output_rows = output_rows;
+            stage.execution_time_us = time_us;
+            stage.memory_used = memory;
+        }
+        self.total_rows_processed += output_rows;
+    }
+
+    /// Total pipeline execution time across all stages.
+    pub fn total_execution_time_us(&self) -> u64 {
+        self.stages.iter().map(|s| s.execution_time_us).sum()
+    }
+
+    /// Total memory used across all stages.
+    pub fn peak_memory(&self) -> u64 {
+        self.stages.iter().map(|s| s.memory_used).max().unwrap_or(0)
+    }
+
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
+    }
+
+    pub fn stages(&self) -> &[GpuPipelineStage] {
+        &self.stages
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU Profiler
+// ---------------------------------------------------------------------------
+
+/// Tracks GPU operation performance for cost model calibration.
+#[derive(Debug)]
+pub struct GpuProfiler {
+    records: Vec<GpuProfileRecord>,
+    max_records: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct GpuProfileRecord {
+    pub operation: GpuOperationType,
+    pub rows: u64,
+    pub columns: u32,
+    pub execution_us: u64,
+    pub transfer_us: u64,
+    pub speedup_vs_cpu: f64,
+}
+
+impl GpuProfiler {
+    pub fn new(max_records: usize) -> Self {
+        Self {
+            records: Vec::new(),
+            max_records,
+        }
+    }
+
+    pub fn record(&mut self, record: GpuProfileRecord) {
+        if self.records.len() >= self.max_records {
+            self.records.remove(0);
+        }
+        self.records.push(record);
+    }
+
+    /// Average speedup for a given operation type.
+    pub fn avg_speedup(&self, op: &GpuOperationType) -> Option<f64> {
+        let matching: Vec<f64> = self
+            .records
+            .iter()
+            .filter(|r| &r.operation == op)
+            .map(|r| r.speedup_vs_cpu)
+            .collect();
+        if matching.is_empty() {
+            None
+        } else {
+            Some(matching.iter().sum::<f64>() / matching.len() as f64)
+        }
+    }
+
+    /// Recommend minimum row count for a given operation to benefit from GPU.
+    pub fn recommend_min_rows(&self, op: &GpuOperationType) -> u64 {
+        let records: Vec<&GpuProfileRecord> = self
+            .records
+            .iter()
+            .filter(|r| &r.operation == op)
+            .collect();
+        
+        if records.is_empty() {
+            return 100_000; // default
+        }
+
+        // Find the smallest row count where speedup > 1.0
+        records
+            .iter()
+            .filter(|r| r.speedup_vs_cpu > 1.0)
+            .map(|r| r.rows)
+            .min()
+            .unwrap_or(100_000)
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,5 +1084,100 @@ mod tests {
     fn test_gpu_memory_zero_alloc_error() {
         let mut mgr = GpuMemoryManager::new(1024, 256);
         assert!(mgr.allocate(0).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Kernel Cache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kernel_cache_hit_miss() {
+        let mut cache = GpuKernelCache::new(10);
+        assert!(cache.get("filter_gt_100").is_none());
+
+        cache.insert("filter_gt_100".into(), "compiled_hash_abc".into());
+        assert!(cache.get("filter_gt_100").is_some());
+        assert!((cache.hit_rate() - 0.5).abs() < 0.01); // 1 hit, 1 miss
+    }
+
+    #[test]
+    fn test_kernel_cache_eviction() {
+        let mut cache = GpuKernelCache::new(2);
+        cache.insert("k1".into(), "h1".into());
+        cache.insert("k2".into(), "h2".into());
+        cache.insert("k3".into(), "h3".into()); // should evict k1 (least used)
+
+        assert_eq!(cache.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gpu_pipeline() {
+        let mut pipeline = GpuPipeline::new();
+        pipeline.add_stage(GpuOperationType::Filter);
+        pipeline.add_stage(GpuOperationType::Aggregate);
+
+        pipeline.record_stage_stats(0, 1_000_000, 500_000, 100, 4096);
+        pipeline.record_stage_stats(1, 500_000, 1, 50, 2048);
+
+        assert_eq!(pipeline.stage_count(), 2);
+        assert_eq!(pipeline.total_execution_time_us(), 150);
+        assert_eq!(pipeline.peak_memory(), 4096);
+    }
+
+    // -----------------------------------------------------------------------
+    // Profiler tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gpu_profiler_avg_speedup() {
+        let mut profiler = GpuProfiler::new(100);
+        profiler.record(GpuProfileRecord {
+            operation: GpuOperationType::Filter,
+            rows: 1_000_000,
+            columns: 5,
+            execution_us: 100,
+            transfer_us: 50,
+            speedup_vs_cpu: 10.0,
+        });
+        profiler.record(GpuProfileRecord {
+            operation: GpuOperationType::Filter,
+            rows: 2_000_000,
+            columns: 5,
+            execution_us: 180,
+            transfer_us: 80,
+            speedup_vs_cpu: 20.0,
+        });
+
+        let avg = profiler.avg_speedup(&GpuOperationType::Filter).unwrap();
+        assert!((avg - 15.0).abs() < 0.01);
+        assert!(profiler.avg_speedup(&GpuOperationType::Join).is_none());
+    }
+
+    #[test]
+    fn test_gpu_profiler_recommend_min_rows() {
+        let mut profiler = GpuProfiler::new(100);
+        profiler.record(GpuProfileRecord {
+            operation: GpuOperationType::Aggregate,
+            rows: 10_000,
+            columns: 3,
+            execution_us: 500,
+            transfer_us: 200,
+            speedup_vs_cpu: 0.5, // slower on GPU at 10K rows
+        });
+        profiler.record(GpuProfileRecord {
+            operation: GpuOperationType::Aggregate,
+            rows: 100_000,
+            columns: 3,
+            execution_us: 300,
+            transfer_us: 200,
+            speedup_vs_cpu: 5.0, // faster on GPU at 100K rows
+        });
+
+        let min = profiler.recommend_min_rows(&GpuOperationType::Aggregate);
+        assert_eq!(min, 100_000);
     }
 }
