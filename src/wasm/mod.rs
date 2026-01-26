@@ -25,13 +25,17 @@
 //! ```
 
 mod bindings;
+pub mod http_reader;
+pub mod indexeddb;
 mod memory;
 mod serialization;
+pub mod vfs;
+pub mod worker;
 
-pub use bindings::{WasmConnection, WasmQueryResult, WasmError};
-pub use memory::{WasmMemoryManager, WasmBuffer};
-pub use serialization::{JsonSerializer, ArrowIpcSerializer};
-
+pub use bindings::{WasmConnection, WasmError, WasmQueryResult};
+pub use memory::{WasmBuffer, WasmMemoryManager};
+pub use serialization::{ArrowIpcSerializer, JsonSerializer};
+pub use worker::{QueryTaskId, QueryTaskStatus, WasmOptConfig, WorkerQueryManager};
 
 /// Configuration for the WASM runtime.
 #[derive(Debug, Clone)]
@@ -49,7 +53,7 @@ pub struct WasmConfig {
 impl Default for WasmConfig {
     fn default() -> Self {
         Self {
-            max_memory: 256 * 1024 * 1024, // 256 MB
+            max_memory: 256 * 1024 * 1024,     // 256 MB
             max_result_size: 64 * 1024 * 1024, // 64 MB
             enable_logging: false,
             streaming_threshold: 10_000, // 10K rows

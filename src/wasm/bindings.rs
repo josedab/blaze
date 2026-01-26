@@ -7,10 +7,10 @@ use std::sync::RwLock;
 
 use arrow::record_batch::RecordBatch;
 
+use super::serialization::{ArrowIpcSerializer, JsonSerializer};
+use super::{ResultFormat, WasmConfig, WasmQueryOptions, WasmStats};
 use crate::error::{BlazeError, Result};
 use crate::Connection;
-use super::{WasmConfig, WasmQueryOptions, WasmStats, ResultFormat};
-use super::serialization::{JsonSerializer, ArrowIpcSerializer};
 
 /// Error type for WASM bindings.
 #[derive(Debug, Clone)]
@@ -215,6 +215,7 @@ pub struct WasmConnection {
 #[derive(Debug, Clone)]
 struct TableMetadata {
     /// Table name
+    #[allow(dead_code)]
     name: String,
     /// Number of rows
     row_count: usize,
@@ -277,13 +278,10 @@ impl WasmConnection {
         }
 
         // Serialize results
-        let (data, row_count, column_count, schema) = self.serialize_results(
-            &batches,
-            &options,
-        )?;
+        let (data, row_count, column_count, schema) = self.serialize_results(&batches, &options)?;
 
-        let mut result = WasmQueryResult::new(data, options.format, row_count, column_count)
-            .with_time(elapsed);
+        let mut result =
+            WasmQueryResult::new(data, options.format, row_count, column_count).with_time(elapsed);
 
         if options.include_schema {
             if let Some(s) = schema {
@@ -318,9 +316,7 @@ impl WasmConnection {
                 let json = JsonSerializer::serialize(&limited_batches, options.pretty)?;
                 json.into_bytes()
             }
-            ResultFormat::ArrowIpc => {
-                ArrowIpcSerializer::serialize(&limited_batches)?
-            }
+            ResultFormat::ArrowIpc => ArrowIpcSerializer::serialize(&limited_batches)?,
             ResultFormat::Csv => {
                 let csv = self.serialize_csv(&limited_batches)?;
                 csv.into_bytes()
@@ -359,8 +355,8 @@ impl WasmConnection {
 
     /// Serialize to CSV format.
     fn serialize_csv(&self, batches: &[RecordBatch]) -> Result<String> {
-        use std::io::Cursor;
         use arrow::csv::WriterBuilder;
+        use std::io::Cursor;
 
         if batches.is_empty() {
             return Ok(String::new());
@@ -524,13 +520,8 @@ mod tests {
 
     #[test]
     fn test_wasm_query_result() {
-        let result = WasmQueryResult::new(
-            b"[{\"a\": 1}]".to_vec(),
-            ResultFormat::Json,
-            1,
-            1,
-        )
-        .with_time(100);
+        let result =
+            WasmQueryResult::new(b"[{\"a\": 1}]".to_vec(), ResultFormat::Json, 1, 1).with_time(100);
 
         assert_eq!(result.row_count, 1);
         assert_eq!(result.column_count, 1);

@@ -27,6 +27,7 @@ pub struct WasmMemoryManager {
 
 /// Information about an allocated buffer.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BufferInfo {
     /// Buffer ID
     id: u64,
@@ -75,30 +76,33 @@ impl WasmMemoryManager {
             if new_allocated <= current_peak {
                 break;
             }
-            if self.peak.compare_exchange(
-                current_peak,
-                new_allocated,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ).is_ok() {
+            if self
+                .peak
+                .compare_exchange(
+                    current_peak,
+                    new_allocated,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
                 break;
             }
         }
 
         // Track buffer
         if let Ok(mut buffers) = self.buffers.lock() {
-            buffers.insert(id, BufferInfo {
+            buffers.insert(
                 id,
-                size,
-                description: description.to_string(),
-            });
+                BufferInfo {
+                    id,
+                    size,
+                    description: description.to_string(),
+                },
+            );
         }
 
-        Ok(WasmBuffer {
-            id,
-            data,
-            size,
-        })
+        Ok(WasmBuffer { id, data, size })
     }
 
     /// Free a buffer.
@@ -138,7 +142,8 @@ impl WasmMemoryManager {
 
     /// Reset statistics (for testing).
     pub fn reset_stats(&self) {
-        self.peak.store(self.allocated.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.peak
+            .store(self.allocated.load(Ordering::SeqCst), Ordering::SeqCst);
     }
 
     /// Get memory statistics.
@@ -277,6 +282,7 @@ impl MemoryStats {
 }
 
 /// Scoped buffer that automatically frees when dropped.
+#[allow(dead_code)]
 pub struct ScopedBuffer<'a> {
     /// The buffer
     buffer: Option<WasmBuffer>,
@@ -284,6 +290,7 @@ pub struct ScopedBuffer<'a> {
     manager: &'a WasmMemoryManager,
 }
 
+#[allow(dead_code)]
 impl<'a> ScopedBuffer<'a> {
     /// Create a new scoped buffer.
     pub fn new(manager: &'a WasmMemoryManager, size: usize, description: &str) -> Result<Self> {

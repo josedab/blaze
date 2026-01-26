@@ -6,15 +6,15 @@
 //! - JSON
 //! - Arrow IPC
 
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
-use std::fs::File;
 
-use arrow::record_batch::RecordBatch;
-use arrow::util::pretty::print_batches;
-use arrow::json::LineDelimitedWriter;
 use arrow::csv::WriterBuilder as CsvWriterBuilder;
 use arrow::ipc::writer::FileWriter as IpcWriter;
+use arrow::json::LineDelimitedWriter;
+use arrow::record_batch::RecordBatch;
+use arrow::util::pretty::print_batches;
 
 use crate::error::{BlazeError, Result};
 
@@ -125,7 +125,7 @@ impl OutputWriter {
     }
 
     fn write_csv(&mut self, batches: &[RecordBatch]) -> Result<()> {
-        let schema = batches[0].schema();
+        let _schema = batches[0].schema();
 
         match &mut self.output {
             OutputTarget::Stdout => {
@@ -137,9 +137,7 @@ impl OutputWriter {
                 }
             }
             OutputTarget::File(file) => {
-                let mut writer = CsvWriterBuilder::new()
-                    .with_header(true)
-                    .build(file);
+                let mut writer = CsvWriterBuilder::new().with_header(true).build(file);
                 for batch in batches {
                     writer.write(batch)?;
                 }
@@ -211,9 +209,7 @@ pub fn format_batches(batches: &[RecordBatch], format: OutputFormat) -> Result<S
         OutputFormat::Csv => {
             let mut buf = Vec::new();
             {
-                let mut writer = CsvWriterBuilder::new()
-                    .with_header(true)
-                    .build(&mut buf);
+                let mut writer = CsvWriterBuilder::new().with_header(true).build(&mut buf);
                 for batch in batches {
                     writer.write(batch)?;
                 }
@@ -231,9 +227,9 @@ pub fn format_batches(batches: &[RecordBatch], format: OutputFormat) -> Result<S
             }
             Ok(String::from_utf8(buf).map_err(|e| BlazeError::internal(e.to_string()))?)
         }
-        OutputFormat::Arrow => {
-            Err(BlazeError::invalid_argument("Arrow IPC format cannot be converted to string"))
-        }
+        OutputFormat::Arrow => Err(BlazeError::invalid_argument(
+            "Arrow IPC format cannot be converted to string",
+        )),
     }
 }
 
@@ -262,10 +258,16 @@ mod tests {
 
     #[test]
     fn test_format_parsing() {
-        assert_eq!(OutputFormat::from_str("table").unwrap(), OutputFormat::Table);
+        assert_eq!(
+            OutputFormat::from_str("table").unwrap(),
+            OutputFormat::Table
+        );
         assert_eq!(OutputFormat::from_str("CSV").unwrap(), OutputFormat::Csv);
         assert_eq!(OutputFormat::from_str("json").unwrap(), OutputFormat::Json);
-        assert_eq!(OutputFormat::from_str("arrow").unwrap(), OutputFormat::Arrow);
+        assert_eq!(
+            OutputFormat::from_str("arrow").unwrap(),
+            OutputFormat::Arrow
+        );
         assert!(OutputFormat::from_str("unknown").is_err());
     }
 

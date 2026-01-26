@@ -592,22 +592,20 @@ fn serialize_batches_to_json(
     {
         let mut writer = arrow_json::ArrayWriter::new(&mut buf);
         for batch in batches {
-            writer.write(batch).map_err(|e| {
-                BlazeError::execution(format!("JSON serialization failed: {}", e))
-            })?;
+            writer
+                .write(batch)
+                .map_err(|e| BlazeError::execution(format!("JSON serialization failed: {}", e)))?;
         }
-        writer.finish().map_err(|e| {
-            BlazeError::execution(format!("JSON serialization failed: {}", e))
-        })?;
+        writer
+            .finish()
+            .map_err(|e| BlazeError::execution(format!("JSON serialization failed: {}", e)))?;
     }
 
     String::from_utf8(buf.into_inner())
         .map_err(|e| BlazeError::execution(format!("Invalid UTF-8: {}", e)))
 }
 
-fn parse_json_to_batches(
-    json: &str,
-) -> Result<Vec<arrow::record_batch::RecordBatch>, BlazeError> {
+fn parse_json_to_batches(json: &str) -> Result<Vec<arrow::record_batch::RecordBatch>, BlazeError> {
     use arrow_json::ReaderBuilder;
     use std::io::Cursor;
 

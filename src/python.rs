@@ -23,16 +23,16 @@
 //! print(result.to_pyarrow())  # Convert to PyArrow Table
 //! ```
 
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::exceptions::{PyRuntimeError, PyValueError, PyTypeError};
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::catalog::TableProvider;
-use crate::{Connection as RustConnection, ConnectionConfig, BlazeError, Result, ScalarValue};
 use crate::prepared::{PreparedStatement as RustPreparedStatement, PreparedStatementCache};
+use crate::{BlazeError, Connection as RustConnection, ConnectionConfig, Result, ScalarValue};
 use arrow::record_batch::RecordBatch;
 
 /// Convert a BlazeError to a Python exception.
@@ -216,7 +216,13 @@ impl PyQueryResult {
     fn column_names(&self) -> Vec<String> {
         self.batches
             .first()
-            .map(|b| b.schema().fields().iter().map(|f| f.name().clone()).collect())
+            .map(|b| {
+                b.schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -290,7 +296,9 @@ impl PyQueryResult {
         if self.batches.is_empty() {
             // Return empty table
             let empty_schema = pyarrow.call_method1("schema", (PyList::empty_bound(py),))?;
-            return Ok(pyarrow.call_method1("table", (PyDict::new_bound(py), empty_schema))?.into());
+            return Ok(pyarrow
+                .call_method1("table", (PyDict::new_bound(py), empty_schema))?
+                .into());
         }
 
         // Convert each RecordBatch to a PyArrow RecordBatch
@@ -419,12 +427,20 @@ pub struct PySchema {
 impl PySchema {
     /// Get the field names.
     fn names(&self) -> Vec<String> {
-        self.inner.fields().iter().map(|f| f.name().to_string()).collect()
+        self.inner
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect()
     }
 
     /// Get the field types as strings.
     fn types(&self) -> Vec<String> {
-        self.inner.fields().iter().map(|f| format!("{:?}", f.data_type())).collect()
+        self.inner
+            .fields()
+            .iter()
+            .map(|f| format!("{:?}", f.data_type()))
+            .collect()
     }
 
     /// Get the number of fields.
@@ -433,7 +449,8 @@ impl PySchema {
     }
 
     fn __repr__(&self) -> String {
-        let fields: Vec<String> = self.inner
+        let fields: Vec<String> = self
+            .inner
             .fields()
             .iter()
             .map(|f| format!("{}: {:?}", f.name(), f.data_type()))
@@ -547,7 +564,10 @@ fn array_value_to_python(
 }
 
 /// Convert Python arguments to ScalarValue vector.
-fn python_args_to_scalar_values(_py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Vec<ScalarValue>> {
+fn python_args_to_scalar_values(
+    _py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+) -> PyResult<Vec<ScalarValue>> {
     let mut result = Vec::with_capacity(args.len());
 
     for item in args.iter() {
@@ -601,7 +621,9 @@ fn dict_to_record_batches(_py: Python<'_>, data: &Bound<'_, PyDict>) -> PyResult
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 
     if data.is_empty() {
-        return Err(PyValueError::new_err("Cannot create table from empty dictionary"));
+        return Err(PyValueError::new_err(
+            "Cannot create table from empty dictionary",
+        ));
     }
 
     let mut fields = Vec::new();
@@ -609,7 +631,8 @@ fn dict_to_record_batches(_py: Python<'_>, data: &Bound<'_, PyDict>) -> PyResult
 
     for (key, value) in data.iter() {
         let col_name: String = key.extract()?;
-        let col_list = value.downcast::<PyList>()
+        let col_list = value
+            .downcast::<PyList>()
             .map_err(|_| PyTypeError::new_err("Dictionary values must be lists"))?;
 
         if col_list.is_empty() {
@@ -639,8 +662,8 @@ fn dict_to_record_batches(_py: Python<'_>, data: &Bound<'_, PyDict>) -> PyResult
     }
 
     let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema, arrays)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let batch =
+        RecordBatch::try_new(schema, arrays).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     Ok(vec![batch])
 }
@@ -725,9 +748,7 @@ fn infer_and_build_array(
             }
             Arc::new(builder.finish())
         }
-        ArrowDataType::Null => {
-            Arc::new(NullArray::new(list.len()))
-        }
+        ArrowDataType::Null => Arc::new(NullArray::new(list.len())),
         _ => unreachable!(),
     };
 
@@ -744,10 +765,8 @@ fn record_batch_to_pyarrow(
     let pa_fields = PyList::empty_bound(py);
     for field in batch.schema().fields() {
         let pa_type = arrow_type_to_pyarrow(pyarrow, field.data_type())?;
-        let pa_field = pyarrow.call_method1(
-            "field",
-            (field.name(), pa_type, field.is_nullable()),
-        )?;
+        let pa_field =
+            pyarrow.call_method1("field", (field.name(), pa_type, field.is_nullable()))?;
         pa_fields.append(pa_field)?;
     }
     let pa_schema = pyarrow.call_method1("schema", (pa_fields,))?;
@@ -821,105 +840,195 @@ fn arrow_array_to_pyarrow(
         DataType::Boolean => {
             let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
             let values: Vec<Option<bool>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Int8 => {
             let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
             let values: Vec<Option<i8>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Int16 => {
             let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
             let values: Vec<Option<i16>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Int32 => {
             let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             let values: Vec<Option<i32>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Int64 => {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             let values: Vec<Option<i64>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::UInt8 => {
             let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
             let values: Vec<Option<u8>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::UInt16 => {
             let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
             let values: Vec<Option<u16>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::UInt32 => {
             let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
             let values: Vec<Option<u32>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::UInt64 => {
             let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
             let values: Vec<Option<u64>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Float32 => {
             let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
             let values: Vec<Option<f32>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Float64 => {
             let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
             let values: Vec<Option<f64>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Utf8 => {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             let values: Vec<Option<&str>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::LargeUtf8 => {
             let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
             let values: Vec<Option<&str>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::Binary => {
             let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
             let values: Vec<Option<&[u8]>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
         DataType::LargeBinary => {
             let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
             let values: Vec<Option<&[u8]>> = (0..arr.len())
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
                 .collect();
             Ok(pa_array.call1((values,))?.into())
         }
@@ -930,8 +1039,10 @@ fn arrow_array_to_pyarrow(
                     if array.is_null(i) {
                         None
                     } else {
-                        Some(arrow::util::display::array_value_to_string(array, i)
-                            .unwrap_or_else(|_| "?".to_string()))
+                        Some(
+                            arrow::util::display::array_value_to_string(array, i)
+                                .unwrap_or_else(|_| "?".to_string()),
+                        )
                     }
                 })
                 .collect();
