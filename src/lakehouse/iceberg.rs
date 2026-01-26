@@ -10,14 +10,11 @@ use std::sync::Arc;
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::record_batch::RecordBatch;
 
+use super::{DataFileInfo, LakehouseTable, Operation, SnapshotId, TableProperties, TableVersion};
 use crate::catalog::TableProvider;
 use crate::error::{BlazeError, Result};
-use crate::types::{DataType, Field, Schema, TimeUnit};
 use crate::storage::ParquetTable;
-use super::{
-    LakehouseTable, TableProperties, DataFileInfo,
-    Operation, TableVersion, SnapshotId,
-};
+use crate::types::{DataType, Field, Schema, TimeUnit};
 
 /// Apache Iceberg table.
 pub struct IcebergTable {
@@ -60,7 +57,8 @@ impl IcebergTable {
         let metadata = Self::load_metadata(&metadata_path)?;
 
         // Extract table name from path
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("iceberg_table")
             .to_string();
@@ -93,7 +91,9 @@ impl IcebergTable {
 
         // Apply options
         if let Some(snapshot_id) = options.snapshot_id {
-            table.current_snapshot = table.snapshots.iter()
+            table.current_snapshot = table
+                .snapshots
+                .iter()
                 .find(|s| s.snapshot_id == snapshot_id)
                 .cloned();
         }
@@ -120,7 +120,8 @@ impl IcebergTable {
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("v") && name.ends_with(".metadata.json") {
-                        if let Ok(v) = name.trim_start_matches("v")
+                        if let Ok(v) = name
+                            .trim_start_matches("v")
                             .trim_end_matches(".metadata.json")
                             .parse::<i64>()
                         {
@@ -138,16 +139,16 @@ impl IcebergTable {
 
         // Load the latest metadata
         let metadata_file = if let Some(hint) = latest_version {
-            metadata_files.iter()
+            metadata_files
+                .iter()
                 .find(|(v, _)| *v == hint)
                 .map(|(_, p)| p.clone())
         } else {
             metadata_files.last().map(|(_, p)| p.clone())
         };
 
-        let metadata_file = metadata_file.ok_or_else(|| {
-            BlazeError::invalid_argument("No metadata files found")
-        })?;
+        let metadata_file =
+            metadata_file.ok_or_else(|| BlazeError::invalid_argument("No metadata files found"))?;
 
         // Parse metadata JSON
         let content = fs::read_to_string(&metadata_file)
@@ -162,16 +163,23 @@ impl IcebergTable {
             .map_err(|e| BlazeError::execution(format!("Failed to parse metadata: {}", e)))?;
 
         // Parse format version
-        let format_version = value.get("format-version")
+        let format_version = value
+            .get("format-version")
             .and_then(|v| v.as_i64())
             .unwrap_or(1) as i32;
 
         // Parse schema
         let schema = if let Some(schemas) = value.get("schemas").and_then(|s| s.as_array()) {
             // Get current schema
-            let current_schema_id = value.get("current-schema-id").and_then(|v| v.as_i64()).unwrap_or(0);
-            let schema_value = schemas.iter()
-                .find(|s| s.get("schema-id").and_then(|id| id.as_i64()).unwrap_or(-1) == current_schema_id)
+            let current_schema_id = value
+                .get("current-schema-id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let schema_value = schemas
+                .iter()
+                .find(|s| {
+                    s.get("schema-id").and_then(|id| id.as_i64()).unwrap_or(-1) == current_schema_id
+                })
                 .or_else(|| schemas.last());
 
             if let Some(sv) = schema_value {
@@ -186,12 +194,16 @@ impl IcebergTable {
         };
 
         // Parse partition spec
-        let partition_columns = if let Some(specs) = value.get("partition-specs").and_then(|s| s.as_array()) {
-            specs.first()
+        let partition_columns = if let Some(specs) =
+            value.get("partition-specs").and_then(|s| s.as_array())
+        {
+            specs
+                .first()
                 .and_then(|s| s.get("fields"))
                 .and_then(|f| f.as_array())
                 .map(|fields| {
-                    fields.iter()
+                    fields
+                        .iter()
                         .filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(String::from))
                         .collect()
                 })
@@ -202,7 +214,8 @@ impl IcebergTable {
 
         // Parse snapshots
         let snapshots = if let Some(snaps) = value.get("snapshots").and_then(|s| s.as_array()) {
-            snaps.iter()
+            snaps
+                .iter()
                 .filter_map(|s| Self::parse_snapshot(s).ok())
                 .collect()
         } else {
@@ -211,9 +224,8 @@ impl IcebergTable {
 
         // Get current snapshot
         let current_snapshot_id = value.get("current-snapshot-id").and_then(|v| v.as_i64());
-        let current_snapshot = current_snapshot_id.and_then(|id| {
-            snapshots.iter().find(|s| s.snapshot_id == id).cloned()
-        });
+        let current_snapshot = current_snapshot_id
+            .and_then(|id| snapshots.iter().find(|s| s.snapshot_id == id).cloned());
 
         // For now, data files would be read from manifests (simplified here)
         let data_files = Vec::new();
@@ -230,18 +242,21 @@ impl IcebergTable {
 
     /// Parse Iceberg schema.
     fn parse_iceberg_schema(value: &serde_json::Value) -> Result<Schema> {
-        let fields = value.get("fields")
+        let fields = value
+            .get("fields")
             .and_then(|f| f.as_array())
             .ok_or_else(|| BlazeError::execution("Invalid schema: no fields"))?;
 
         let mut result_fields = Vec::new();
         for field in fields {
-            let name = field.get("name")
+            let name = field
+                .get("name")
                 .and_then(|n| n.as_str())
                 .unwrap_or("_unknown")
                 .to_string();
 
-            let required = field.get("required")
+            let required = field
+                .get("required")
                 .and_then(|r| r.as_bool())
                 .unwrap_or(false);
 
@@ -266,7 +281,10 @@ impl IcebergTable {
                     "boolean" => DataType::Boolean,
                     "binary" => DataType::Binary,
                     "date" => DataType::Date32,
-                    "timestamp" | "timestamptz" => DataType::Timestamp { unit: TimeUnit::Microsecond, timezone: None },
+                    "timestamp" | "timestamptz" => DataType::Timestamp {
+                        unit: TimeUnit::Microsecond,
+                        timezone: None,
+                    },
                     "uuid" => DataType::Utf8,
                     _ if s.starts_with("decimal(") => {
                         // Parse decimal(precision, scale)
@@ -298,26 +316,29 @@ impl IcebergTable {
 
     /// Parse snapshot from JSON.
     fn parse_snapshot(value: &serde_json::Value) -> Result<IcebergSnapshot> {
-        let snapshot_id = value.get("snapshot-id")
+        let snapshot_id = value
+            .get("snapshot-id")
             .and_then(|v| v.as_i64())
             .ok_or_else(|| BlazeError::execution("Missing snapshot-id"))?;
 
-        let timestamp_ms = value.get("timestamp-ms")
+        let timestamp_ms = value
+            .get("timestamp-ms")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        let manifest_list = value.get("manifest-list")
+        let manifest_list = value
+            .get("manifest-list")
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let operation = value.get("summary")
+        let operation = value
+            .get("summary")
             .and_then(|s| s.get("operation"))
             .and_then(|o| o.as_str())
             .map(Operation::from_str)
             .unwrap_or(Operation::Unknown("UNKNOWN".to_string()));
 
-        let parent_id = value.get("parent-snapshot-id")
-            .and_then(|v| v.as_i64());
+        let parent_id = value.get("parent-snapshot-id").and_then(|v| v.as_i64());
 
         Ok(IcebergSnapshot {
             snapshot_id,
@@ -346,10 +367,13 @@ impl IcebergTable {
 
     /// Time travel to a specific snapshot.
     pub fn at_snapshot(&self, snapshot_id: i64) -> Result<Self> {
-        Self::open_with_options(&self.location, IcebergTableOptions {
-            snapshot_id: Some(snapshot_id),
-            ..Default::default()
-        })
+        Self::open_with_options(
+            &self.location,
+            IcebergTableOptions {
+                snapshot_id: Some(snapshot_id),
+                ..Default::default()
+            },
+        )
     }
 
     /// Get table history as snapshots.
@@ -380,7 +404,9 @@ impl LakehouseTable for IcebergTable {
     }
 
     fn list_versions(&self) -> Result<Vec<TableVersion>> {
-        Ok(self.snapshots.iter()
+        Ok(self
+            .snapshots
+            .iter()
             .map(|s| TableVersion::Snapshot(SnapshotId(s.snapshot_id)))
             .collect())
     }
@@ -401,9 +427,9 @@ impl LakehouseTable for IcebergTable {
     }
 
     fn read_version(&self, version: TableVersion) -> Result<Vec<RecordBatch>> {
-        let snapshot_id = version.as_snapshot().ok_or_else(|| {
-            BlazeError::invalid_argument("Iceberg requires snapshot ID")
-        })?;
+        let snapshot_id = version
+            .as_snapshot()
+            .ok_or_else(|| BlazeError::invalid_argument("Iceberg requires snapshot ID"))?;
 
         let table_at_snapshot = self.at_snapshot(snapshot_id.value())?;
         table_at_snapshot.read_all()
@@ -411,13 +437,17 @@ impl LakehouseTable for IcebergTable {
 
     fn read_as_of(&self, timestamp_ms: i64) -> Result<Vec<RecordBatch>> {
         // Find snapshot at or before timestamp
-        let snapshot = self.snapshots.iter()
+        let snapshot = self
+            .snapshots
+            .iter()
             .filter(|s| s.timestamp_ms <= timestamp_ms)
             .max_by_key(|s| s.timestamp_ms)
-            .ok_or_else(|| BlazeError::invalid_argument(format!(
-                "No snapshot found for timestamp {}",
-                timestamp_ms
-            )))?;
+            .ok_or_else(|| {
+                BlazeError::invalid_argument(format!(
+                    "No snapshot found for timestamp {}",
+                    timestamp_ms
+                ))
+            })?;
 
         let table_at_snapshot = self.at_snapshot(snapshot.snapshot_id)?;
         table_at_snapshot.read_all()
@@ -521,8 +551,7 @@ mod tests {
 
     #[test]
     fn test_iceberg_table_options() {
-        let opts = IcebergTableOptions::new()
-            .with_snapshot(12345);
+        let opts = IcebergTableOptions::new().with_snapshot(12345);
 
         assert_eq!(opts.snapshot_id, Some(12345));
     }

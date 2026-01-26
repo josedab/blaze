@@ -339,16 +339,21 @@ mod tests {
         assert_eq!(Operation::from_str("append"), Operation::Append);
         assert_eq!(Operation::from_str("WRITE"), Operation::Append);
         assert_eq!(Operation::from_str("delete"), Operation::Delete);
-        assert_eq!(Operation::from_str("custom"), Operation::Unknown("custom".to_string()));
+        assert_eq!(
+            Operation::from_str("custom"),
+            Operation::Unknown("custom".to_string())
+        );
     }
 
     #[test]
     fn test_snapshot_creation() {
         let snapshot = Snapshot::new(1, 1234567890000, Operation::Create)
             .with_version(0)
-            .with_summary(SnapshotSummary::new()
-                .with_added_files(5)
-                .with_added_records(1000));
+            .with_summary(
+                SnapshotSummary::new()
+                    .with_added_files(5)
+                    .with_added_records(1000),
+            );
 
         assert_eq!(snapshot.id.value(), 1);
         assert_eq!(snapshot.version, Some(0));
