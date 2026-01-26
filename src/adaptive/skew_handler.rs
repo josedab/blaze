@@ -209,12 +209,18 @@ impl SkewMitigation {
 
     /// Create a split mitigation.
     pub fn split(partition_ids: Vec<usize>, split_factor: usize) -> Self {
-        SkewMitigation::Split { partition_ids, split_factor }
+        SkewMitigation::Split {
+            partition_ids,
+            split_factor,
+        }
     }
 
     /// Create a salt mitigation.
     pub fn salt(partition_ids: Vec<usize>, salt_factor: usize) -> Self {
-        SkewMitigation::Salt { partition_ids, salt_factor }
+        SkewMitigation::Salt {
+            partition_ids,
+            salt_factor,
+        }
     }
 }
 
@@ -259,9 +265,24 @@ mod tests {
             total_rows: 1200,
             total_bytes: 12000,
             partitions: vec![
-                PartitionStats { partition_id: 0, row_count: 100, byte_size: 1000, null_count: 0 },
-                PartitionStats { partition_id: 1, row_count: 100, byte_size: 1000, null_count: 0 },
-                PartitionStats { partition_id: 2, row_count: 1000, byte_size: 10000, null_count: 0 }, // Skewed
+                PartitionStats {
+                    partition_id: 0,
+                    row_count: 100,
+                    byte_size: 1000,
+                    null_count: 0,
+                },
+                PartitionStats {
+                    partition_id: 1,
+                    row_count: 100,
+                    byte_size: 1000,
+                    null_count: 0,
+                },
+                PartitionStats {
+                    partition_id: 2,
+                    row_count: 1000,
+                    byte_size: 10000,
+                    null_count: 0,
+                }, // Skewed
             ],
             execution_time_ms: 0,
         }
@@ -273,9 +294,24 @@ mod tests {
             total_rows: 300,
             total_bytes: 3000,
             partitions: vec![
-                PartitionStats { partition_id: 0, row_count: 100, byte_size: 1000, null_count: 0 },
-                PartitionStats { partition_id: 1, row_count: 100, byte_size: 1000, null_count: 0 },
-                PartitionStats { partition_id: 2, row_count: 100, byte_size: 1000, null_count: 0 },
+                PartitionStats {
+                    partition_id: 0,
+                    row_count: 100,
+                    byte_size: 1000,
+                    null_count: 0,
+                },
+                PartitionStats {
+                    partition_id: 1,
+                    row_count: 100,
+                    byte_size: 1000,
+                    null_count: 0,
+                },
+                PartitionStats {
+                    partition_id: 2,
+                    row_count: 100,
+                    byte_size: 1000,
+                    null_count: 0,
+                },
             ],
             execution_time_ms: 0,
         }
@@ -305,8 +341,7 @@ mod tests {
 
     #[test]
     fn test_skew_handler() {
-        let config = AdaptiveConfig::default()
-            .with_skew_threshold(5.0);
+        let config = AdaptiveConfig::default().with_skew_threshold(5.0);
         let handler = SkewHandler::new(config);
 
         let stats = make_stats_with_skew();

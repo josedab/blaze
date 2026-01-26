@@ -6,9 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-
-use crate::error::{BlazeError, Result};
 use super::memory::{GpuBuffer, GpuRecordBatch};
+use crate::error::{BlazeError, Result};
 
 /// Trait for GPU compute kernels.
 pub trait GpuKernel: Send + Sync + std::fmt::Debug {
@@ -414,8 +413,8 @@ impl GpuKernel for JoinKernel {
 
         // Estimate join output (pessimistic: left * right / 100)
         let output_rows = (left.num_rows() * right.num_rows() / 100).max(left.num_rows());
-        let row_width = left.size() / left.num_rows().max(1)
-            + right.size() / right.num_rows().max(1);
+        let row_width =
+            left.size() / left.num_rows().max(1) + right.size() / right.num_rows().max(1);
         let output_bytes = output_rows * row_width;
 
         Ok(KernelResult::new(output_rows, output_bytes).with_time(1000))

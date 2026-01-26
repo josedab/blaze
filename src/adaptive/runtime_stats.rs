@@ -81,12 +81,20 @@ impl StageStats {
 
     /// Get the maximum partition size in bytes.
     pub fn max_partition_size(&self) -> usize {
-        self.partitions.iter().map(|p| p.byte_size).max().unwrap_or(0)
+        self.partitions
+            .iter()
+            .map(|p| p.byte_size)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Get the minimum partition size in bytes.
     pub fn min_partition_size(&self) -> usize {
-        self.partitions.iter().map(|p| p.byte_size).min().unwrap_or(0)
+        self.partitions
+            .iter()
+            .map(|p| p.byte_size)
+            .min()
+            .unwrap_or(0)
     }
 
     /// Get the median partition size in bytes.
@@ -233,7 +241,10 @@ impl StatsCollector {
 
     /// Get stage statistics.
     pub fn get_stage(&self, stage_id: usize) -> Option<StageStats> {
-        self.stats.read().ok().and_then(|s| s.get_stage(stage_id).cloned())
+        self.stats
+            .read()
+            .ok()
+            .and_then(|s| s.get_stage(stage_id).cloned())
     }
 
     /// Update peak memory.
@@ -318,9 +329,24 @@ mod tests {
         let mut stage = StageStats::new(0);
         stage.total_bytes = 3000;
         stage.partitions = vec![
-            PartitionStats { partition_id: 0, row_count: 100, byte_size: 1000, null_count: 0 },
-            PartitionStats { partition_id: 1, row_count: 100, byte_size: 500, null_count: 0 },
-            PartitionStats { partition_id: 2, row_count: 100, byte_size: 1500, null_count: 0 },
+            PartitionStats {
+                partition_id: 0,
+                row_count: 100,
+                byte_size: 1000,
+                null_count: 0,
+            },
+            PartitionStats {
+                partition_id: 1,
+                row_count: 100,
+                byte_size: 500,
+                null_count: 0,
+            },
+            PartitionStats {
+                partition_id: 2,
+                row_count: 100,
+                byte_size: 1500,
+                null_count: 0,
+            },
         ];
 
         assert_eq!(stage.avg_partition_size(), 1000);
@@ -333,9 +359,24 @@ mod tests {
     fn test_stage_stats_skew_detection() {
         let mut stage = StageStats::new(0);
         stage.partitions = vec![
-            PartitionStats { partition_id: 0, row_count: 100, byte_size: 100, null_count: 0 },
-            PartitionStats { partition_id: 1, row_count: 100, byte_size: 100, null_count: 0 },
-            PartitionStats { partition_id: 2, row_count: 100, byte_size: 1000, null_count: 0 }, // Skewed
+            PartitionStats {
+                partition_id: 0,
+                row_count: 100,
+                byte_size: 100,
+                null_count: 0,
+            },
+            PartitionStats {
+                partition_id: 1,
+                row_count: 100,
+                byte_size: 100,
+                null_count: 0,
+            },
+            PartitionStats {
+                partition_id: 2,
+                row_count: 100,
+                byte_size: 1000,
+                null_count: 0,
+            }, // Skewed
         ];
 
         assert!(stage.has_skew(5.0)); // 1000/100 = 10x > 5x threshold

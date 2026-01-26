@@ -19,18 +19,18 @@
 //! - `wgpu`: Enable cross-platform WebGPU support (default fallback)
 
 mod device;
-mod memory;
-mod kernels;
 mod executor;
+mod kernels;
+mod memory;
 
-pub use device::{GpuDevice, GpuBackend, GpuCapabilities, DeviceManager};
+pub use device::{DeviceManager, GpuBackend, GpuCapabilities, GpuDevice};
+pub use executor::{GpuExecutionPlan, GpuExecutor, GpuOperator};
+pub use kernels::{AggregateKernel, FilterKernel, GpuKernel, JoinKernel, KernelRegistry};
 pub use memory::{GpuBuffer, GpuMemoryPool, MemoryTransfer, TransferDirection};
-pub use kernels::{GpuKernel, KernelRegistry, FilterKernel, AggregateKernel, JoinKernel};
-pub use executor::{GpuExecutor, GpuExecutionPlan, GpuOperator};
 
-use std::sync::Arc;
-use arrow::record_batch::RecordBatch;
 use crate::error::{BlazeError, Result};
+use arrow::record_batch::RecordBatch;
+use std::sync::Arc;
 
 /// Configuration for GPU acceleration.
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ impl Default for GpuConfig {
         Self {
             enabled: true,
             preferred_backend: None,
-            min_gpu_batch_size: 64 * 1024, // 64 KB minimum
+            min_gpu_batch_size: 64 * 1024,          // 64 KB minimum
             max_gpu_memory: 4 * 1024 * 1024 * 1024, // 4 GB
             async_transfers: true,
             num_streams: 4,
@@ -164,7 +164,9 @@ impl GpuContext {
 
     /// Get GPU capabilities.
     pub fn capabilities(&self) -> Option<&GpuCapabilities> {
-        self.device_manager.active_device().map(|d| d.capabilities())
+        self.device_manager
+            .active_device()
+            .map(|d| d.capabilities())
     }
 
     /// Check if a batch should be processed on GPU based on size.
@@ -178,7 +180,11 @@ impl GpuContext {
     }
 
     /// Execute a query operation on GPU.
-    pub fn execute(&self, plan: &GpuExecutionPlan, input: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
+    pub fn execute(
+        &self,
+        plan: &GpuExecutionPlan,
+        input: &[RecordBatch],
+    ) -> Result<Vec<RecordBatch>> {
         if !self.is_available() {
             return Err(BlazeError::execution("GPU not available"));
         }

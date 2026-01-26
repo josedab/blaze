@@ -2,10 +2,10 @@
 //!
 //! This module generates SQL from parsed natural language queries.
 
-use crate::error::{BlazeError, Result};
+use super::intent::{AggregateType, FilterOperator, QueryIntent};
 use super::parser::ParsedQuery;
-use super::intent::{QueryIntent, AggregateType, FilterOperator};
 use super::SchemaContext;
+use crate::error::{BlazeError, Result};
 
 /// SQL generator configuration.
 #[derive(Debug, Clone)]
@@ -88,18 +88,31 @@ impl SqlGenerator {
         schema_context: Option<&SchemaContext>,
     ) -> Result<String> {
         let sql = match intent {
-            QueryIntent::Select { table, columns, filters } => {
-                self.generate_select(table, columns, filters, schema_context)?
-            }
-            QueryIntent::Aggregate { table, aggregates, group_by, filters } => {
-                self.generate_aggregate(table, aggregates, group_by.as_deref(), filters, schema_context)?
-            }
+            QueryIntent::Select {
+                table,
+                columns,
+                filters,
+            } => self.generate_select(table, columns, filters, schema_context)?,
+            QueryIntent::Aggregate {
+                table,
+                aggregates,
+                group_by,
+                filters,
+            } => self.generate_aggregate(
+                table,
+                aggregates,
+                group_by.as_deref(),
+                filters,
+                schema_context,
+            )?,
             QueryIntent::Count { table, filters } => {
                 self.generate_count(table, filters, schema_context)?
             }
-            QueryIntent::Join { left_table, right_table, join_columns } => {
-                self.generate_join(left_table, right_table, join_columns, schema_context)?
-            }
+            QueryIntent::Join {
+                left_table,
+                right_table,
+                join_columns,
+            } => self.generate_join(left_table, right_table, join_columns, schema_context)?,
         };
 
         Ok(sql)
@@ -131,7 +144,11 @@ impl SqlGenerator {
         // FROM clause
         let from_kw = self.keyword("FROM");
         let resolved_table = self.resolve_table(table, schema_context);
-        parts.push(format!("{} {}", from_kw, self.quote_identifier(&resolved_table)));
+        parts.push(format!(
+            "{} {}",
+            from_kw,
+            self.quote_identifier(&resolved_table)
+        ));
 
         // WHERE clause
         if !filters.is_empty() {
@@ -186,7 +203,11 @@ impl SqlGenerator {
         // FROM clause
         let from_kw = self.keyword("FROM");
         let resolved_table = self.resolve_table(table, schema_context);
-        parts.push(format!("{} {}", from_kw, self.quote_identifier(&resolved_table)));
+        parts.push(format!(
+            "{} {}",
+            from_kw,
+            self.quote_identifier(&resolved_table)
+        ));
 
         // WHERE clause
         if !filters.is_empty() {
@@ -227,7 +248,11 @@ impl SqlGenerator {
         // FROM clause
         let from_kw = self.keyword("FROM");
         let resolved_table = self.resolve_table(table, schema_context);
-        parts.push(format!("{} {}", from_kw, self.quote_identifier(&resolved_table)));
+        parts.push(format!(
+            "{} {}",
+            from_kw,
+            self.quote_identifier(&resolved_table)
+        ));
 
         // WHERE clause
         if !filters.is_empty() {
@@ -262,7 +287,11 @@ impl SqlGenerator {
         // FROM left_table
         let from_kw = self.keyword("FROM");
         let resolved_left = self.resolve_table(left_table, schema_context);
-        parts.push(format!("{} {}", from_kw, self.quote_identifier(&resolved_left)));
+        parts.push(format!(
+            "{} {}",
+            from_kw,
+            self.quote_identifier(&resolved_left)
+        ));
 
         // JOIN right_table
         let join_kw = self.keyword("JOIN");
@@ -270,7 +299,11 @@ impl SqlGenerator {
 
         if join_columns.is_empty() {
             // Natural join or cross join
-            parts.push(format!("{} {}", join_kw, self.quote_identifier(&resolved_right)));
+            parts.push(format!(
+                "{} {}",
+                join_kw,
+                self.quote_identifier(&resolved_right)
+            ));
         } else {
             // Join with ON clause
             let on_kw = self.keyword("ON");
@@ -320,7 +353,11 @@ impl SqlGenerator {
             .map(|(col, op, val)| self.format_condition(col, op, val))
             .collect();
 
-        Ok(format!("{} {}", where_kw, conditions.join(&format!(" {} ", and_kw))))
+        Ok(format!(
+            "{} {}",
+            where_kw,
+            conditions.join(&format!(" {} ", and_kw))
+        ))
     }
 
     /// Format a single condition.
@@ -335,11 +372,14 @@ impl SqlGenerator {
             FilterOperator::In | FilterOperator::NotIn => {
                 // Value should be a comma-separated list
                 let values: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
-                let formatted_values: Vec<String> = values
-                    .iter()
-                    .map(|v| self.format_value(v))
-                    .collect();
-                format!("{} {} ({})", quoted_col, op_str, formatted_values.join(", "))
+                let formatted_values: Vec<String> =
+                    values.iter().map(|v| self.format_value(v)).collect();
+                format!(
+                    "{} {} ({})",
+                    quoted_col,
+                    op_str,
+                    formatted_values.join(", ")
+                )
             }
             FilterOperator::Between => {
                 // Value should be "low AND high"
@@ -418,15 +458,25 @@ impl SqlGenerator {
         }
 
         if self.config.quote_identifiers {
-            format!("{}{}{}", self.config.quote_char, identifier, self.config.quote_char)
+            format!(
+                "{}{}{}",
+                self.config.quote_char, identifier, self.config.quote_char
+            )
         } else {
             // Check if identifier needs quoting (contains spaces, special chars, etc.)
             let needs_quoting = identifier.contains(' ')
                 || identifier.contains('-')
-                || identifier.chars().next().map(|c| c.is_numeric()).unwrap_or(false);
+                || identifier
+                    .chars()
+                    .next()
+                    .map(|c| c.is_numeric())
+                    .unwrap_or(false);
 
             if needs_quoting {
-                format!("{}{}{}", self.config.quote_char, identifier, self.config.quote_char)
+                format!(
+                    "{}{}{}",
+                    self.config.quote_char, identifier, self.config.quote_char
+                )
             } else {
                 identifier.to_string()
             }
@@ -471,7 +521,11 @@ pub struct SqlTemplate {
 
 impl SqlTemplate {
     /// Create a new template.
-    pub fn new(name: impl Into<String>, pattern: impl Into<String>, parameters: Vec<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        pattern: impl Into<String>,
+        parameters: Vec<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             pattern: pattern.into(),
@@ -485,9 +539,9 @@ impl SqlTemplate {
 
         for param in &self.parameters {
             let placeholder = format!("{{{}}}", param);
-            let value = params
-                .get(param)
-                .ok_or_else(|| BlazeError::invalid_argument(format!("Missing parameter: {}", param)))?;
+            let value = params.get(param).ok_or_else(|| {
+                BlazeError::invalid_argument(format!("Missing parameter: {}", param))
+            })?;
             result = result.replace(&placeholder, value);
         }
 
@@ -526,7 +580,11 @@ pub fn common_templates() -> Vec<SqlTemplate> {
         SqlTemplate::new(
             "top_n",
             "SELECT * FROM {table} ORDER BY {order_column} DESC LIMIT {limit}",
-            vec!["table".to_string(), "order_column".to_string(), "limit".to_string()],
+            vec![
+                "table".to_string(),
+                "order_column".to_string(),
+                "limit".to_string(),
+            ],
         ),
     ]
 }
@@ -588,9 +646,11 @@ mod tests {
         let intent = QueryIntent::Select {
             table: "users".to_string(),
             columns: vec!["*".to_string()],
-            filters: vec![
-                ("age".to_string(), FilterOperator::GreaterThan, "25".to_string()),
-            ],
+            filters: vec![(
+                "age".to_string(),
+                FilterOperator::GreaterThan,
+                "25".to_string(),
+            )],
         };
 
         let parsed = make_parsed_query("users");
@@ -619,9 +679,7 @@ mod tests {
         let generator = SqlGenerator::default();
         let intent = QueryIntent::Aggregate {
             table: "orders".to_string(),
-            aggregates: vec![
-                (AggregateType::Sum, "amount".to_string()),
-            ],
+            aggregates: vec![(AggregateType::Sum, "amount".to_string())],
             group_by: Some("customer_id".to_string()),
             filters: vec![],
         };
@@ -640,9 +698,7 @@ mod tests {
         let intent = QueryIntent::Join {
             left_table: "orders".to_string(),
             right_table: "customers".to_string(),
-            join_columns: vec![
-                ("customer_id".to_string(), "id".to_string()),
-            ],
+            join_columns: vec![("customer_id".to_string(), "id".to_string())],
         };
 
         let parsed = make_parsed_query("orders");
@@ -682,9 +738,7 @@ mod tests {
         let intent = QueryIntent::Select {
             table: "users".to_string(),
             columns: vec!["*".to_string()],
-            filters: vec![
-                ("name".to_string(), FilterOperator::Like, "John".to_string()),
-            ],
+            filters: vec![("name".to_string(), FilterOperator::Like, "John".to_string())],
         };
 
         let parsed = make_parsed_query("users");
@@ -714,9 +768,11 @@ mod tests {
         let intent = QueryIntent::Select {
             table: "users".to_string(),
             columns: vec!["*".to_string()],
-            filters: vec![
-                ("name".to_string(), FilterOperator::Equals, "O'Brien".to_string()),
-            ],
+            filters: vec![(
+                "name".to_string(),
+                FilterOperator::Equals,
+                "O'Brien".to_string(),
+            )],
         };
 
         let parsed = make_parsed_query("users");
@@ -731,9 +787,11 @@ mod tests {
         let intent = QueryIntent::Select {
             table: "orders".to_string(),
             columns: vec!["*".to_string()],
-            filters: vec![
-                ("status".to_string(), FilterOperator::In, "pending, shipped".to_string()),
-            ],
+            filters: vec![(
+                "status".to_string(),
+                FilterOperator::In,
+                "pending, shipped".to_string(),
+            )],
         };
 
         let parsed = make_parsed_query("orders");

@@ -143,12 +143,19 @@ impl SimdVectorOps<i32> for SimdVector<i32> {
 
     fn add(&self, other: &Self) -> Self {
         let mut result = vec![0i32; self.len()];
-        simd_add_i32(&self.data, &other.data, &mut result, SimdLevel::best_available());
+        simd_add_i32(
+            &self.data,
+            &other.data,
+            &mut result,
+            SimdLevel::best_available(),
+        );
         Self::new(result)
     }
 
     fn sub(&self, other: &Self) -> Self {
-        let result: Vec<i32> = self.data.iter()
+        let result: Vec<i32> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a.wrapping_sub(*b))
             .collect();
@@ -156,7 +163,9 @@ impl SimdVectorOps<i32> for SimdVector<i32> {
     }
 
     fn mul(&self, other: &Self) -> Self {
-        let result: Vec<i32> = self.data.iter()
+        let result: Vec<i32> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a.wrapping_mul(*b))
             .collect();
@@ -214,7 +223,9 @@ impl SimdVectorOps<i64> for SimdVector<i64> {
     }
 
     fn add(&self, other: &Self) -> Self {
-        let result: Vec<i64> = self.data.iter()
+        let result: Vec<i64> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a.wrapping_add(*b))
             .collect();
@@ -222,7 +233,9 @@ impl SimdVectorOps<i64> for SimdVector<i64> {
     }
 
     fn sub(&self, other: &Self) -> Self {
-        let result: Vec<i64> = self.data.iter()
+        let result: Vec<i64> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a.wrapping_sub(*b))
             .collect();
@@ -230,7 +243,9 @@ impl SimdVectorOps<i64> for SimdVector<i64> {
     }
 
     fn mul(&self, other: &Self) -> Self {
-        let result: Vec<i64> = self.data.iter()
+        let result: Vec<i64> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a.wrapping_mul(*b))
             .collect();
@@ -266,7 +281,9 @@ impl SimdVectorOps<f64> for SimdVector<f64> {
     }
 
     fn add(&self, other: &Self) -> Self {
-        let result: Vec<f64> = self.data.iter()
+        let result: Vec<f64> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a + b)
             .collect();
@@ -274,7 +291,9 @@ impl SimdVectorOps<f64> for SimdVector<f64> {
     }
 
     fn sub(&self, other: &Self) -> Self {
-        let result: Vec<f64> = self.data.iter()
+        let result: Vec<f64> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a - b)
             .collect();
@@ -282,7 +301,9 @@ impl SimdVectorOps<f64> for SimdVector<f64> {
     }
 
     fn mul(&self, other: &Self) -> Self {
-        let result: Vec<f64> = self.data.iter()
+        let result: Vec<f64> = self
+            .data
+            .iter()
             .zip(other.data.iter())
             .map(|(a, b)| a * b)
             .collect();
@@ -316,13 +337,9 @@ pub fn simd_add_i32(a: &[i32], b: &[i32], result: &mut [i32], level: SimdLevel) 
 
     match level {
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Avx2 if len >= 8 => {
-            unsafe { simd_add_i32_avx2(a, b, result, len) }
-        }
+        SimdLevel::Avx2 if len >= 8 => unsafe { simd_add_i32_avx2(a, b, result, len) },
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Sse42 if len >= 4 => {
-            unsafe { simd_add_i32_sse42(a, b, result, len) }
-        }
+        SimdLevel::Sse42 if len >= 4 => unsafe { simd_add_i32_sse42(a, b, result, len) },
         _ => {
             // Scalar fallback
             for i in 0..len {
@@ -382,9 +399,7 @@ unsafe fn simd_add_i32_sse42(a: &[i32], b: &[i32], result: &mut [i32], len: usiz
 pub fn simd_filter_gt_i32(data: &[i32], threshold: i32, level: SimdLevel) -> Vec<bool> {
     match level {
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Avx2 if data.len() >= 8 => {
-            unsafe { simd_filter_gt_i32_avx2(data, threshold) }
-        }
+        SimdLevel::Avx2 if data.len() >= 8 => unsafe { simd_filter_gt_i32_avx2(data, threshold) },
         _ => {
             // Scalar fallback
             data.iter().map(|&x| x > threshold).collect()
@@ -428,13 +443,9 @@ unsafe fn simd_filter_gt_i32_avx2(data: &[i32], threshold: i32) -> Vec<bool> {
 pub fn simd_sum_i64(data: &[i64], level: SimdLevel) -> i64 {
     match level {
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Avx2 if data.len() >= 4 => {
-            unsafe { simd_sum_i64_avx2(data) }
-        }
+        SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_sum_i64_avx2(data) },
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Sse42 if data.len() >= 2 => {
-            unsafe { simd_sum_i64_sse42(data) }
-        }
+        SimdLevel::Sse42 if data.len() >= 2 => unsafe { simd_sum_i64_sse42(data) },
         _ => {
             // Scalar fallback
             data.iter().sum()
@@ -504,13 +515,9 @@ unsafe fn simd_sum_i64_sse42(data: &[i64]) -> i64 {
 pub fn simd_sum_f64(data: &[f64], level: SimdLevel) -> f64 {
     match level {
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Avx2 if data.len() >= 4 => {
-            unsafe { simd_sum_f64_avx2(data) }
-        }
+        SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_sum_f64_avx2(data) },
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Sse42 if data.len() >= 2 => {
-            unsafe { simd_sum_f64_sse42(data) }
-        }
+        SimdLevel::Sse42 if data.len() >= 2 => unsafe { simd_sum_f64_sse42(data) },
         _ => {
             // Scalar fallback
             data.iter().sum()
@@ -584,9 +591,7 @@ pub fn simd_min_i64(data: &[i64], level: SimdLevel) -> i64 {
 
     match level {
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Avx2 if data.len() >= 4 => {
-            unsafe { simd_min_i64_avx2(data) }
-        }
+        SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_min_i64_avx2(data) },
         _ => {
             // Scalar fallback
             *data.iter().min().unwrap()
@@ -617,9 +622,7 @@ pub fn simd_max_i64(data: &[i64], level: SimdLevel) -> i64 {
 
     match level {
         #[cfg(target_arch = "x86_64")]
-        SimdLevel::Avx2 if data.len() >= 4 => {
-            unsafe { simd_max_i64_avx2(data) }
-        }
+        SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_max_i64_avx2(data) },
         _ => {
             // Scalar fallback
             *data.iter().max().unwrap()

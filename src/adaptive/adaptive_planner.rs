@@ -113,11 +113,7 @@ pub trait AdaptiveRule: Send + Sync {
     fn name(&self) -> &str;
 
     /// Check if this rule is applicable and return a decision.
-    fn evaluate(
-        &self,
-        stats: &StageStats,
-        config: &AdaptiveConfig,
-    ) -> Option<AdaptiveDecision>;
+    fn evaluate(&self, stats: &StageStats, config: &AdaptiveConfig) -> Option<AdaptiveDecision>;
 }
 
 /// Rule to convert sort-merge join to broadcast join for small datasets.
@@ -128,13 +124,11 @@ impl AdaptiveRule for BroadcastJoinRule {
         "BroadcastJoinRule"
     }
 
-    fn evaluate(
-        &self,
-        stats: &StageStats,
-        config: &AdaptiveConfig,
-    ) -> Option<AdaptiveDecision> {
+    fn evaluate(&self, stats: &StageStats, config: &AdaptiveConfig) -> Option<AdaptiveDecision> {
         if config.dynamic_join_selection && stats.total_bytes < config.broadcast_join_threshold {
-            Some(AdaptiveDecision::UseBroadcastJoin { stage_id: stats.stage_id })
+            Some(AdaptiveDecision::UseBroadcastJoin {
+                stage_id: stats.stage_id,
+            })
         } else {
             None
         }
@@ -149,13 +143,10 @@ impl AdaptiveRule for PartitionPruningRule {
         "PartitionPruningRule"
     }
 
-    fn evaluate(
-        &self,
-        stats: &StageStats,
-        _config: &AdaptiveConfig,
-    ) -> Option<AdaptiveDecision> {
+    fn evaluate(&self, stats: &StageStats, _config: &AdaptiveConfig) -> Option<AdaptiveDecision> {
         // Find empty partitions
-        let empty_partitions: Vec<usize> = stats.partitions
+        let empty_partitions: Vec<usize> = stats
+            .partitions
             .iter()
             .filter(|p| p.row_count == 0)
             .map(|p| p.partition_id)
@@ -180,11 +171,7 @@ impl AdaptiveRule for JoinReorderRule {
         "JoinReorderRule"
     }
 
-    fn evaluate(
-        &self,
-        _stats: &StageStats,
-        _config: &AdaptiveConfig,
-    ) -> Option<AdaptiveDecision> {
+    fn evaluate(&self, _stats: &StageStats, _config: &AdaptiveConfig) -> Option<AdaptiveDecision> {
         // Would check if this is a multi-join query
         // For now, return None as this is a placeholder
         None
@@ -201,9 +188,15 @@ pub enum AdaptiveDecision {
     /// Coalesce partitions
     CoalescePartitions { stage_id: usize, target: usize },
     /// Split skewed partitions
-    SplitSkewedPartitions { stage_id: usize, partitions: Vec<usize> },
+    SplitSkewedPartitions {
+        stage_id: usize,
+        partitions: Vec<usize>,
+    },
     /// Prune empty partitions
-    PrunePartitions { stage_id: usize, empty_partitions: Vec<usize> },
+    PrunePartitions {
+        stage_id: usize,
+        empty_partitions: Vec<usize>,
+    },
 }
 
 impl AdaptiveDecision {
@@ -219,7 +212,10 @@ impl AdaptiveDecision {
 
     /// Create a split skew decision.
     pub fn split_skew(stage_id: usize, partitions: Vec<usize>) -> Self {
-        AdaptiveDecision::SplitSkewedPartitions { stage_id, partitions }
+        AdaptiveDecision::SplitSkewedPartitions {
+            stage_id,
+            partitions,
+        }
     }
 }
 
@@ -265,13 +261,18 @@ mod tests {
         assert_eq!(decision, AdaptiveDecision::UseBroadcastJoin { stage_id: 0 });
 
         let decision = AdaptiveDecision::coalesce(1, 4);
-        assert_eq!(decision, AdaptiveDecision::CoalescePartitions { stage_id: 1, target: 4 });
+        assert_eq!(
+            decision,
+            AdaptiveDecision::CoalescePartitions {
+                stage_id: 1,
+                target: 4
+            }
+        );
     }
 
     #[test]
     fn test_broadcast_join_rule_applicability() {
-        let config = AdaptiveConfig::default()
-            .with_broadcast_threshold(1024);
+        let config = AdaptiveConfig::default().with_broadcast_threshold(1024);
 
         let rule = BroadcastJoinRule;
 

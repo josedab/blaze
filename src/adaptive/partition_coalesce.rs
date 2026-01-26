@@ -3,8 +3,8 @@
 //! This module provides functionality to coalesce small partitions into
 //! larger ones to reduce overhead and improve performance.
 
-use arrow::record_batch::RecordBatch;
 use arrow::compute::concat_batches;
+use arrow::record_batch::RecordBatch;
 
 use crate::error::{BlazeError, Result};
 
@@ -51,11 +51,7 @@ impl PartitionCoalescer {
     }
 
     /// Create a coalesce plan that groups partitions.
-    pub fn plan_coalesce(
-        &self,
-        stats: &StageStats,
-        target_partitions: usize,
-    ) -> CoalescePlan {
+    pub fn plan_coalesce(&self, stats: &StageStats, target_partitions: usize) -> CoalescePlan {
         let partitions: Vec<PartitionStats> = stats.partitions.clone();
         let target = target_partitions.max(1);
 
@@ -64,16 +60,12 @@ impl PartitionCoalescer {
         sorted_partitions.sort_by(|a, b| b.byte_size.cmp(&a.byte_size));
 
         // Use greedy bin packing
-        let mut groups: Vec<PartitionGroup> = (0..target)
-            .map(|id| PartitionGroup::new(id))
-            .collect();
+        let mut groups: Vec<PartitionGroup> =
+            (0..target).map(|id| PartitionGroup::new(id)).collect();
 
         for partition in sorted_partitions {
             // Find the group with the smallest total size
-            let min_group = groups
-                .iter_mut()
-                .min_by_key(|g| g.total_bytes)
-                .unwrap();
+            let min_group = groups.iter_mut().min_by_key(|g| g.total_bytes).unwrap();
 
             min_group.add_partition(partition);
         }
@@ -94,14 +86,16 @@ impl PartitionCoalescer {
             CoalesceStrategy::ByCount { target_count } => {
                 self.coalesce_by_count(partitions, target_count)
             }
-            CoalesceStrategy::Adjacent => {
-                self.coalesce_adjacent(partitions)
-            }
+            CoalesceStrategy::Adjacent => self.coalesce_adjacent(partitions),
         }
     }
 
     /// Coalesce partitions to achieve target partition size.
-    fn coalesce_by_size(&self, partitions: &[PartitionStats], target_size: usize) -> Vec<Vec<usize>> {
+    fn coalesce_by_size(
+        &self,
+        partitions: &[PartitionStats],
+        target_size: usize,
+    ) -> Vec<Vec<usize>> {
         let mut groups: Vec<Vec<usize>> = vec![];
         let mut current_group: Vec<usize> = vec![];
         let mut current_size = 0;
@@ -125,7 +119,11 @@ impl PartitionCoalescer {
     }
 
     /// Coalesce partitions to achieve target partition count.
-    fn coalesce_by_count(&self, partitions: &[PartitionStats], target_count: usize) -> Vec<Vec<usize>> {
+    fn coalesce_by_count(
+        &self,
+        partitions: &[PartitionStats],
+        target_count: usize,
+    ) -> Vec<Vec<usize>> {
         let target = target_count.max(1);
         let partitions_per_group = (partitions.len() + target - 1) / target;
 
@@ -233,14 +231,18 @@ impl CoalescePlan {
 
     /// Get partition IDs for a specific output partition.
     pub fn input_partitions(&self, output_partition: usize) -> Option<&[usize]> {
-        self.groups.get(output_partition).map(|g| g.partition_ids.as_slice())
+        self.groups
+            .get(output_partition)
+            .map(|g| g.partition_ids.as_slice())
     }
 }
 
 /// Coalesce multiple record batches into a single batch.
 pub fn coalesce_batches(batches: &[RecordBatch]) -> Result<RecordBatch> {
     if batches.is_empty() {
-        return Err(BlazeError::invalid_argument("Cannot coalesce empty batches"));
+        return Err(BlazeError::invalid_argument(
+            "Cannot coalesce empty batches",
+        ));
     }
 
     if batches.len() == 1 {
@@ -270,8 +272,7 @@ mod tests {
 
     #[test]
     fn test_coalesce_decision() {
-        let config = AdaptiveConfig::default()
-            .with_target_partition_size(1024);
+        let config = AdaptiveConfig::default().with_target_partition_size(1024);
 
         let coalescer = PartitionCoalescer::new(config);
 
@@ -321,12 +322,8 @@ mod tests {
         let config = AdaptiveConfig::default();
         let coalescer = PartitionCoalescer::new(config);
 
-        let partitions = make_partition_stats(&[
-            (0, 100, 100),
-            (1, 100, 100),
-            (2, 100, 100),
-            (3, 100, 100),
-        ]);
+        let partitions =
+            make_partition_stats(&[(0, 100, 100), (1, 100, 100), (2, 100, 100), (3, 100, 100)]);
 
         let groups = coalescer.apply_strategy(&partitions, CoalesceStrategy::by_size(250));
 
@@ -339,12 +336,8 @@ mod tests {
         let config = AdaptiveConfig::default();
         let coalescer = PartitionCoalescer::new(config);
 
-        let partitions = make_partition_stats(&[
-            (0, 100, 100),
-            (1, 100, 100),
-            (2, 100, 100),
-            (3, 100, 100),
-        ]);
+        let partitions =
+            make_partition_stats(&[(0, 100, 100), (1, 100, 100), (2, 100, 100), (3, 100, 100)]);
 
         let groups = coalescer.apply_strategy(&partitions, CoalesceStrategy::adjacent());
 

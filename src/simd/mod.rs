@@ -22,16 +22,16 @@
 //! let result = a.add(&b);
 //! ```
 
-mod vectorize;
-mod jit;
 mod codegen;
+mod jit;
+mod vectorize;
 
-pub use vectorize::{
-    SimdVector, SimdVectorOps, SimdFilterOps, SimdAggregateOps,
-    SimdCapabilities, detect_simd_capabilities,
-};
-pub use jit::{JitCompiler, JitFunction, JitConfig, CompiledKernel};
 pub use codegen::{CodeGenerator, GeneratedCode, Instruction, Register};
+pub use jit::{CompiledKernel, JitCompiler, JitConfig, JitFunction};
+pub use vectorize::{
+    detect_simd_capabilities, SimdAggregateOps, SimdCapabilities, SimdFilterOps, SimdVector,
+    SimdVectorOps,
+};
 
 use crate::error::{BlazeError, Result};
 
@@ -500,12 +500,18 @@ pub enum VectorOp {
 impl VectorOp {
     /// Check if this is a reduction operation.
     pub fn is_reduction(&self) -> bool {
-        matches!(self, VectorOp::Sum | VectorOp::Count | VectorOp::Avg | VectorOp::Min | VectorOp::Max)
+        matches!(
+            self,
+            VectorOp::Sum | VectorOp::Count | VectorOp::Avg | VectorOp::Min | VectorOp::Max
+        )
     }
 
     /// Check if this is a comparison operation.
     pub fn is_comparison(&self) -> bool {
-        matches!(self, VectorOp::Eq | VectorOp::Lt | VectorOp::Gt | VectorOp::Le | VectorOp::Ge)
+        matches!(
+            self,
+            VectorOp::Eq | VectorOp::Lt | VectorOp::Gt | VectorOp::Le | VectorOp::Ge
+        )
     }
 }
 
@@ -537,7 +543,10 @@ impl VectorDataType {
 
     /// Check if this type is signed.
     pub fn is_signed(&self) -> bool {
-        matches!(self, VectorDataType::I8 | VectorDataType::I16 | VectorDataType::I32 | VectorDataType::I64)
+        matches!(
+            self,
+            VectorDataType::I8 | VectorDataType::I16 | VectorDataType::I32 | VectorDataType::I64
+        )
     }
 
     /// Check if this is a floating point type.
@@ -618,7 +627,10 @@ mod tests {
 
         let result = ctx.vector_filter_gt_i32(&data, 4).unwrap();
 
-        assert_eq!(result, vec![false, true, false, true, false, true, false, true]);
+        assert_eq!(
+            result,
+            vec![false, true, false, true, false, true, false, true]
+        );
     }
 
     #[test]
@@ -655,9 +667,7 @@ mod tests {
 
     #[test]
     fn test_simd_stats() {
-        let mut ctx = SimdContext::with_config(
-            SimdConfig::new().with_min_batch_size(4)
-        );
+        let mut ctx = SimdContext::with_config(SimdConfig::new().with_min_batch_size(4));
 
         let data: Vec<i64> = (1..=100).collect();
         let _ = ctx.vector_sum_i64(&data).unwrap();

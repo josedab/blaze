@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use arrow::array::ArrayRef;
 use arrow::record_batch::RecordBatch;
 
-use crate::error::{BlazeError, Result};
 use super::MemoryStats;
+use crate::error::{BlazeError, Result};
 
 /// Direction of memory transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,12 +224,17 @@ impl GpuMemoryPool {
             if new_allocated <= current_peak {
                 break;
             }
-            if self.inner.peak.compare_exchange(
-                current_peak,
-                new_allocated,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ).is_ok() {
+            if self
+                .inner
+                .peak
+                .compare_exchange(
+                    current_peak,
+                    new_allocated,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
                 break;
             }
         }
@@ -313,7 +318,8 @@ impl MemoryTransfer {
         let buffer = pool.allocate(total_size)?;
 
         // Record transfer statistics
-        self.stats.record_transfer(TransferDirection::HostToDevice, total_size);
+        self.stats
+            .record_transfer(TransferDirection::HostToDevice, total_size);
 
         // In a real implementation, this would copy data to GPU
         // For now, we track the metadata
@@ -327,15 +333,12 @@ impl MemoryTransfer {
     }
 
     /// Transfer an Arrow array to GPU memory.
-    pub fn array_to_device(
-        &mut self,
-        array: &ArrayRef,
-        pool: &GpuMemoryPool,
-    ) -> Result<GpuArray> {
+    pub fn array_to_device(&mut self, array: &ArrayRef, pool: &GpuMemoryPool) -> Result<GpuArray> {
         let size = array.get_array_memory_size();
 
         let buffer = pool.allocate(size)?;
-        self.stats.record_transfer(TransferDirection::HostToDevice, size);
+        self.stats
+            .record_transfer(TransferDirection::HostToDevice, size);
 
         Ok(GpuArray {
             buffer,
@@ -345,21 +348,18 @@ impl MemoryTransfer {
     }
 
     /// Transfer GPU data back to host.
-    pub fn to_host(
-        &mut self,
-        gpu_batch: &GpuRecordBatch,
-    ) -> Result<RecordBatch> {
-        self.stats.record_transfer(
-            TransferDirection::DeviceToHost,
-            gpu_batch.buffer.size(),
-        );
+    pub fn to_host(&mut self, gpu_batch: &GpuRecordBatch) -> Result<RecordBatch> {
+        self.stats
+            .record_transfer(TransferDirection::DeviceToHost, gpu_batch.buffer.size());
 
         // In a real implementation, this would copy data from GPU
         // For now, return an empty batch with the same schema
         let arrays: Vec<ArrayRef> = (0..gpu_batch.num_columns)
             .map(|_| {
-                Arc::new(arrow::array::Int32Array::from(vec![0i32; gpu_batch.num_rows]))
-                    as ArrayRef
+                Arc::new(arrow::array::Int32Array::from(vec![
+                    0i32;
+                    gpu_batch.num_rows
+                ])) as ArrayRef
             })
             .collect();
 
@@ -587,8 +587,7 @@ mod tests {
         // Create a test batch
         let schema = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
         let array = Int32Array::from(vec![1, 2, 3, 4, 5]);
-        let batch =
-            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
 
         // Transfer to device
         let gpu_batch = transfer.to_device(&batch, &pool).unwrap();
