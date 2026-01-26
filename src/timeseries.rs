@@ -1826,6 +1826,216 @@ impl RetentionEnforcer {
     pub fn policy(&self) -> &RetentionPolicy { &self.policy }
 }
 
+// ---------------------------------------------------------------------------
+// Cubic Spline Interpolation
+// ---------------------------------------------------------------------------
+
+/// Cubic spline interpolation for smooth curve fitting through time-series data.
+pub struct CubicSplineInterpolator {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    coeffs: Vec<(f64, f64, f64, f64)>, // (a, b, c, d) for each segment
+}
+
+impl CubicSplineInterpolator {
+    /// Build a natural cubic spline from sorted (x, y) data points.
+    pub fn new(xs: Vec<f64>, ys: Vec<f64>) -> Result<Self> {
+        let n = xs.len();
+        if n < 2 {
+            return Err(BlazeError::invalid_argument(
+                "Cubic spline requires at least 2 data points",
+            ));
+        }
+        if n != ys.len() {
+            return Err(BlazeError::invalid_argument(
+                "xs and ys must have the same length",
+            ));
+        }
+
+        let nm1 = n - 1;
+        let mut h = vec![0.0; nm1];
+        for i in 0..nm1 {
+            h[i] = xs[i + 1] - xs[i];
+        }
+
+        // Solve tridiagonal system for second derivatives
+        let mut alpha = vec![0.0; n];
+        for i in 1..nm1 {
+            alpha[i] = (3.0 / h[i]) * (ys[i + 1] - ys[i])
+                - (3.0 / h[i - 1]) * (ys[i] - ys[i - 1]);
+        }
+
+        let mut c = vec![0.0; n];
+        let mut l = vec![1.0; n];
+        let mut mu = vec![0.0; n];
+        let mut z = vec![0.0; n];
+
+        for i in 1..nm1 {
+            l[i] = 2.0 * (xs[i + 1] - xs[i - 1]) - h[i - 1] * mu[i - 1];
+            mu[i] = h[i] / l[i];
+            z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
+        }
+
+        for j in (0..nm1).rev() {
+            c[j] = z[j] - mu[j] * c[j + 1];
+        }
+
+        let mut coeffs = Vec::with_capacity(nm1);
+        for i in 0..nm1 {
+            let a = ys[i];
+            let b = (ys[i + 1] - ys[i]) / h[i] - h[i] * (c[i + 1] + 2.0 * c[i]) / 3.0;
+            let d = (c[i + 1] - c[i]) / (3.0 * h[i]);
+            coeffs.push((a, b, c[i], d));
+        }
+
+        Ok(Self { xs, ys, coeffs })
+    }
+
+    /// Evaluate the spline at a given x value.
+    pub fn evaluate(&self, x: f64) -> f64 {
+        let n = self.xs.len() - 1;
+        let i = if x <= self.xs[0] {
+            0
+        } else if x >= self.xs[n] {
+            n - 1
+        } else {
+            self.xs.partition_point(|&xi| xi < x).saturating_sub(1).min(n - 1)
+        };
+
+        let dx = x - self.xs[i];
+        let (a, b, c, d) = self.coeffs[i];
+        a + b * dx + c * dx * dx + d * dx * dx * dx
+    }
+
+    /// Interpolate at multiple x values.
+    pub fn evaluate_many(&self, xs: &[f64]) -> Vec<f64> {
+        xs.iter().map(|&x| self.evaluate(x)).collect()
+    }
+
+    pub fn num_points(&self) -> usize {
+        self.xs.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Anomaly Detection
+// ---------------------------------------------------------------------------
+
+/// Simple anomaly detection for time-series data using z-score.
+pub struct AnomalyDetector {
+    threshold: f64,
+    window_size: usize,
+}
+
+impl AnomalyDetector {
+    pub fn new(threshold: f64, window_size: usize) -> Self {
+        Self {
+            threshold,
+            window_size,
+        }
+    }
+
+    /// Detect anomalies in a time-series using rolling z-score.
+    /// Returns indices of anomalous points.
+    pub fn detect(&self, values: &[f64]) -> Vec<AnomalyPoint> {
+        if values.len() < self.window_size {
+            return Vec::new();
+        }
+
+        let mut anomalies = Vec::new();
+
+        for i in self.window_size..values.len() {
+            let window = &values[i - self.window_size..i];
+            let mean: f64 = window.iter().sum::<f64>() / window.len() as f64;
+            let variance: f64 = window.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                / window.len() as f64;
+            let std_dev = variance.sqrt();
+
+            if std_dev > 0.0 {
+                let z_score = (values[i] - mean) / std_dev;
+                if z_score.abs() > self.threshold {
+                    anomalies.push(AnomalyPoint {
+                        index: i,
+                        value: values[i],
+                        z_score,
+                        expected: mean,
+                    });
+                }
+            }
+        }
+
+        anomalies
+    }
+}
+
+/// A detected anomaly point.
+#[derive(Debug, Clone)]
+pub struct AnomalyPoint {
+    pub index: usize,
+    pub value: f64,
+    pub z_score: f64,
+    pub expected: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Rate of Change Functions
+// ---------------------------------------------------------------------------
+
+/// Computes rate-of-change metrics over time-series data.
+pub struct RateComputer;
+
+impl RateComputer {
+    /// Compute per-second rate of change: (v[i] - v[i-1]) / (t[i] - t[i-1]).
+    /// Timestamps in microseconds.
+    pub fn rate_per_second(timestamps: &[i64], values: &[f64]) -> Vec<f64> {
+        if timestamps.len() < 2 || timestamps.len() != values.len() {
+            return Vec::new();
+        }
+        let mut rates = Vec::with_capacity(timestamps.len() - 1);
+        for i in 1..timestamps.len() {
+            let dt = (timestamps[i] - timestamps[i - 1]) as f64 / 1_000_000.0; // µs → s
+            if dt > 0.0 {
+                rates.push((values[i] - values[i - 1]) / dt);
+            } else {
+                rates.push(0.0);
+            }
+        }
+        rates
+    }
+
+    /// Compute monotonic rate (only positive deltas, handling counter resets).
+    pub fn monotonic_rate(timestamps: &[i64], values: &[f64]) -> Vec<f64> {
+        if timestamps.len() < 2 || timestamps.len() != values.len() {
+            return Vec::new();
+        }
+        let mut rates = Vec::with_capacity(timestamps.len() - 1);
+        for i in 1..timestamps.len() {
+            let dt = (timestamps[i] - timestamps[i - 1]) as f64 / 1_000_000.0;
+            if dt > 0.0 {
+                let delta = values[i] - values[i - 1];
+                // Counter reset: treat as 0 rate
+                rates.push(if delta >= 0.0 { delta / dt } else { 0.0 });
+            } else {
+                rates.push(0.0);
+            }
+        }
+        rates
+    }
+
+    /// Compute increase (cumulative delta, ignoring resets).
+    pub fn increase(values: &[f64]) -> Vec<f64> {
+        if values.len() < 2 {
+            return Vec::new();
+        }
+        let mut result = Vec::with_capacity(values.len() - 1);
+        for i in 1..values.len() {
+            let delta = values[i] - values[i - 1];
+            result.push(if delta >= 0.0 { delta } else { values[i] });
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2655,5 +2865,120 @@ mod tests {
         let timestamps = vec![50_000_000, 80_000_000, 150_000_000, 200_000_000];
         let expired = enforcer.count_expired_rows(&timestamps, 200_000_000);
         assert_eq!(expired, 2); // 50M and 80M are before cutoff (100M)
+    }
+
+    // -----------------------------------------------------------------------
+    // Cubic Spline Interpolation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cubic_spline_linear_data() {
+        let spline = CubicSplineInterpolator::new(
+            vec![0.0, 1.0, 2.0, 3.0],
+            vec![0.0, 1.0, 2.0, 3.0],
+        ).unwrap();
+
+        // For linear data, spline should be approximately linear
+        let result = spline.evaluate(1.5);
+        assert!((result - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_cubic_spline_endpoints() {
+        let spline = CubicSplineInterpolator::new(
+            vec![0.0, 1.0, 2.0],
+            vec![0.0, 1.0, 0.0],
+        ).unwrap();
+
+        assert!((spline.evaluate(0.0) - 0.0).abs() < 0.01);
+        assert!((spline.evaluate(1.0) - 1.0).abs() < 0.01);
+        assert!((spline.evaluate(2.0) - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_cubic_spline_evaluate_many() {
+        let spline = CubicSplineInterpolator::new(
+            vec![0.0, 1.0, 2.0],
+            vec![0.0, 2.0, 0.0],
+        ).unwrap();
+
+        let results = spline.evaluate_many(&[0.0, 0.5, 1.0, 1.5, 2.0]);
+        assert_eq!(results.len(), 5);
+        assert_eq!(spline.num_points(), 3);
+    }
+
+    #[test]
+    fn test_cubic_spline_too_few_points() {
+        let result = CubicSplineInterpolator::new(vec![1.0], vec![2.0]);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Anomaly Detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_anomaly_detector_normal_data() {
+        let detector = AnomalyDetector::new(3.0, 5);
+        let values: Vec<f64> = vec![1.0, 1.1, 0.9, 1.0, 1.1, 1.0, 0.9, 1.0];
+        let anomalies = detector.detect(&values);
+        assert!(anomalies.is_empty()); // all within normal range
+    }
+
+    #[test]
+    fn test_anomaly_detector_spike() {
+        let detector = AnomalyDetector::new(2.0, 5);
+        // Small variance in normal data, then a spike
+        let values: Vec<f64> = vec![1.0, 1.1, 0.9, 1.05, 0.95, 50.0];
+        let anomalies = detector.detect(&values);
+        assert!(!anomalies.is_empty());
+        assert_eq!(anomalies[0].index, 5);
+        assert!(anomalies[0].z_score > 2.0);
+    }
+
+    #[test]
+    fn test_anomaly_detector_too_few_points() {
+        let detector = AnomalyDetector::new(2.0, 10);
+        let values: Vec<f64> = vec![1.0, 2.0, 3.0];
+        let anomalies = detector.detect(&values);
+        assert!(anomalies.is_empty()); // not enough data
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate Computer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rate_per_second() {
+        // 1 second intervals (1_000_000 µs)
+        let timestamps = vec![0, 1_000_000, 2_000_000, 3_000_000];
+        let values = vec![0.0, 10.0, 30.0, 60.0];
+        let rates = RateComputer::rate_per_second(&timestamps, &values);
+        assert_eq!(rates.len(), 3);
+        assert!((rates[0] - 10.0).abs() < 0.001);
+        assert!((rates[1] - 20.0).abs() < 0.001);
+        assert!((rates[2] - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_monotonic_rate_with_reset() {
+        let timestamps = vec![0, 1_000_000, 2_000_000, 3_000_000];
+        let values = vec![10.0, 20.0, 5.0, 15.0]; // reset at index 2
+        let rates = RateComputer::monotonic_rate(&timestamps, &values);
+        assert_eq!(rates.len(), 3);
+        assert!((rates[0] - 10.0).abs() < 0.001); // 20-10 = 10
+        assert!((rates[1] - 0.0).abs() < 0.001); // counter reset → 0
+        assert!((rates[2] - 10.0).abs() < 0.001); // 15-5 = 10
+    }
+
+    #[test]
+    fn test_increase() {
+        let values = vec![0.0, 10.0, 25.0, 5.0, 20.0]; // reset at index 3
+        let increases = RateComputer::increase(&values);
+        assert_eq!(increases.len(), 4);
+        assert!((increases[0] - 10.0).abs() < 0.001);
+        assert!((increases[1] - 15.0).abs() < 0.001);
+        assert!((increases[2] - 5.0).abs() < 0.001); // reset: use raw value
+        assert!((increases[3] - 15.0).abs() < 0.001);
     }
 }
