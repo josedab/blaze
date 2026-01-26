@@ -1852,6 +1852,220 @@ impl IncrementalCheckpointManager {
 }
 
 // ---------------------------------------------------------------------------
+// Durability Levels
+// ---------------------------------------------------------------------------
+
+/// Configurable durability guarantees for write operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurabilityLevel {
+    /// Full fsync after each commit group.
+    Fsync,
+    /// Fdatasync (metadata may lag).
+    Fdatasync,
+    /// Async writes (fastest, data may be lost on crash).
+    Async,
+}
+
+impl Default for DurabilityLevel {
+    fn default() -> Self {
+        Self::Fsync
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WAL Segment Manager
+// ---------------------------------------------------------------------------
+
+/// Manages WAL segments (splitting the log into fixed-size files).
+#[derive(Debug)]
+pub struct WalSegmentManager {
+    segment_size: u64,
+    current_segment: u64,
+    current_size: u64,
+    segments: Vec<WalSegment>,
+    last_checkpoint_segment: u64,
+}
+
+/// A single WAL segment.
+#[derive(Debug, Clone)]
+pub struct WalSegment {
+    pub id: u64,
+    pub size_bytes: u64,
+    pub entry_count: u64,
+    pub min_lsn: u64,
+    pub max_lsn: u64,
+    pub is_sealed: bool,
+}
+
+impl WalSegmentManager {
+    pub fn new(segment_size: u64) -> Self {
+        Self {
+            segment_size,
+            current_segment: 0,
+            current_size: 0,
+            segments: vec![WalSegment {
+                id: 0,
+                size_bytes: 0,
+                entry_count: 0,
+                min_lsn: 0,
+                max_lsn: 0,
+                is_sealed: false,
+            }],
+            last_checkpoint_segment: 0,
+        }
+    }
+
+    /// Record a write to the current segment.
+    pub fn record_write(&mut self, bytes: u64, lsn: u64) {
+        self.current_size += bytes;
+        if let Some(seg) = self.segments.last_mut() {
+            seg.size_bytes += bytes;
+            seg.entry_count += 1;
+            seg.max_lsn = lsn;
+            if seg.min_lsn == 0 {
+                seg.min_lsn = lsn;
+            }
+        }
+
+        // Rotate if segment is full
+        if self.current_size >= self.segment_size {
+            self.rotate_segment();
+        }
+    }
+
+    /// Seal the current segment and start a new one.
+    fn rotate_segment(&mut self) {
+        if let Some(seg) = self.segments.last_mut() {
+            seg.is_sealed = true;
+        }
+        self.current_segment += 1;
+        self.current_size = 0;
+        self.segments.push(WalSegment {
+            id: self.current_segment,
+            size_bytes: 0,
+            entry_count: 0,
+            min_lsn: 0,
+            max_lsn: 0,
+            is_sealed: false,
+        });
+    }
+
+    /// Record a checkpoint and allow truncation of old segments.
+    pub fn record_checkpoint(&mut self) {
+        self.last_checkpoint_segment = self.current_segment;
+    }
+
+    /// Truncate segments that are older than the last checkpoint.
+    pub fn truncate_old_segments(&mut self) -> usize {
+        let before = self.segments.len();
+        self.segments
+            .retain(|seg| seg.id >= self.last_checkpoint_segment);
+        before - self.segments.len()
+    }
+
+    /// Total WAL size across all segments.
+    pub fn total_size(&self) -> u64 {
+        self.segments.iter().map(|s| s.size_bytes).sum()
+    }
+
+    /// Number of active segments.
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// Current segment ID.
+    pub fn current_segment_id(&self) -> u64 {
+        self.current_segment
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Torn Page Protection (checksums)
+// ---------------------------------------------------------------------------
+
+/// Checksum utility for detecting torn pages / corrupt WAL entries.
+#[derive(Debug)]
+pub struct ChecksumValidator;
+
+impl ChecksumValidator {
+    /// Compute a CRC32-like checksum for a byte slice.
+    /// Uses a simple but effective polynomial hash.
+    pub fn compute(data: &[u8]) -> u32 {
+        let mut hash: u32 = 0xFFFF_FFFF;
+        for &byte in data {
+            hash ^= byte as u32;
+            for _ in 0..8 {
+                if hash & 1 != 0 {
+                    hash = (hash >> 1) ^ 0xEDB8_8320;
+                } else {
+                    hash >>= 1;
+                }
+            }
+        }
+        hash ^ 0xFFFF_FFFF
+    }
+
+    /// Verify a checksum matches the expected value.
+    pub fn verify(data: &[u8], expected: u32) -> bool {
+        Self::compute(data) == expected
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Manager
+// ---------------------------------------------------------------------------
+
+/// Manages crash recovery by replaying WAL entries.
+#[derive(Debug)]
+pub struct RecoveryManager {
+    entries_replayed: u64,
+    entries_skipped: u64,
+    corrupt_entries: u64,
+    recovery_time_ms: u64,
+}
+
+impl RecoveryManager {
+    pub fn new() -> Self {
+        Self {
+            entries_replayed: 0,
+            entries_skipped: 0,
+            corrupt_entries: 0,
+            recovery_time_ms: 0,
+        }
+    }
+
+    /// Record a successfully replayed entry.
+    pub fn record_replay(&mut self) {
+        self.entries_replayed += 1;
+    }
+
+    /// Record a skipped entry (already applied via checkpoint).
+    pub fn record_skip(&mut self) {
+        self.entries_skipped += 1;
+    }
+
+    /// Record a corrupt entry that failed checksum validation.
+    pub fn record_corrupt(&mut self) {
+        self.corrupt_entries += 1;
+    }
+
+    /// Set the total recovery time.
+    pub fn set_recovery_time(&mut self, ms: u64) {
+        self.recovery_time_ms = ms;
+    }
+
+    pub fn entries_replayed(&self) -> u64 { self.entries_replayed }
+    pub fn entries_skipped(&self) -> u64 { self.entries_skipped }
+    pub fn corrupt_entries(&self) -> u64 { self.corrupt_entries }
+    pub fn recovery_time_ms(&self) -> u64 { self.recovery_time_ms }
+
+    /// Returns true if recovery completed without data corruption.
+    pub fn is_clean(&self) -> bool {
+        self.corrupt_entries == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2663,5 +2877,93 @@ mod tests {
         mgr.checkpoint_dirty(&tables).unwrap();
         // No dirty tables → early return, no checkpoint counted
         assert_eq!(mgr.stats().total_checkpoints, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // WAL Segment Manager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wal_segment_basic() {
+        let mut mgr = WalSegmentManager::new(100);
+        mgr.record_write(50, 1);
+        mgr.record_write(30, 2);
+        assert_eq!(mgr.segment_count(), 1);
+        assert_eq!(mgr.total_size(), 80);
+    }
+
+    #[test]
+    fn test_wal_segment_rotation() {
+        let mut mgr = WalSegmentManager::new(100);
+        mgr.record_write(60, 1);
+        mgr.record_write(50, 2); // triggers rotation (110 > 100)
+        assert_eq!(mgr.segment_count(), 2);
+        assert_eq!(mgr.current_segment_id(), 1);
+    }
+
+    #[test]
+    fn test_wal_segment_truncation() {
+        let mut mgr = WalSegmentManager::new(50);
+        mgr.record_write(60, 1); // seg 0 sealed, seg 1 started
+        mgr.record_write(60, 2); // seg 1 sealed, seg 2 started
+        mgr.record_write(10, 3);
+
+        mgr.record_checkpoint(); // checkpoint at segment 2
+        let truncated = mgr.truncate_old_segments();
+        assert_eq!(truncated, 2); // segments 0 and 1 removed
+        assert_eq!(mgr.segment_count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Checksum tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_checksum_compute_verify() {
+        let data = b"Hello WAL entry";
+        let checksum = ChecksumValidator::compute(data);
+        assert!(ChecksumValidator::verify(data, checksum));
+        assert!(!ChecksumValidator::verify(b"Modified data", checksum));
+    }
+
+    #[test]
+    fn test_checksum_empty() {
+        let checksum = ChecksumValidator::compute(b"");
+        assert!(ChecksumValidator::verify(b"", checksum));
+    }
+
+    #[test]
+    fn test_checksum_deterministic() {
+        let data = b"deterministic data";
+        let c1 = ChecksumValidator::compute(data);
+        let c2 = ChecksumValidator::compute(data);
+        assert_eq!(c1, c2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Recovery Manager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_recovery_manager() {
+        let mut rm = RecoveryManager::new();
+        rm.record_replay();
+        rm.record_replay();
+        rm.record_skip();
+        rm.set_recovery_time(250);
+
+        assert_eq!(rm.entries_replayed(), 2);
+        assert_eq!(rm.entries_skipped(), 1);
+        assert_eq!(rm.corrupt_entries(), 0);
+        assert_eq!(rm.recovery_time_ms(), 250);
+        assert!(rm.is_clean());
+    }
+
+    #[test]
+    fn test_recovery_manager_with_corruption() {
+        let mut rm = RecoveryManager::new();
+        rm.record_replay();
+        rm.record_corrupt();
+        assert!(!rm.is_clean());
     }
 }
