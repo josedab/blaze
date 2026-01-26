@@ -362,6 +362,177 @@ impl AuditLog {
 }
 
 // ---------------------------------------------------------------------------
+// Security Context (for query-time user propagation)
+// ---------------------------------------------------------------------------
+
+/// Security context propagated through query execution.
+#[derive(Debug, Clone)]
+pub struct SecurityContext {
+    pub user: String,
+    pub role: String,
+    pub attributes: std::collections::HashMap<String, String>,
+}
+
+impl SecurityContext {
+    pub fn new(user: &str, role: &str) -> Self {
+        Self {
+            user: user.to_string(),
+            role: role.to_string(),
+            attributes: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn with_attribute(mut self, key: &str, value: &str) -> Self {
+        self.attributes.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    /// Returns the current user name (for use in RLS policies).
+    pub fn current_user(&self) -> &str {
+        &self.user
+    }
+
+    /// Returns the current role (for use in RLS policies).
+    pub fn current_role(&self) -> &str {
+        &self.role
+    }
+
+    /// Returns a user attribute (for use in RLS policies).
+    pub fn get_attribute(&self, key: &str) -> Option<&str> {
+        self.attributes.get(key).map(|s| s.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Column-Level Access Control
+// ---------------------------------------------------------------------------
+
+/// Fine-grained column-level permissions.
+#[derive(Debug)]
+pub struct ColumnAccessControl {
+    rules: Vec<ColumnAccessRule>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnAccessRule {
+    pub table: String,
+    pub column: String,
+    pub role: String,
+    pub permission: ColumnPermission,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnPermission {
+    Allow,
+    Deny,
+    Mask(MaskingStrategy),
+}
+
+impl ColumnAccessControl {
+    pub fn new() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// Add a column access rule.
+    pub fn add_rule(&mut self, rule: ColumnAccessRule) {
+        self.rules.push(rule);
+    }
+
+    /// Check if a role can access a specific column.
+    pub fn check_access(&self, table: &str, column: &str, role: &str) -> ColumnPermission {
+        // Find the most specific matching rule (column-specific > table-wide)
+        for rule in self.rules.iter().rev() {
+            if rule.table == table && rule.column == column && rule.role == role {
+                return rule.permission.clone();
+            }
+        }
+        ColumnPermission::Allow // Default: allow if no rule
+    }
+
+    /// Get all denied columns for a role on a table.
+    pub fn denied_columns(&self, table: &str, role: &str) -> Vec<String> {
+        self.rules
+            .iter()
+            .filter(|r| {
+                r.table == table
+                    && r.role == role
+                    && matches!(r.permission, ColumnPermission::Deny)
+            })
+            .map(|r| r.column.clone())
+            .collect()
+    }
+
+    /// Get all masked columns for a role on a table.
+    pub fn masked_columns(&self, table: &str, role: &str) -> Vec<(String, MaskingStrategy)> {
+        self.rules
+            .iter()
+            .filter(|r| r.table == table && r.role == role)
+            .filter_map(|r| {
+                if let ColumnPermission::Mask(ref strategy) = r.permission {
+                    Some((r.column.clone(), strategy.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Policy Composition (AND/OR)
+// ---------------------------------------------------------------------------
+
+/// Composable RLS policy expressions.
+#[derive(Debug, Clone)]
+pub enum PolicyExpression {
+    /// Simple filter: column op value
+    Filter(String),
+    /// All sub-policies must match
+    And(Vec<PolicyExpression>),
+    /// Any sub-policy can match
+    Or(Vec<PolicyExpression>),
+}
+
+impl PolicyExpression {
+    /// Convert to a SQL WHERE clause fragment.
+    pub fn to_sql(&self) -> String {
+        match self {
+            PolicyExpression::Filter(f) => f.clone(),
+            PolicyExpression::And(exprs) => {
+                let parts: Vec<String> = exprs.iter().map(|e| e.to_sql()).collect();
+                format!("({})", parts.join(" AND "))
+            }
+            PolicyExpression::Or(exprs) => {
+                let parts: Vec<String> = exprs.iter().map(|e| e.to_sql()).collect();
+                format!("({})", parts.join(" OR "))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent Audit Log
+// ---------------------------------------------------------------------------
+
+/// Audit log configuration with retention and export.
+#[derive(Debug)]
+pub struct AuditLogConfig {
+    pub max_events: usize,
+    pub retention_days: u32,
+    pub sample_rate: f64, // 0.0 to 1.0 (1.0 = log all queries)
+}
+
+impl Default for AuditLogConfig {
+    fn default() -> Self {
+        Self {
+            max_events: 100_000,
+            retention_days: 90,
+            sample_rate: 1.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -590,5 +761,116 @@ mod tests {
         assert_eq!(stats.total_events, 3);
         assert_eq!(stats.by_action.get("Query"), Some(&2));
         assert_eq!(stats.by_action.get("Login"), Some(&1));
+    }
+
+    // -- Security Context tests -----------------------------------------------
+
+    #[test]
+    fn test_security_context() {
+        let ctx = SecurityContext::new("alice", "analyst")
+            .with_attribute("region", "US-West")
+            .with_attribute("department", "sales");
+
+        assert_eq!(ctx.current_user(), "alice");
+        assert_eq!(ctx.current_role(), "analyst");
+        assert_eq!(ctx.get_attribute("region"), Some("US-West"));
+        assert_eq!(ctx.get_attribute("missing"), None);
+    }
+
+    // -- Column Access Control tests ------------------------------------------
+
+    #[test]
+    fn test_column_access_deny() {
+        let mut cac = ColumnAccessControl::new();
+        cac.add_rule(ColumnAccessRule {
+            table: "users".into(),
+            column: "ssn".into(),
+            role: "analyst".into(),
+            permission: ColumnPermission::Deny,
+        });
+
+        assert_eq!(
+            cac.check_access("users", "ssn", "analyst"),
+            ColumnPermission::Deny
+        );
+        assert_eq!(
+            cac.check_access("users", "name", "analyst"),
+            ColumnPermission::Allow
+        );
+    }
+
+    #[test]
+    fn test_column_access_mask() {
+        let mut cac = ColumnAccessControl::new();
+        cac.add_rule(ColumnAccessRule {
+            table: "users".into(),
+            column: "email".into(),
+            role: "viewer".into(),
+            permission: ColumnPermission::Mask(MaskingStrategy::Redact),
+        });
+
+        let masked = cac.masked_columns("users", "viewer");
+        assert_eq!(masked.len(), 1);
+        assert_eq!(masked[0].0, "email");
+    }
+
+    #[test]
+    fn test_denied_columns() {
+        let mut cac = ColumnAccessControl::new();
+        cac.add_rule(ColumnAccessRule {
+            table: "t".into(), column: "c1".into(),
+            role: "r".into(), permission: ColumnPermission::Deny,
+        });
+        cac.add_rule(ColumnAccessRule {
+            table: "t".into(), column: "c2".into(),
+            role: "r".into(), permission: ColumnPermission::Deny,
+        });
+        cac.add_rule(ColumnAccessRule {
+            table: "t".into(), column: "c3".into(),
+            role: "r".into(), permission: ColumnPermission::Allow,
+        });
+
+        let denied = cac.denied_columns("t", "r");
+        assert_eq!(denied.len(), 2);
+    }
+
+    // -- Policy Composition tests ---------------------------------------------
+
+    #[test]
+    fn test_policy_expression_simple() {
+        let expr = PolicyExpression::Filter("region = 'US'".into());
+        assert_eq!(expr.to_sql(), "region = 'US'");
+    }
+
+    #[test]
+    fn test_policy_expression_and() {
+        let expr = PolicyExpression::And(vec![
+            PolicyExpression::Filter("region = 'US'".into()),
+            PolicyExpression::Filter("department = 'sales'".into()),
+        ]);
+        assert_eq!(expr.to_sql(), "(region = 'US' AND department = 'sales')");
+    }
+
+    #[test]
+    fn test_policy_expression_or() {
+        let expr = PolicyExpression::Or(vec![
+            PolicyExpression::Filter("role = 'admin'".into()),
+            PolicyExpression::Filter("owner_id = current_user()".into()),
+        ]);
+        assert_eq!(expr.to_sql(), "(role = 'admin' OR owner_id = current_user())");
+    }
+
+    #[test]
+    fn test_policy_expression_nested() {
+        let expr = PolicyExpression::And(vec![
+            PolicyExpression::Filter("active = true".into()),
+            PolicyExpression::Or(vec![
+                PolicyExpression::Filter("role = 'admin'".into()),
+                PolicyExpression::Filter("region = 'US'".into()),
+            ]),
+        ]);
+        let sql = expr.to_sql();
+        assert!(sql.contains("active = true"));
+        assert!(sql.contains("role = 'admin' OR region = 'US'"));
     }
 }
