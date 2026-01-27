@@ -363,25 +363,14 @@ impl ScalarValue {
                                 .flat_map(|_| values.iter().copied())
                                 .collect::<Vec<f32>>(),
                         );
-                        let arr = FixedSizeListArray::new(
-                            field,
-                            dim,
-                            Arc::new(float_arr),
-                            None,
-                        );
+                        let arr = FixedSizeListArray::new(field, dim, Arc::new(float_arr), None);
                         Arc::new(arr)
                     }
                     None => {
-                        let float_arr =
-                            Float32Array::from(vec![0.0f32; size * *dimension]);
-                        let nulls =
-                            arrow::buffer::NullBuffer::new_null(size);
-                        let arr = FixedSizeListArray::new(
-                            field,
-                            dim,
-                            Arc::new(float_arr),
-                            Some(nulls),
-                        );
+                        let float_arr = Float32Array::from(vec![0.0f32; size * *dimension]);
+                        let nulls = arrow::buffer::NullBuffer::new_null(size);
+                        let arr =
+                            FixedSizeListArray::new(field, dim, Arc::new(float_arr), Some(nulls));
                         Arc::new(arr)
                     }
                 }

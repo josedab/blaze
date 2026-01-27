@@ -52,7 +52,10 @@ impl RbacManager {
     /// Create a new role. Returns error if the role already exists.
     pub fn create_role(&mut self, name: &str, permissions: HashSet<Permission>) -> Result<()> {
         if self.roles.contains_key(name) {
-            return Err(BlazeError::execution(format!("Role '{}' already exists", name)));
+            return Err(BlazeError::execution(format!(
+                "Role '{}' already exists",
+                name
+            )));
         }
         self.roles.insert(
             name.to_string(),
@@ -90,9 +93,10 @@ impl RbacManager {
                 role_name
             )));
         }
-        let user = self.users.get_mut(username).ok_or_else(|| {
-            BlazeError::execution(format!("User '{}' does not exist", username))
-        })?;
+        let user = self
+            .users
+            .get_mut(username)
+            .ok_or_else(|| BlazeError::execution(format!("User '{}' does not exist", username)))?;
         if !user.roles.contains(&role_name.to_string()) {
             user.roles.push(role_name.to_string());
         }
@@ -215,9 +219,9 @@ impl MaskingEngine {
         match strategy {
             MaskingStrategy::Hash => {
                 // Simple deterministic hash representation.
-                let hash: u64 = value.bytes().fold(0u64, |acc, b| {
-                    acc.wrapping_mul(31).wrapping_add(b as u64)
-                });
+                let hash: u64 = value
+                    .bytes()
+                    .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
                 format!("{:016x}", hash)
             }
             MaskingStrategy::Redact => "***".to_string(),
@@ -454,9 +458,7 @@ impl ColumnAccessControl {
         self.rules
             .iter()
             .filter(|r| {
-                r.table == table
-                    && r.role == role
-                    && matches!(r.permission, ColumnPermission::Deny)
+                r.table == table && r.role == role && matches!(r.permission, ColumnPermission::Deny)
             })
             .map(|r| r.column.clone())
             .collect()
@@ -648,7 +650,10 @@ mod tests {
 
     #[test]
     fn test_masking_redact() {
-        assert_eq!(MaskingEngine::apply_mask("secret", &MaskingStrategy::Redact), "***");
+        assert_eq!(
+            MaskingEngine::apply_mask("secret", &MaskingStrategy::Redact),
+            "***"
+        );
     }
 
     #[test]
@@ -662,7 +667,10 @@ mod tests {
 
     #[test]
     fn test_masking_nullify() {
-        assert_eq!(MaskingEngine::apply_mask("anything", &MaskingStrategy::Nullify), "");
+        assert_eq!(
+            MaskingEngine::apply_mask("anything", &MaskingStrategy::Nullify),
+            ""
+        );
     }
 
     #[test]
@@ -818,16 +826,22 @@ mod tests {
     fn test_denied_columns() {
         let mut cac = ColumnAccessControl::new();
         cac.add_rule(ColumnAccessRule {
-            table: "t".into(), column: "c1".into(),
-            role: "r".into(), permission: ColumnPermission::Deny,
+            table: "t".into(),
+            column: "c1".into(),
+            role: "r".into(),
+            permission: ColumnPermission::Deny,
         });
         cac.add_rule(ColumnAccessRule {
-            table: "t".into(), column: "c2".into(),
-            role: "r".into(), permission: ColumnPermission::Deny,
+            table: "t".into(),
+            column: "c2".into(),
+            role: "r".into(),
+            permission: ColumnPermission::Deny,
         });
         cac.add_rule(ColumnAccessRule {
-            table: "t".into(), column: "c3".into(),
-            role: "r".into(), permission: ColumnPermission::Allow,
+            table: "t".into(),
+            column: "c3".into(),
+            role: "r".into(),
+            permission: ColumnPermission::Allow,
         });
 
         let denied = cac.denied_columns("t", "r");
@@ -857,7 +871,10 @@ mod tests {
             PolicyExpression::Filter("role = 'admin'".into()),
             PolicyExpression::Filter("owner_id = current_user()".into()),
         ]);
-        assert_eq!(expr.to_sql(), "(role = 'admin' OR owner_id = current_user())");
+        assert_eq!(
+            expr.to_sql(),
+            "(role = 'admin' OR owner_id = current_user())"
+        );
     }
 
     #[test]

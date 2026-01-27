@@ -133,8 +133,16 @@ impl ColumnInference {
         }
 
         // Float64: integers can promote to float
-        let int_count = self.type_counts.get(&CandidateType::Int64).copied().unwrap_or(0);
-        let float_count = self.type_counts.get(&CandidateType::Float64).copied().unwrap_or(0);
+        let int_count = self
+            .type_counts
+            .get(&CandidateType::Int64)
+            .copied()
+            .unwrap_or(0);
+        let float_count = self
+            .type_counts
+            .get(&CandidateType::Float64)
+            .copied()
+            .unwrap_or(0);
         if int_count + float_count >= threshold && float_count > 0 {
             return CandidateType::Float64.to_arrow_type();
         }
@@ -148,7 +156,11 @@ impl ColumnInference {
 
         // Timestamp
         if let Some(&count) = self.type_counts.get(&CandidateType::Timestamp) {
-            let date_count = self.type_counts.get(&CandidateType::Date32).copied().unwrap_or(0);
+            let date_count = self
+                .type_counts
+                .get(&CandidateType::Date32)
+                .copied()
+                .unwrap_or(0);
             if count + date_count >= threshold && count > 0 {
                 return CandidateType::Timestamp.to_arrow_type();
             }
@@ -259,10 +271,7 @@ fn detect_delimiter(first_line: &str) -> u8 {
     let mut best_count = 0;
 
     for &delim in &candidates {
-        let count = first_line
-            .bytes()
-            .filter(|&b| b == delim)
-            .count();
+        let count = first_line.bytes().filter(|&b| b == delim).count();
         if count > best_count {
             best_count = count;
             best = delim;
@@ -285,7 +294,9 @@ pub fn infer_csv_schema(
         .next()
         .ok_or_else(|| BlazeError::invalid_argument("Empty CSV file"))??;
 
-    let delimiter = config.delimiter.unwrap_or_else(|| detect_delimiter(&header_line));
+    let delimiter = config
+        .delimiter
+        .unwrap_or_else(|| detect_delimiter(&header_line));
     let delim_char = delimiter as char;
 
     let headers: Vec<String> = header_line
@@ -294,10 +305,7 @@ pub fn infer_csv_schema(
         .collect();
 
     let _num_columns = headers.len();
-    let mut columns: Vec<ColumnInference> = headers
-        .into_iter()
-        .map(ColumnInference::new)
-        .collect();
+    let mut columns: Vec<ColumnInference> = headers.into_iter().map(ColumnInference::new).collect();
 
     // Sample rows for type inference
     let mut rows_sampled = 0;
@@ -312,7 +320,10 @@ pub fn infer_csv_schema(
 
         let values: Vec<&str> = line.split(delim_char).collect();
         for (i, col) in columns.iter_mut().enumerate() {
-            let value = values.get(i).map(|s| s.trim().trim_matches('"')).unwrap_or("");
+            let value = values
+                .get(i)
+                .map(|s| s.trim().trim_matches('"'))
+                .unwrap_or("");
             if value.is_empty() || config.null_values.contains(&value.to_string()) {
                 col.record_null();
             } else {
@@ -354,7 +365,11 @@ pub fn infer_json_schema(
         }
 
         let parsed: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
-            BlazeError::invalid_argument(format!("Invalid JSON on line {}: {}", rows_sampled + 1, e))
+            BlazeError::invalid_argument(format!(
+                "Invalid JSON on line {}: {}",
+                rows_sampled + 1,
+                e
+            ))
         })?;
 
         if let serde_json::Value::Object(obj) = parsed {
@@ -447,9 +462,7 @@ fn widen_type(left: &DataType, right: &DataType) -> DataType {
         }
         // Date -> Timestamp promotion
         (DataType::Date32, DataType::Timestamp(u, tz))
-        | (DataType::Timestamp(u, tz), DataType::Date32) => {
-            DataType::Timestamp(*u, tz.clone())
-        }
+        | (DataType::Timestamp(u, tz), DataType::Date32) => DataType::Timestamp(*u, tz.clone()),
         // Fallback to Utf8
         _ => DataType::Utf8,
     }
@@ -645,10 +658,22 @@ mod tests {
 
     #[test]
     fn test_widen_type() {
-        assert_eq!(widen_type(&DataType::Int64, &DataType::Float64), DataType::Float64);
-        assert_eq!(widen_type(&DataType::Int32, &DataType::Int64), DataType::Int64);
-        assert_eq!(widen_type(&DataType::Int64, &DataType::Int64), DataType::Int64);
-        assert_eq!(widen_type(&DataType::Utf8, &DataType::Int64), DataType::Utf8);
+        assert_eq!(
+            widen_type(&DataType::Int64, &DataType::Float64),
+            DataType::Float64
+        );
+        assert_eq!(
+            widen_type(&DataType::Int32, &DataType::Int64),
+            DataType::Int64
+        );
+        assert_eq!(
+            widen_type(&DataType::Int64, &DataType::Int64),
+            DataType::Int64
+        );
+        assert_eq!(
+            widen_type(&DataType::Utf8, &DataType::Int64),
+            DataType::Utf8
+        );
     }
 
     #[test]

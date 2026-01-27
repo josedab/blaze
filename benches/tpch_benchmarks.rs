@@ -746,11 +746,9 @@ fn tpch_benchmarks(c: &mut Criterion) {
         );
 
         // Q16: Parts/Supplier Relationship (join + aggregate + sort)
-        group.bench_with_input(
-            BenchmarkId::new("Q16_parts_supplier", sf),
-            &sf,
-            |b, _| b.iter(|| black_box(conn.query(TPCH_Q16).unwrap())),
-        );
+        group.bench_with_input(BenchmarkId::new("Q16_parts_supplier", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q16).unwrap()))
+        });
 
         // Q19: Discounted Revenue (scan + filter + aggregate)
         group.bench_with_input(
@@ -760,11 +758,9 @@ fn tpch_benchmarks(c: &mut Criterion) {
         );
 
         // Q22: Global Sales Opportunity (scan + filter + aggregate)
-        group.bench_with_input(
-            BenchmarkId::new("Q22_global_sales", sf),
-            &sf,
-            |b, _| b.iter(|| black_box(conn.query(TPCH_Q22).unwrap())),
-        );
+        group.bench_with_input(BenchmarkId::new("Q22_global_sales", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q22).unwrap()))
+        });
     }
 
     group.finish();

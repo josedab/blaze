@@ -1393,7 +1393,13 @@ impl DeltaDeltaEncoder {
         // For simplicity, count zeros as 1 byte and non-zeros as 8 bytes.
         let encoded_bytes: usize = encoded
             .iter()
-            .map(|&v| if v == 0 { 1 } else { std::mem::size_of::<i64>() })
+            .map(|&v| {
+                if v == 0 {
+                    1
+                } else {
+                    std::mem::size_of::<i64>()
+                }
+            })
             .sum();
         if encoded_bytes == 0 {
             return 1.0;
@@ -1590,10 +1596,7 @@ impl InterpolationEngine {
 
     /// Fill with a constant value.
     pub fn constant(values: &[Option<f64>], fill_value: f64) -> Vec<f64> {
-        values
-            .iter()
-            .map(|v| v.unwrap_or(fill_value))
-            .collect()
+        values.iter().map(|v| v.unwrap_or(fill_value)).collect()
     }
 }
 
@@ -1613,19 +1616,16 @@ impl AsofJoinExecutor {
 
     /// Execute an ASOF join between two sorted timestamp arrays.
     /// For each left timestamp, finds the closest matching right timestamp.
-    pub fn execute(
-        &self,
-        left_times: &[i64],
-        right_times: &[i64],
-    ) -> Vec<Option<usize>> {
-        left_times.iter().map(|&lt| {
-            self.find_match(lt, right_times)
-        }).collect()
+    pub fn execute(&self, left_times: &[i64], right_times: &[i64]) -> Vec<Option<usize>> {
+        left_times
+            .iter()
+            .map(|&lt| self.find_match(lt, right_times))
+            .collect()
     }
 
     fn find_match(&self, left_time: i64, right_times: &[i64]) -> Option<usize> {
         let tolerance = self.config.tolerance.unwrap_or(i64::MAX);
-        
+
         match self.config.direction {
             AsofDirection::Backward => {
                 // Find the latest right time <= left_time
@@ -1651,10 +1651,16 @@ impl AsofJoinExecutor {
             AsofDirection::Nearest => {
                 let pos = right_times.partition_point(|&t| t < left_time);
                 let candidates = [
-                    pos.checked_sub(1).map(|i| (i, (left_time - right_times[i]).abs())),
-                    if pos < right_times.len() { Some((pos, (right_times[pos] - left_time).abs())) } else { None },
+                    pos.checked_sub(1)
+                        .map(|i| (i, (left_time - right_times[i]).abs())),
+                    if pos < right_times.len() {
+                        Some((pos, (right_times[pos] - left_time).abs()))
+                    } else {
+                        None
+                    },
                 ];
-                candidates.iter()
+                candidates
+                    .iter()
                     .filter_map(|&c| c)
                     .filter(|&(_, diff)| diff <= tolerance)
                     .min_by_key(|&(_, diff)| diff)
@@ -1670,13 +1676,17 @@ pub struct TimeBucket;
 impl TimeBucket {
     /// Truncate a timestamp (microseconds since epoch) to the nearest bucket boundary.
     pub fn bucket(timestamp_us: i64, interval_us: i64) -> i64 {
-        if interval_us <= 0 { return timestamp_us; }
+        if interval_us <= 0 {
+            return timestamp_us;
+        }
         (timestamp_us / interval_us) * interval_us
     }
 
     /// Bucket with an origin offset.
     pub fn bucket_with_origin(timestamp_us: i64, interval_us: i64, origin_us: i64) -> i64 {
-        if interval_us <= 0 { return timestamp_us; }
+        if interval_us <= 0 {
+            return timestamp_us;
+        }
         let shifted = timestamp_us - origin_us;
         (shifted / interval_us) * interval_us + origin_us
     }
@@ -1714,7 +1724,9 @@ impl GenerateSeries {
 
     /// Generate timestamps for a specific number of buckets.
     pub fn generate_n(start_us: i64, step_us: i64, count: usize) -> Vec<i64> {
-        (0..count).map(|i| start_us + (i as i64) * step_us).collect()
+        (0..count)
+            .map(|i| start_us + (i as i64) * step_us)
+            .collect()
     }
 }
 
@@ -1757,7 +1769,7 @@ impl StreamingIngestionApi {
             return false;
         }
         self.buffer.push(row);
-        
+
         // Sort and flush if buffer is full
         if self.buffer.len() >= self.sort_buffer_size {
             self.sort_buffer();
@@ -1774,17 +1786,26 @@ impl StreamingIngestionApi {
     pub fn flush(&mut self, new_watermark: i64) -> Vec<TimestampedRow> {
         self.sort_buffer();
         self.watermark = new_watermark;
-        let (flushed, remaining): (Vec<_>, Vec<_>) = self.buffer
+        let (flushed, remaining): (Vec<_>, Vec<_>) = self
+            .buffer
             .drain(..)
             .partition(|r| r.timestamp_us <= new_watermark);
         self.buffer = remaining;
         flushed
     }
 
-    pub fn buffer_size(&self) -> usize { self.buffer.len() }
-    pub fn late_rows_dropped(&self) -> u64 { self.late_rows_dropped }
-    pub fn rows_ingested(&self) -> u64 { self.rows_ingested }
-    pub fn watermark(&self) -> i64 { self.watermark }
+    pub fn buffer_size(&self) -> usize {
+        self.buffer.len()
+    }
+    pub fn late_rows_dropped(&self) -> u64 {
+        self.late_rows_dropped
+    }
+    pub fn rows_ingested(&self) -> u64 {
+        self.rows_ingested
+    }
+    pub fn watermark(&self) -> i64 {
+        self.watermark
+    }
 }
 
 /// Enforces retention policies on time-series data.
@@ -1822,8 +1843,12 @@ impl RetentionEnforcer {
         self.last_enforced = std::time::Instant::now();
     }
 
-    pub fn total_rows_deleted(&self) -> u64 { self.rows_deleted }
-    pub fn policy(&self) -> &RetentionPolicy { &self.policy }
+    pub fn total_rows_deleted(&self) -> u64 {
+        self.rows_deleted
+    }
+    pub fn policy(&self) -> &RetentionPolicy {
+        &self.policy
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1861,8 +1886,7 @@ impl CubicSplineInterpolator {
         // Solve tridiagonal system for second derivatives
         let mut alpha = vec![0.0; n];
         for i in 1..nm1 {
-            alpha[i] = (3.0 / h[i]) * (ys[i + 1] - ys[i])
-                - (3.0 / h[i - 1]) * (ys[i] - ys[i - 1]);
+            alpha[i] = (3.0 / h[i]) * (ys[i + 1] - ys[i]) - (3.0 / h[i - 1]) * (ys[i] - ys[i - 1]);
         }
 
         let mut c = vec![0.0; n];
@@ -1899,7 +1923,10 @@ impl CubicSplineInterpolator {
         } else if x >= self.xs[n] {
             n - 1
         } else {
-            self.xs.partition_point(|&xi| xi < x).saturating_sub(1).min(n - 1)
+            self.xs
+                .partition_point(|&xi| xi < x)
+                .saturating_sub(1)
+                .min(n - 1)
         };
 
         let dx = x - self.xs[i];
@@ -1947,8 +1974,8 @@ impl AnomalyDetector {
         for i in self.window_size..values.len() {
             let window = &values[i - self.window_size..i];
             let mean: f64 = window.iter().sum::<f64>() / window.len() as f64;
-            let variance: f64 = window.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-                / window.len() as f64;
+            let variance: f64 =
+                window.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / window.len() as f64;
             let std_dev = variance.sqrt();
 
             if std_dev > 0.0 {
@@ -2659,7 +2686,10 @@ mod tests {
         }
         let encoded = encoder.finish();
         let ratio = DeltaDeltaEncoder::compression_ratio(values.len(), &encoded);
-        assert!(ratio > 1.0, "Regular timestamps should compress well, got ratio {ratio}");
+        assert!(
+            ratio > 1.0,
+            "Regular timestamps should compress well, got ratio {ratio}"
+        );
     }
 
     #[test]
@@ -2758,7 +2788,10 @@ mod tests {
 
     #[test]
     fn test_asof_join_executor_backward() {
-        let config = AsofJoinConfig { direction: AsofDirection::Backward, tolerance: None };
+        let config = AsofJoinConfig {
+            direction: AsofDirection::Backward,
+            tolerance: None,
+        };
         let executor = AsofJoinExecutor::new(config);
         let left = vec![10, 20, 30];
         let right = vec![5, 15, 25, 35];
@@ -2770,7 +2803,10 @@ mod tests {
 
     #[test]
     fn test_asof_join_executor_forward() {
-        let config = AsofJoinConfig { direction: AsofDirection::Forward, tolerance: None };
+        let config = AsofJoinConfig {
+            direction: AsofDirection::Forward,
+            tolerance: None,
+        };
         let executor = AsofJoinExecutor::new(config);
         let left = vec![10, 20, 30];
         let right = vec![5, 15, 25, 35];
@@ -2782,7 +2818,10 @@ mod tests {
 
     #[test]
     fn test_asof_join_executor_nearest() {
-        let config = AsofJoinConfig { direction: AsofDirection::Nearest, tolerance: None };
+        let config = AsofJoinConfig {
+            direction: AsofDirection::Nearest,
+            tolerance: None,
+        };
         let executor = AsofJoinExecutor::new(config);
         let left = vec![12];
         let right = vec![5, 10, 15, 20];
@@ -2792,13 +2831,16 @@ mod tests {
 
     #[test]
     fn test_asof_join_executor_tolerance() {
-        let config = AsofJoinConfig { direction: AsofDirection::Backward, tolerance: Some(3) };
+        let config = AsofJoinConfig {
+            direction: AsofDirection::Backward,
+            tolerance: Some(3),
+        };
         let executor = AsofJoinExecutor::new(config);
         let left = vec![10, 100];
         let right = vec![8, 50];
         let matches = executor.execute(&left, &right);
         assert_eq!(matches[0], Some(0)); // 10-8=2 <= 3
-        assert_eq!(matches[1], None);    // 100-50=50 > 3
+        assert_eq!(matches[1], None); // 100-50=50 > 3
     }
 
     #[test]
@@ -2832,10 +2874,16 @@ mod tests {
     #[test]
     fn test_streaming_ingestion() {
         let mut api = StreamingIngestionApi::new(10);
-        assert!(api.ingest(TimestampedRow { timestamp_us: 100, values: vec![1.0] }));
-        assert!(api.ingest(TimestampedRow { timestamp_us: 200, values: vec![2.0] }));
+        assert!(api.ingest(TimestampedRow {
+            timestamp_us: 100,
+            values: vec![1.0]
+        }));
+        assert!(api.ingest(TimestampedRow {
+            timestamp_us: 200,
+            values: vec![2.0]
+        }));
         assert_eq!(api.buffer_size(), 2);
-        
+
         let flushed = api.flush(150);
         assert_eq!(flushed.len(), 1); // Only ts=100
         assert_eq!(api.buffer_size(), 1); // ts=200 remains
@@ -2845,7 +2893,10 @@ mod tests {
     fn test_streaming_ingestion_late_data() {
         let mut api = StreamingIngestionApi::new(100);
         api.flush(100); // Set watermark to 100
-        assert!(!api.ingest(TimestampedRow { timestamp_us: 50, values: vec![1.0] }));
+        assert!(!api.ingest(TimestampedRow {
+            timestamp_us: 50,
+            values: vec![1.0]
+        }));
         assert_eq!(api.late_rows_dropped(), 1);
     }
 
@@ -2873,10 +2924,9 @@ mod tests {
 
     #[test]
     fn test_cubic_spline_linear_data() {
-        let spline = CubicSplineInterpolator::new(
-            vec![0.0, 1.0, 2.0, 3.0],
-            vec![0.0, 1.0, 2.0, 3.0],
-        ).unwrap();
+        let spline =
+            CubicSplineInterpolator::new(vec![0.0, 1.0, 2.0, 3.0], vec![0.0, 1.0, 2.0, 3.0])
+                .unwrap();
 
         // For linear data, spline should be approximately linear
         let result = spline.evaluate(1.5);
@@ -2885,10 +2935,8 @@ mod tests {
 
     #[test]
     fn test_cubic_spline_endpoints() {
-        let spline = CubicSplineInterpolator::new(
-            vec![0.0, 1.0, 2.0],
-            vec![0.0, 1.0, 0.0],
-        ).unwrap();
+        let spline =
+            CubicSplineInterpolator::new(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 0.0]).unwrap();
 
         assert!((spline.evaluate(0.0) - 0.0).abs() < 0.01);
         assert!((spline.evaluate(1.0) - 1.0).abs() < 0.01);
@@ -2897,10 +2945,8 @@ mod tests {
 
     #[test]
     fn test_cubic_spline_evaluate_many() {
-        let spline = CubicSplineInterpolator::new(
-            vec![0.0, 1.0, 2.0],
-            vec![0.0, 2.0, 0.0],
-        ).unwrap();
+        let spline =
+            CubicSplineInterpolator::new(vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 0.0]).unwrap();
 
         let results = spline.evaluate_many(&[0.0, 0.5, 1.0, 1.5, 2.0]);
         assert_eq!(results.len(), 5);

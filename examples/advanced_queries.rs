@@ -67,47 +67,59 @@ fn window_function_examples(conn: &Connection) {
 
     // ROW_NUMBER
     println!("\n--- ROW_NUMBER ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, department, salary,
                 ROW_NUMBER() OVER (ORDER BY salary DESC) as overall_rank
-         FROM employees");
+         FROM employees",
+    );
 
     // RANK with PARTITION
     println!("\n--- RANK with PARTITION ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, department, salary,
                 RANK() OVER (PARTITION BY department ORDER BY salary DESC) as dept_rank
-         FROM employees");
+         FROM employees",
+    );
 
     // DENSE_RANK
     println!("\n--- DENSE_RANK ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, department, salary,
                 DENSE_RANK() OVER (ORDER BY salary DESC) as dense_rank
-         FROM employees");
+         FROM employees",
+    );
 
     // LAG and LEAD
     println!("\n--- LAG and LEAD ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, salary,
                 LAG(salary, 1) OVER (ORDER BY salary) as prev_salary,
                 LEAD(salary, 1) OVER (ORDER BY salary) as next_salary
-         FROM employees");
+         FROM employees",
+    );
 
     // Running sum
     println!("\n--- Running Sum ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, salary,
                 SUM(salary) OVER (ORDER BY salary) as running_total
          FROM employees
-         ORDER BY salary");
+         ORDER BY salary",
+    );
 
     // NTILE
     println!("\n--- NTILE (Quartiles) ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, salary,
                 NTILE(4) OVER (ORDER BY salary) as salary_quartile
-         FROM employees");
+         FROM employees",
+    );
 }
 
 fn cte_examples(conn: &Connection) {
@@ -117,15 +129,18 @@ fn cte_examples(conn: &Connection) {
 
     // Simple CTE
     println!("\n--- Simple CTE ---");
-    run_query(conn,
+    run_query(
+        conn,
         "WITH high_earners AS (
              SELECT * FROM employees WHERE salary > 80000.0
          )
-         SELECT name, department, salary FROM high_earners ORDER BY salary DESC");
+         SELECT name, department, salary FROM high_earners ORDER BY salary DESC",
+    );
 
     // Multiple CTEs
     println!("\n--- Multiple CTEs ---");
-    run_query(conn,
+    run_query(
+        conn,
         "WITH
              dept_stats AS (
                  SELECT department, AVG(salary) as avg_salary
@@ -140,11 +155,13 @@ fn cte_examples(conn: &Connection) {
              )
          SELECT name, department, salary, avg_salary
          FROM above_avg
-         ORDER BY department, salary DESC");
+         ORDER BY department, salary DESC",
+    );
 
     // CTE with aggregation
     println!("\n--- CTE with Aggregation ---");
-    run_query(conn,
+    run_query(
+        conn,
         "WITH monthly_sales AS (
              SELECT product, SUM(amount) as total_sales
              FROM sales
@@ -152,7 +169,8 @@ fn cte_examples(conn: &Connection) {
          )
          SELECT product, total_sales,
                 RANK() OVER (ORDER BY total_sales DESC) as sales_rank
-         FROM monthly_sales");
+         FROM monthly_sales",
+    );
 }
 
 fn subquery_examples(conn: &Connection) {
@@ -162,14 +180,17 @@ fn subquery_examples(conn: &Connection) {
 
     // Scalar subquery in WHERE
     println!("\n--- Scalar Subquery in WHERE ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, salary
          FROM employees
-         WHERE salary > (SELECT AVG(salary) FROM employees)");
+         WHERE salary > (SELECT AVG(salary) FROM employees)",
+    );
 
     // IN subquery
     println!("\n--- IN Subquery ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, department
          FROM employees
          WHERE department IN (
@@ -177,17 +198,20 @@ fn subquery_examples(conn: &Connection) {
              FROM employees
              GROUP BY department
              HAVING COUNT(*) > 1
-         )");
+         )",
+    );
 
     // Correlated subquery
     println!("\n--- Subquery in SELECT ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT
              name,
              salary,
              (SELECT AVG(salary) FROM employees) as company_avg
          FROM employees
-         ORDER BY salary DESC");
+         ORDER BY salary DESC",
+    );
 }
 
 fn complex_join_examples(conn: &Connection) {
@@ -197,39 +221,47 @@ fn complex_join_examples(conn: &Connection) {
 
     // LEFT JOIN
     println!("\n--- LEFT JOIN ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT e.name, e.department, COALESCE(SUM(s.amount), 0) as total_sales
          FROM employees e
          LEFT JOIN sales s ON e.name = s.salesperson
          GROUP BY e.name, e.department
-         ORDER BY total_sales DESC");
+         ORDER BY total_sales DESC",
+    );
 
     // FULL OUTER JOIN
     println!("\n--- FULL OUTER JOIN ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT
              COALESCE(e.name, 'Unknown') as employee,
              COALESCE(s.product, 'No Sales') as product,
              s.amount
          FROM employees e
-         FULL OUTER JOIN sales s ON e.name = s.salesperson");
+         FULL OUTER JOIN sales s ON e.name = s.salesperson",
+    );
 
     // Self JOIN
     println!("\n--- Self JOIN (Salary Comparison) ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT e1.name, e1.salary, e2.name as higher_paid
          FROM employees e1
          JOIN employees e2 ON e1.department = e2.department AND e1.salary < e2.salary
-         ORDER BY e1.department, e1.salary");
+         ORDER BY e1.department, e1.salary",
+    );
 
     // Three-way JOIN
     println!("\n--- Three-way JOIN ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT e.name, e.department, d.location, s.amount
          FROM employees e
          JOIN departments d ON e.department = d.name
          JOIN sales s ON e.name = s.salesperson
-         ORDER BY s.amount DESC");
+         ORDER BY s.amount DESC",
+    );
 }
 
 fn string_function_examples(conn: &Connection) {
@@ -238,35 +270,45 @@ fn string_function_examples(conn: &Connection) {
     println!("{}", "=".repeat(60));
 
     println!("\n--- UPPER and LOWER ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, UPPER(name) as upper_name, LOWER(department) as lower_dept
          FROM employees
-         LIMIT 3");
+         LIMIT 3",
+    );
 
     println!("\n--- CONCAT and LENGTH ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT CONCAT(name, ' - ', department) as full_info, LENGTH(name) as name_length
          FROM employees
-         LIMIT 3");
+         LIMIT 3",
+    );
 
     println!("\n--- SUBSTRING ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, SUBSTRING(name, 1, 3) as short_name
          FROM employees
-         LIMIT 3");
+         LIMIT 3",
+    );
 
     println!("\n--- REPLACE ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT department, REPLACE(department, 'Engineering', 'Tech') as updated_dept
          FROM employees
          WHERE department = 'Engineering'
-         LIMIT 3");
+         LIMIT 3",
+    );
 
     println!("\n--- TRIM ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT TRIM('  hello  ') as trimmed,
                 LTRIM('  left') as left_trimmed,
-                RTRIM('right  ') as right_trimmed");
+                RTRIM('right  ') as right_trimmed",
+    );
 }
 
 fn aggregation_examples(conn: &Connection) {
@@ -275,28 +317,34 @@ fn aggregation_examples(conn: &Connection) {
     println!("{}", "=".repeat(60));
 
     println!("\n--- GROUP BY with HAVING ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT department, COUNT(*) as emp_count, AVG(salary) as avg_salary
          FROM employees
          GROUP BY department
          HAVING COUNT(*) > 1
-         ORDER BY avg_salary DESC");
+         ORDER BY avg_salary DESC",
+    );
 
     println!("\n--- Multiple Aggregates ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT
              COUNT(*) as total_employees,
              SUM(salary) as total_payroll,
              AVG(salary) as avg_salary,
              MIN(salary) as min_salary,
              MAX(salary) as max_salary
-         FROM employees");
+         FROM employees",
+    );
 
     println!("\n--- COUNT DISTINCT ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT COUNT(DISTINCT department) as num_departments,
                 COUNT(DISTINCT product) as num_products
-         FROM employees, sales");
+         FROM employees, sales",
+    );
 }
 
 fn case_expression_examples(conn: &Connection) {
@@ -305,7 +353,8 @@ fn case_expression_examples(conn: &Connection) {
     println!("{}", "=".repeat(60));
 
     println!("\n--- Simple CASE ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, salary,
                 CASE
                     WHEN salary >= 90000.0 THEN 'Senior'
@@ -313,18 +362,22 @@ fn case_expression_examples(conn: &Connection) {
                     ELSE 'Junior'
                 END as level
          FROM employees
-         ORDER BY salary DESC");
+         ORDER BY salary DESC",
+    );
 
     println!("\n--- CASE with Aggregation ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT department,
                 SUM(CASE WHEN salary >= 80000.0 THEN 1 ELSE 0 END) as high_earners,
                 SUM(CASE WHEN salary < 80000.0 THEN 1 ELSE 0 END) as regular_earners
          FROM employees
-         GROUP BY department");
+         GROUP BY department",
+    );
 
     println!("\n--- Nested CASE ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, department, salary,
                 CASE department
                     WHEN 'Engineering' THEN
@@ -334,7 +387,8 @@ fn case_expression_examples(conn: &Connection) {
                     ELSE 'Other'
                 END as title
          FROM employees
-         ORDER BY department, salary DESC");
+         ORDER BY department, salary DESC",
+    );
 }
 
 fn set_operation_examples(conn: &Connection) {
@@ -343,28 +397,36 @@ fn set_operation_examples(conn: &Connection) {
     println!("{}", "=".repeat(60));
 
     println!("\n--- UNION ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name, 'Employee' as type FROM employees WHERE department = 'Engineering'
          UNION
-         SELECT salesperson as name, 'Salesperson' as type FROM sales WHERE amount > 1000.0");
+         SELECT salesperson as name, 'Salesperson' as type FROM sales WHERE amount > 1000.0",
+    );
 
     println!("\n--- UNION ALL ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name FROM employees WHERE salary > 80000.0
          UNION ALL
-         SELECT name FROM employees WHERE department = 'Engineering'");
+         SELECT name FROM employees WHERE department = 'Engineering'",
+    );
 
     println!("\n--- INTERSECT ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name FROM employees WHERE salary > 80000.0
          INTERSECT
-         SELECT name FROM employees WHERE department = 'Engineering'");
+         SELECT name FROM employees WHERE department = 'Engineering'",
+    );
 
     println!("\n--- EXCEPT ---");
-    run_query(conn,
+    run_query(
+        conn,
         "SELECT name FROM employees WHERE department = 'Engineering'
          EXCEPT
-         SELECT name FROM employees WHERE salary > 90000.0");
+         SELECT name FROM employees WHERE salary > 90000.0",
+    );
 }
 
 fn setup_sample_data(conn: &Connection) {

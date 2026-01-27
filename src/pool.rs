@@ -460,10 +460,7 @@ impl AsyncConnectionPool {
     }
 
     /// Execute a read query asynchronously.
-    pub async fn query(
-        &self,
-        sql: &str,
-    ) -> Result<Vec<arrow::record_batch::RecordBatch>> {
+    pub async fn query(&self, sql: &str) -> Result<Vec<arrow::record_batch::RecordBatch>> {
         let guard = self.acquire().await?;
         guard.connection().query(sql)
     }
@@ -632,10 +629,8 @@ mod tests {
 
     #[test]
     fn test_pool_resize() {
-        let pool = ConnectionPool::new(
-            PoolConfig::new().with_max_size(4).with_min_idle(0),
-        )
-        .unwrap();
+        let pool =
+            ConnectionPool::new(PoolConfig::new().with_max_size(4).with_min_idle(0)).unwrap();
 
         // Fill pool
         let c1 = pool.acquire().unwrap();
@@ -651,20 +646,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_async_pool_creation() {
-        let pool = AsyncConnectionPool::new(
-            PoolConfig::new().with_max_size(4).with_min_idle(0),
-        )
-        .unwrap();
+        let pool =
+            AsyncConnectionPool::new(PoolConfig::new().with_max_size(4).with_min_idle(0)).unwrap();
 
         assert_eq!(pool.available_permits(), 4);
     }
 
     #[tokio::test]
     async fn test_async_pool_query() {
-        let pool = AsyncConnectionPool::new(
-            PoolConfig::new().with_max_size(4).with_min_idle(0),
-        )
-        .unwrap();
+        let pool =
+            AsyncConnectionPool::new(PoolConfig::new().with_max_size(4).with_min_idle(0)).unwrap();
 
         let result = pool.query("SELECT 1 + 1 AS result").await.unwrap();
         assert!(!result.is_empty());
@@ -672,10 +663,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_async_pool_guard_auto_release() {
-        let pool = AsyncConnectionPool::new(
-            PoolConfig::new().with_max_size(2).with_min_idle(0),
-        )
-        .unwrap();
+        let pool =
+            AsyncConnectionPool::new(PoolConfig::new().with_max_size(2).with_min_idle(0)).unwrap();
 
         {
             let guard = pool.acquire().await.unwrap();
@@ -688,20 +677,14 @@ mod tests {
     #[tokio::test]
     async fn test_async_pool_concurrent() {
         let pool = Arc::new(
-            AsyncConnectionPool::new(
-                PoolConfig::new().with_max_size(4).with_min_idle(0),
-            )
-            .unwrap(),
+            AsyncConnectionPool::new(PoolConfig::new().with_max_size(4).with_min_idle(0)).unwrap(),
         );
 
         let mut handles = Vec::new();
         for i in 0..4 {
             let pool = pool.clone();
             handles.push(tokio::spawn(async move {
-                let result = pool
-                    .query(&format!("SELECT {} AS id", i))
-                    .await
-                    .unwrap();
+                let result = pool.query(&format!("SELECT {} AS id", i)).await.unwrap();
                 assert!(!result.is_empty());
             }));
         }

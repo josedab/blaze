@@ -710,15 +710,22 @@ impl S3ObjectStore {
         self
     }
 
-    pub fn bucket(&self) -> &str { &self.bucket }
-    pub fn region(&self) -> &str { &self.region }
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+    pub fn region(&self) -> &str {
+        &self.region
+    }
 
     /// Construct the full URL for an object.
     pub fn object_url(&self, key: &str) -> String {
         if let Some(endpoint) = &self.endpoint {
             format!("{}/{}/{}", endpoint, self.bucket, key)
         } else {
-            format!("https://{}.s3.{}.amazonaws.com/{}", self.bucket, self.region, key)
+            format!(
+                "https://{}.s3.{}.amazonaws.com/{}",
+                self.bucket, self.region, key
+            )
         }
     }
 
@@ -753,7 +760,9 @@ impl GcsObjectStore {
         self
     }
 
-    pub fn bucket(&self) -> &str { &self.bucket }
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
 
     pub fn object_url(&self, key: &str) -> String {
         format!("https://storage.googleapis.com/{}/{}", self.bucket, key)
@@ -791,8 +800,12 @@ impl AzureBlobStore {
         self
     }
 
-    pub fn account(&self) -> &str { &self.account }
-    pub fn container(&self) -> &str { &self.container }
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+    pub fn container(&self) -> &str {
+        &self.container
+    }
 
     pub fn blob_url(&self, key: &str) -> String {
         format!(
@@ -848,8 +861,12 @@ impl ParallelRowGroupFetcher {
         plans
     }
 
-    pub fn concurrency(&self) -> usize { self.concurrency }
-    pub fn stats(&self) -> &FetchStats { &self.stats }
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+    pub fn stats(&self) -> &FetchStats {
+        &self.stats
+    }
 }
 
 /// Metadata for a Parquet row group.
@@ -893,7 +910,9 @@ impl ColumnProjectionFetcher {
             .collect()
     }
 
-    pub fn num_projected(&self) -> usize { self.projected_columns.len() }
+    pub fn num_projected(&self) -> usize {
+        self.projected_columns.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -915,13 +934,15 @@ impl PartitionPruner {
 
     /// Prune partitions that don't match the given filter predicates.
     /// Returns indices of partitions to scan.
-    pub fn prune(&self, partitions: &[PartitionValue], predicates: &[PartitionPredicate]) -> Vec<usize> {
+    pub fn prune(
+        &self,
+        partitions: &[PartitionValue],
+        predicates: &[PartitionPredicate],
+    ) -> Vec<usize> {
         partitions
             .iter()
             .enumerate()
-            .filter(|(_, p)| {
-                predicates.iter().all(|pred| pred.matches(p))
-            })
+            .filter(|(_, p)| predicates.iter().all(|pred| pred.matches(p)))
             .map(|(i, _)| i)
             .collect()
     }
@@ -1017,24 +1038,34 @@ impl MetadataCache {
                 self.entries.remove(&oldest_key);
             }
         }
-        self.entries.insert(key, CacheEntry {
-            data: metadata,
-            inserted_at: std::time::Instant::now(),
-        });
+        self.entries.insert(
+            key,
+            CacheEntry {
+                data: metadata,
+                inserted_at: std::time::Instant::now(),
+            },
+        );
     }
 
     pub fn invalidate(&mut self, key: &str) {
         self.entries.remove(key);
     }
 
-    pub fn clear(&mut self) { self.entries.clear(); }
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     /// Remove expired entries.
     pub fn evict_expired(&mut self) {
         let ttl = self.ttl_secs;
-        self.entries.retain(|_, e| e.inserted_at.elapsed().as_secs() < ttl);
+        self.entries
+            .retain(|_, e| e.inserted_at.elapsed().as_secs() < ttl);
     }
 }
 
@@ -1304,8 +1335,7 @@ impl CredentialChain {
                         });
                     }
                 }
-                CredentialProvider::IamRole { .. }
-                | CredentialProvider::ServiceAccount => {
+                CredentialProvider::IamRole { .. } | CredentialProvider::ServiceAccount => {
                     // Real IAM / SA resolution requires network calls;
                     // intentionally not implemented in the embedded engine.
                 }
@@ -1401,12 +1431,7 @@ impl CloudRouter {
     }
 
     /// Estimate the data transfer cost (USD) between two regions.
-    pub fn estimate_transfer_cost(
-        &self,
-        from: &str,
-        to: &str,
-        bytes: u64,
-    ) -> f64 {
+    pub fn estimate_transfer_cost(&self, from: &str, to: &str, bytes: u64) -> f64 {
         if from == to {
             return 0.0;
         }
@@ -1842,41 +1867,31 @@ impl PartitionedObjectStoreTable {
     }
 
     /// Prune partitions based on predicates, returning only matching ones.
-    pub fn prune_partitions(
-        &self,
-        predicates: &[PartitionPredicate],
-    ) -> Vec<&DiscoveredPartition> {
+    pub fn prune_partitions(&self, predicates: &[PartitionPredicate]) -> Vec<&DiscoveredPartition> {
         self.partitions
             .iter()
             .filter(|partition| {
                 predicates.iter().all(|pred| match pred {
-                    PartitionPredicate::Eq(col, val) => {
-                        partition.partition_values.get(col).map_or(true, |v| v == val)
-                    }
-                    PartitionPredicate::NotEq(col, val) => {
-                        partition
-                            .partition_values
-                            .get(col)
-                            .map_or(true, |v| v != val)
-                    }
-                    PartitionPredicate::In(col, vals) => {
-                        partition
-                            .partition_values
-                            .get(col)
-                            .map_or(true, |v| vals.contains(v))
-                    }
-                    PartitionPredicate::Gt(col, val) => {
-                        partition
-                            .partition_values
-                            .get(col)
-                            .map_or(true, |v| v.as_str() > val.as_str())
-                    }
-                    PartitionPredicate::Lt(col, val) => {
-                        partition
-                            .partition_values
-                            .get(col)
-                            .map_or(true, |v| v.as_str() < val.as_str())
-                    }
+                    PartitionPredicate::Eq(col, val) => partition
+                        .partition_values
+                        .get(col)
+                        .map_or(true, |v| v == val),
+                    PartitionPredicate::NotEq(col, val) => partition
+                        .partition_values
+                        .get(col)
+                        .map_or(true, |v| v != val),
+                    PartitionPredicate::In(col, vals) => partition
+                        .partition_values
+                        .get(col)
+                        .map_or(true, |v| vals.contains(v)),
+                    PartitionPredicate::Gt(col, val) => partition
+                        .partition_values
+                        .get(col)
+                        .map_or(true, |v| v.as_str() > val.as_str()),
+                    PartitionPredicate::Lt(col, val) => partition
+                        .partition_values
+                        .get(col)
+                        .map_or(true, |v| v.as_str() < val.as_str()),
                 })
             })
             .collect()
@@ -2166,9 +2181,7 @@ mod tests {
 
     #[test]
     fn test_parse_partition_path() {
-        let cols = PartitionDiscovery::parse_partition_path(
-            "year=2024/month=01/data.parquet",
-        );
+        let cols = PartitionDiscovery::parse_partition_path("year=2024/month=01/data.parquet");
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0], ("year".to_string(), "2024".to_string()));
         assert_eq!(cols[1], ("month".to_string(), "01".to_string()));
@@ -2178,9 +2191,7 @@ mod tests {
         assert!(cols.is_empty());
 
         // Mixed segments.
-        let cols = PartitionDiscovery::parse_partition_path(
-            "data/region=us-east/file.parquet",
-        );
+        let cols = PartitionDiscovery::parse_partition_path("data/region=us-east/file.parquet");
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0], ("region".to_string(), "us-east".to_string()));
     }
@@ -2353,8 +2364,8 @@ mod tests {
             secret_access_key: "secret".to_string(),
             session_token: None,
         };
-        let store = S3ObjectStore::new("bucket", "us-east-1", creds)
-            .with_endpoint("http://localhost:9000");
+        let store =
+            S3ObjectStore::new("bucket", "us-east-1", creds).with_endpoint("http://localhost:9000");
         let url = store.object_url("key.parquet");
         assert!(url.starts_with("http://localhost:9000"));
     }
@@ -2384,8 +2395,18 @@ mod tests {
     fn test_parallel_row_group_fetcher() {
         let fetcher = ParallelRowGroupFetcher::new(4, 1024);
         let row_groups = vec![
-            RowGroupMeta { index: 0, offset: 0, size_bytes: 3000, num_rows: 100 },
-            RowGroupMeta { index: 1, offset: 3000, size_bytes: 500, num_rows: 50 },
+            RowGroupMeta {
+                index: 0,
+                offset: 0,
+                size_bytes: 3000,
+                num_rows: 100,
+            },
+            RowGroupMeta {
+                index: 1,
+                offset: 3000,
+                size_bytes: 500,
+                num_rows: 50,
+            },
         ];
         let plans = fetcher.plan_fetches(&row_groups);
         assert_eq!(plans.len(), 4); // 3 chunks for first RG + 1 for second
@@ -2411,11 +2432,23 @@ mod tests {
     fn test_partition_pruner_eq() {
         let pruner = PartitionPruner::new(vec!["date".to_string()]);
         let partitions = vec![
-            PartitionValue { column: "date".to_string(), value: "2024-01".to_string() },
-            PartitionValue { column: "date".to_string(), value: "2024-02".to_string() },
-            PartitionValue { column: "date".to_string(), value: "2024-03".to_string() },
+            PartitionValue {
+                column: "date".to_string(),
+                value: "2024-01".to_string(),
+            },
+            PartitionValue {
+                column: "date".to_string(),
+                value: "2024-02".to_string(),
+            },
+            PartitionValue {
+                column: "date".to_string(),
+                value: "2024-03".to_string(),
+            },
         ];
-        let predicates = vec![PartitionPredicate::Eq("date".to_string(), "2024-02".to_string())];
+        let predicates = vec![PartitionPredicate::Eq(
+            "date".to_string(),
+            "2024-02".to_string(),
+        )];
         let result = pruner.prune(&partitions, &predicates);
         assert_eq!(result, vec![1]);
     }
@@ -2424,9 +2457,18 @@ mod tests {
     fn test_partition_pruner_in() {
         let pruner = PartitionPruner::new(vec!["region".to_string()]);
         let partitions = vec![
-            PartitionValue { column: "region".to_string(), value: "us".to_string() },
-            PartitionValue { column: "region".to_string(), value: "eu".to_string() },
-            PartitionValue { column: "region".to_string(), value: "ap".to_string() },
+            PartitionValue {
+                column: "region".to_string(),
+                value: "us".to_string(),
+            },
+            PartitionValue {
+                column: "region".to_string(),
+                value: "eu".to_string(),
+            },
+            PartitionValue {
+                column: "region".to_string(),
+                value: "ap".to_string(),
+            },
         ];
         let predicates = vec![PartitionPredicate::In(
             "region".to_string(),
@@ -2443,13 +2485,16 @@ mod tests {
     #[test]
     fn test_metadata_cache_put_get() {
         let mut cache = MetadataCache::new(60, 100);
-        cache.put("file1.parquet".to_string(), CachedMetadata {
-            file_path: "file1.parquet".to_string(),
-            size_bytes: 1024,
-            num_row_groups: 2,
-            num_rows: 1000,
-            schema_fingerprint: "abc123".to_string(),
-        });
+        cache.put(
+            "file1.parquet".to_string(),
+            CachedMetadata {
+                file_path: "file1.parquet".to_string(),
+                size_bytes: 1024,
+                num_row_groups: 2,
+                num_rows: 1000,
+                schema_fingerprint: "abc123".to_string(),
+            },
+        );
         assert!(cache.get("file1.parquet").is_some());
         assert!(cache.get("nonexistent").is_none());
     }
@@ -2457,13 +2502,16 @@ mod tests {
     #[test]
     fn test_metadata_cache_invalidate() {
         let mut cache = MetadataCache::new(60, 100);
-        cache.put("file1.parquet".to_string(), CachedMetadata {
-            file_path: "file1.parquet".to_string(),
-            size_bytes: 1024,
-            num_row_groups: 1,
-            num_rows: 500,
-            schema_fingerprint: "def".to_string(),
-        });
+        cache.put(
+            "file1.parquet".to_string(),
+            CachedMetadata {
+                file_path: "file1.parquet".to_string(),
+                size_bytes: 1024,
+                num_row_groups: 1,
+                num_rows: 500,
+                schema_fingerprint: "def".to_string(),
+            },
+        );
         cache.invalidate("file1.parquet");
         assert!(cache.get("file1.parquet").is_none());
     }
@@ -2579,10 +2627,7 @@ mod tests {
 
     #[test]
     fn test_credential_chain_anonymous_fallback() {
-        let cred = CredentialChain::new()
-            .with_anonymous()
-            .resolve()
-            .unwrap();
+        let cred = CredentialChain::new().with_anonymous().resolve().unwrap();
         assert!(cred.access_key.is_empty());
     }
 
@@ -2608,8 +2653,11 @@ mod tests {
 
     #[test]
     fn test_cloud_router_route_default() {
-        let router = CloudRouter::new()
-            .add_region("us-east-1", CloudProvider::S3, "https://s3.us-east-1.amazonaws.com");
+        let router = CloudRouter::new().add_region(
+            "us-east-1",
+            CloudProvider::S3,
+            "https://s3.us-east-1.amazonaws.com",
+        );
         let ep = router.route_query("any_table").unwrap();
         assert_eq!(ep.region, "us-east-1");
         assert_eq!(ep.cloud, CloudProvider::S3);
@@ -2618,8 +2666,16 @@ mod tests {
     #[test]
     fn test_cloud_router_route_bound_table() {
         let mut router = CloudRouter::new()
-            .add_region("us-east-1", CloudProvider::S3, "https://s3.us-east-1.amazonaws.com")
-            .add_region("eu-west-1", CloudProvider::S3, "https://s3.eu-west-1.amazonaws.com");
+            .add_region(
+                "us-east-1",
+                CloudProvider::S3,
+                "https://s3.us-east-1.amazonaws.com",
+            )
+            .add_region(
+                "eu-west-1",
+                CloudProvider::S3,
+                "https://s3.eu-west-1.amazonaws.com",
+            );
         router.bind_table("eu_events", "eu-west-1");
         let ep = router.route_query("eu_events").unwrap();
         assert_eq!(ep.region, "eu-west-1");
@@ -2633,8 +2689,11 @@ mod tests {
 
     #[test]
     fn test_cloud_router_transfer_cost_same_region() {
-        let router = CloudRouter::new()
-            .add_region("us-east-1", CloudProvider::S3, "https://s3.amazonaws.com");
+        let router = CloudRouter::new().add_region(
+            "us-east-1",
+            CloudProvider::S3,
+            "https://s3.amazonaws.com",
+        );
         let cost = router.estimate_transfer_cost("us-east-1", "us-east-1", 1_073_741_824);
         assert_eq!(cost, 0.0);
     }
@@ -2643,7 +2702,11 @@ mod tests {
     fn test_cloud_router_transfer_cost_cross_cloud() {
         let router = CloudRouter::new()
             .add_region("us-east-1", CloudProvider::S3, "https://s3.amazonaws.com")
-            .add_region("us-central1", CloudProvider::Gcs, "https://storage.googleapis.com");
+            .add_region(
+                "us-central1",
+                CloudProvider::Gcs,
+                "https://storage.googleapis.com",
+            );
         let cost = router.estimate_transfer_cost("us-east-1", "us-central1", 1_073_741_824);
         // 1 GB cross-cloud at $0.09/GB
         assert!((cost - 0.09).abs() < 1e-6);
@@ -2771,10 +2834,8 @@ mod tests {
             data_schema: None,
         };
 
-        let pruned = table.prune_partitions(&[PartitionPredicate::Eq(
-            "year".into(),
-            "2024".into(),
-        )]);
+        let pruned =
+            table.prune_partitions(&[PartitionPredicate::Eq("year".into(), "2024".into())]);
         assert_eq!(pruned.len(), 1);
         assert_eq!(pruned[0].partition_values.get("year").unwrap(), "2024");
 

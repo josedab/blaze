@@ -151,10 +151,9 @@ fn stem_english(word: &str) -> String {
 
 fn default_stop_words() -> Vec<String> {
     vec![
-        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for",
-        "if", "in", "into", "is", "it", "no", "not", "of", "on", "or",
-        "such", "that", "the", "their", "then", "there", "these", "they",
-        "this", "to", "was", "will", "with",
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is",
+        "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then", "there",
+        "these", "they", "this", "to", "was", "will", "with",
     ]
     .into_iter()
     .map(String::from)
@@ -361,7 +360,11 @@ impl FtsIndex {
             .into_iter()
             .map(|(doc_id, score)| SearchResult { doc_id, score })
             .collect();
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         results
     }
@@ -448,9 +451,9 @@ impl FtsIndex {
                 for (offset, token) in tokens.iter().enumerate().skip(1) {
                     let expected_pos = start_pos + offset as u32;
                     if let Some(next_postings) = self.postings.get(token) {
-                        let has_position = next_postings.iter().any(|p| {
-                            p.doc_id == doc_id && p.positions.contains(&expected_pos)
-                        });
+                        let has_position = next_postings
+                            .iter()
+                            .any(|p| p.doc_id == doc_id && p.positions.contains(&expected_pos));
                         if !has_position {
                             found = false;
                             break;
@@ -510,9 +513,7 @@ impl FtsQuery {
         // Fuzzy query: term~N
         if let Some(tilde_pos) = trimmed.rfind('~') {
             let term = &trimmed[..tilde_pos];
-            let dist = trimmed[tilde_pos + 1..]
-                .parse::<u32>()
-                .unwrap_or(1);
+            let dist = trimmed[tilde_pos + 1..].parse::<u32>().unwrap_or(1);
             if !term.is_empty() {
                 return Ok(FtsQuery::Fuzzy(term.to_string(), dist));
             }
@@ -520,7 +521,10 @@ impl FtsQuery {
 
         // AND query
         if trimmed.contains(" AND ") {
-            let parts: Vec<String> = trimmed.split(" AND ").map(|s| s.trim().to_string()).collect();
+            let parts: Vec<String> = trimmed
+                .split(" AND ")
+                .map(|s| s.trim().to_string())
+                .collect();
             return Ok(FtsQuery::And(parts));
         }
 
@@ -537,7 +541,10 @@ impl FtsQuery {
 
         // OR query
         if trimmed.contains(" OR ") {
-            let parts: Vec<String> = trimmed.split(" OR ").map(|s| s.trim().to_string()).collect();
+            let parts: Vec<String> = trimmed
+                .split(" OR ")
+                .map(|s| s.trim().to_string())
+                .collect();
             return Ok(FtsQuery::Or(parts));
         }
 
@@ -657,10 +664,12 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     for i in 1..=a_len {
         curr[0] = i;
         for j in 1..=b_len {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -743,7 +752,9 @@ mod tests {
         let tokenizer = Tokenizer::default();
         let tokens = tokenizer.tokenize("The Quick Brown FOX");
         assert!(!tokens.contains(&"the".to_string())); // stop word
-        assert!(tokens.iter().any(|t| t.starts_with("quick") || t == "quick"));
+        assert!(tokens
+            .iter()
+            .any(|t| t.starts_with("quick") || t == "quick"));
     }
 
     #[test]
