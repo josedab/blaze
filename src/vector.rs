@@ -1302,6 +1302,214 @@ impl VectorAnalytics {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-Index Selection
+// ---------------------------------------------------------------------------
+
+/// Recommends the best vector index type based on dataset characteristics.
+#[derive(Debug)]
+pub struct VectorIndexSelector;
+
+/// Recommendation for which index type to use.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexRecommendation {
+    pub index_type: RecommendedIndex,
+    pub reason: String,
+    pub estimated_build_time_ms: u64,
+    pub estimated_memory_bytes: u64,
+    pub expected_recall: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecommendedIndex {
+    BruteForce,
+    Hnsw,
+    Ivf,
+    HnswWithPq,
+}
+
+impl VectorIndexSelector {
+    /// Recommend an index type based on dataset size and dimensionality.
+    pub fn recommend(num_vectors: usize, dimensions: usize) -> IndexRecommendation {
+        if num_vectors < 1_000 {
+            IndexRecommendation {
+                index_type: RecommendedIndex::BruteForce,
+                reason: "Small dataset (<1K vectors): brute force is fast enough".into(),
+                estimated_build_time_ms: 0,
+                estimated_memory_bytes: (num_vectors * dimensions * 4) as u64,
+                expected_recall: 1.0,
+            }
+        } else if num_vectors < 100_000 {
+            let memory = (num_vectors * dimensions * 4)
+                + (num_vectors * 16 * std::mem::size_of::<usize>() * 5); // HNSW graph overhead
+            IndexRecommendation {
+                index_type: RecommendedIndex::Hnsw,
+                reason: "Medium dataset (1K-100K): HNSW provides best latency/recall tradeoff".into(),
+                estimated_build_time_ms: (num_vectors as u64) / 10,
+                estimated_memory_bytes: memory as u64,
+                expected_recall: 0.95,
+            }
+        } else if num_vectors < 10_000_000 {
+            let memory = (num_vectors * dimensions * 4)
+                + (num_vectors * 16 * std::mem::size_of::<usize>() * 5);
+            IndexRecommendation {
+                index_type: RecommendedIndex::Hnsw,
+                reason: "Large dataset (100K-10M): HNSW with tuned ef for good recall".into(),
+                estimated_build_time_ms: (num_vectors as u64) / 5,
+                estimated_memory_bytes: memory as u64,
+                expected_recall: 0.92,
+            }
+        } else {
+            let pq_bytes = 32; // compressed vector size
+            let memory = num_vectors * pq_bytes + num_vectors * 4; // PQ vectors + cluster assignments
+            IndexRecommendation {
+                index_type: RecommendedIndex::HnswWithPq,
+                reason: "Very large dataset (>10M): IVF+PQ for memory efficiency".into(),
+                estimated_build_time_ms: (num_vectors as u64) / 2,
+                estimated_memory_bytes: memory as u64,
+                expected_recall: 0.85,
+            }
+        }
+    }
+
+    /// Recommend HNSW parameters based on desired recall and dataset size.
+    pub fn recommend_hnsw_params(num_vectors: usize, target_recall: f64) -> HnswConfig {
+        let m = if target_recall > 0.95 { 32 } else if target_recall > 0.9 { 16 } else { 8 };
+        let ef_construction = if target_recall > 0.95 { 400 } else if target_recall > 0.9 { 200 } else { 100 };
+        let ef_search = if num_vectors > 1_000_000 { 200 } else { 100 };
+
+        HnswConfig {
+            m,
+            ef_construction,
+            ef_search,
+            ..HnswConfig::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vector Index Serialization
+// ---------------------------------------------------------------------------
+
+/// Serializable vector index metadata for persistence.
+#[derive(Debug, Clone)]
+pub struct VectorIndexMeta {
+    pub name: String,
+    pub index_type: String,
+    pub metric: DistanceMetric,
+    pub dimensions: usize,
+    pub num_vectors: usize,
+    pub build_time_ms: u64,
+    pub memory_bytes: u64,
+}
+
+/// Manages multiple vector indexes.
+#[derive(Debug)]
+pub struct VectorIndexManager {
+    indexes: std::collections::HashMap<String, VectorIndexEntry>,
+}
+
+#[derive(Debug)]
+struct VectorIndexEntry {
+    index: Box<dyn VectorIndex>,
+    meta: VectorIndexMeta,
+}
+
+impl std::fmt::Debug for dyn VectorIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VectorIndex")
+    }
+}
+
+impl VectorIndexManager {
+    pub fn new() -> Self {
+        Self {
+            indexes: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Create and register a new HNSW index.
+    pub fn create_hnsw(
+        &mut self,
+        name: &str,
+        metric: DistanceMetric,
+        dimensions: usize,
+        config: Option<HnswConfig>,
+    ) -> &mut dyn VectorIndex {
+        let cfg = config.unwrap_or_default();
+        let index = HnswIndex::new(metric, cfg);
+        let meta = VectorIndexMeta {
+            name: name.to_string(),
+            index_type: "hnsw".to_string(),
+            metric,
+            dimensions,
+            num_vectors: 0,
+            build_time_ms: 0,
+            memory_bytes: 0,
+        };
+        self.indexes.insert(
+            name.to_string(),
+            VectorIndexEntry {
+                index: Box::new(index),
+                meta,
+            },
+        );
+        self.indexes.get_mut(name).unwrap().index.as_mut()
+    }
+
+    /// Create and register a new brute force index.
+    pub fn create_brute_force(
+        &mut self,
+        name: &str,
+        metric: DistanceMetric,
+        dimensions: usize,
+    ) -> &mut dyn VectorIndex {
+        let index = BruteForceIndex::new(metric);
+        let meta = VectorIndexMeta {
+            name: name.to_string(),
+            index_type: "brute_force".to_string(),
+            metric,
+            dimensions,
+            num_vectors: 0,
+            build_time_ms: 0,
+            memory_bytes: 0,
+        };
+        self.indexes.insert(
+            name.to_string(),
+            VectorIndexEntry {
+                index: Box::new(index),
+                meta,
+            },
+        );
+        self.indexes.get_mut(name).unwrap().index.as_mut()
+    }
+
+    /// Get an index by name.
+    pub fn get_index(&self, name: &str) -> Option<&dyn VectorIndex> {
+        self.indexes.get(name).map(|e| e.index.as_ref())
+    }
+
+    /// Get index metadata.
+    pub fn get_meta(&self, name: &str) -> Option<&VectorIndexMeta> {
+        self.indexes.get(name).map(|e| &e.meta)
+    }
+
+    /// Drop an index.
+    pub fn drop_index(&mut self, name: &str) -> bool {
+        self.indexes.remove(name).is_some()
+    }
+
+    /// List all index names.
+    pub fn list_indexes(&self) -> Vec<&str> {
+        self.indexes.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Total number of indexes.
+    pub fn index_count(&self) -> usize {
+        self.indexes.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1870,5 +2078,72 @@ mod tests {
         assert!((matrix[0][0] - 0.0).abs() < 1e-6);
         assert!((matrix[0][1] - 5.0).abs() < 1e-6);
         assert!((matrix[1][0] - 5.0).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-Index Selection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_index_selector_small() {
+        let rec = VectorIndexSelector::recommend(500, 128);
+        assert_eq!(rec.index_type, RecommendedIndex::BruteForce);
+        assert_eq!(rec.expected_recall, 1.0);
+    }
+
+    #[test]
+    fn test_index_selector_medium() {
+        let rec = VectorIndexSelector::recommend(50_000, 256);
+        assert_eq!(rec.index_type, RecommendedIndex::Hnsw);
+        assert!(rec.expected_recall >= 0.9);
+    }
+
+    #[test]
+    fn test_index_selector_large() {
+        let rec = VectorIndexSelector::recommend(50_000_000, 384);
+        assert_eq!(rec.index_type, RecommendedIndex::HnswWithPq);
+    }
+
+    #[test]
+    fn test_hnsw_param_recommendation() {
+        let params = VectorIndexSelector::recommend_hnsw_params(1_000_000, 0.97);
+        assert_eq!(params.m, 32);
+        assert_eq!(params.ef_construction, 400);
+    }
+
+    // -----------------------------------------------------------------------
+    // VectorIndexManager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_index_manager_create_hnsw() {
+        let mut manager = VectorIndexManager::new();
+        manager.create_hnsw("test_idx", DistanceMetric::L2, 3, None);
+
+        assert_eq!(manager.index_count(), 1);
+        let meta = manager.get_meta("test_idx").unwrap();
+        assert_eq!(meta.index_type, "hnsw");
+        assert_eq!(meta.dimensions, 3);
+    }
+
+    #[test]
+    fn test_index_manager_create_brute_force() {
+        let mut manager = VectorIndexManager::new();
+        manager.create_brute_force("bf_idx", DistanceMetric::Cosine, 4);
+
+        assert!(manager.get_index("bf_idx").is_some());
+        assert!(manager.get_index("missing").is_none());
+    }
+
+    #[test]
+    fn test_index_manager_drop() {
+        let mut manager = VectorIndexManager::new();
+        manager.create_brute_force("idx1", DistanceMetric::L2, 2);
+        manager.create_brute_force("idx2", DistanceMetric::L2, 2);
+        assert_eq!(manager.index_count(), 2);
+
+        assert!(manager.drop_index("idx1"));
+        assert_eq!(manager.index_count(), 1);
+        assert!(!manager.drop_index("idx1")); // already dropped
     }
 }
