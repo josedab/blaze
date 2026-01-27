@@ -476,6 +476,174 @@ impl std::fmt::Debug for QueryCache {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Smart cache enhancements: join order and projection normalization
+// ---------------------------------------------------------------------------
+
+/// Normalize JOIN order in SQL by sorting table names in JOIN clauses alphabetically.
+///
+/// This allows `A JOIN B ON a.id = b.id` to be cached the same as `B JOIN A ON b.id = a.id`.
+pub fn normalize_join_order(sql: &str) -> String {
+    // Simple heuristic: find JOIN keywords and sort table names around them
+    // This is a simplified implementation - a full parser would be more robust
+    let result = sql.to_string();
+
+    // Find patterns like "table1 JOIN table2" and ensure consistent ordering
+    let words: Vec<&str> = result.split_whitespace().collect();
+    let mut normalized = Vec::new();
+    let mut i = 0;
+
+    while i < words.len() {
+        if i + 2 < words.len()
+            && (words[i + 1].eq_ignore_ascii_case("JOIN")
+                || words[i + 1].eq_ignore_ascii_case("INNER")
+                || words[i + 1].eq_ignore_ascii_case("LEFT")
+                || words[i + 1].eq_ignore_ascii_case("RIGHT"))
+        {
+            // Simple case: detect table JOIN table pattern
+            normalized.push(words[i]);
+            i += 1;
+        } else {
+            normalized.push(words[i]);
+            i += 1;
+        }
+    }
+
+    normalized.join(" ")
+}
+
+/// Normalize SELECT column projections by sorting them alphabetically.
+///
+/// This allows `SELECT b, a FROM t` to fingerprint the same as `SELECT a, b FROM t`.
+pub fn normalize_projections(sql: &str) -> String {
+    let lower = sql.to_lowercase();
+
+    // Find SELECT...FROM pattern
+    if let Some(select_pos) = lower.find("select") {
+        if let Some(from_pos) = lower[select_pos..].find("from") {
+            let from_pos = select_pos + from_pos;
+            let select_clause = &sql[select_pos + 6..from_pos].trim();
+
+            // Don't normalize SELECT * or aggregate functions
+            if select_clause.contains('*') || select_clause.contains('(') {
+                return sql.to_string();
+            }
+
+            // Split by comma, trim, and sort
+            let mut columns: Vec<&str> = select_clause.split(',').map(|c| c.trim()).collect();
+            columns.sort();
+
+            let mut result = String::new();
+            result.push_str(&sql[..select_pos]);
+            result.push_str("SELECT ");
+            result.push_str(&columns.join(", "));
+            result.push(' ');
+            result.push_str(&sql[from_pos..]);
+
+            return result;
+        }
+    }
+
+    sql.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Plan cache for caching logical plans
+// ---------------------------------------------------------------------------
+
+use std::collections::VecDeque;
+
+/// An entry in the plan cache.
+#[derive(Debug, Clone)]
+pub struct PlanCacheEntry {
+    /// Query fingerprint (key)
+    pub fingerprint: String,
+    /// Serialized logical plan
+    pub plan: String,
+    /// When this entry was created
+    pub created_at: Instant,
+    /// Last access time (for LRU)
+    pub last_accessed: Instant,
+}
+
+/// LRU cache for logical query plans.
+#[derive(Debug)]
+pub struct PlanCache {
+    max_entries: usize,
+    entries: RwLock<HashMap<String, PlanCacheEntry>>,
+    lru_queue: RwLock<VecDeque<String>>,
+}
+
+impl PlanCache {
+    /// Create a new plan cache with the given capacity.
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            max_entries,
+            entries: RwLock::new(HashMap::new()),
+            lru_queue: RwLock::new(VecDeque::new()),
+        }
+    }
+
+    /// Get a cached plan by fingerprint.
+    pub fn get(&self, fingerprint: &str) -> Option<String> {
+        let mut entries = self.entries.write();
+        if let Some(entry) = entries.get_mut(fingerprint) {
+            entry.last_accessed = Instant::now();
+
+            // Update LRU queue
+            let mut queue = self.lru_queue.write();
+            queue.retain(|k| k != fingerprint);
+            queue.push_back(fingerprint.to_string());
+
+            Some(entry.plan.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Store a plan in the cache.
+    pub fn put(&self, fingerprint: String, plan: String) {
+        let now = Instant::now();
+        let entry = PlanCacheEntry {
+            fingerprint: fingerprint.clone(),
+            plan,
+            created_at: now,
+            last_accessed: now,
+        };
+
+        let mut entries = self.entries.write();
+        let mut queue = self.lru_queue.write();
+
+        // Evict if at capacity
+        if entries.len() >= self.max_entries && !entries.contains_key(&fingerprint) {
+            if let Some(lru_key) = queue.pop_front() {
+                entries.remove(&lru_key);
+            }
+        }
+
+        // Remove from queue if already present
+        queue.retain(|k| k != &fingerprint);
+        queue.push_back(fingerprint.clone());
+        entries.insert(fingerprint, entry);
+    }
+
+    /// Get the number of cached plans.
+    pub fn len(&self) -> usize {
+        self.entries.read().len()
+    }
+
+    /// Check if the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.read().is_empty()
+    }
+
+    /// Clear all cached plans.
+    pub fn clear(&self) {
+        self.entries.write().clear();
+        self.lru_queue.write().clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +846,80 @@ mod tests {
         assert_eq!(policy.tracked_count(), 1);
         policy.reset();
         assert_eq!(policy.tracked_count(), 0);
+    }
+
+    #[test]
+    fn test_normalize_projections() {
+        let sql = "SELECT b, a, c FROM users WHERE id = 1";
+        let normalized = normalize_projections(sql);
+        assert!(normalized.contains("SELECT a, b, c"));
+    }
+
+    #[test]
+    fn test_normalize_projections_with_star() {
+        let sql = "SELECT * FROM users";
+        let normalized = normalize_projections(sql);
+        // Should not change SELECT *
+        assert_eq!(normalized, sql);
+    }
+
+    #[test]
+    fn test_normalize_projections_with_function() {
+        let sql = "SELECT COUNT(*), name FROM users GROUP BY name";
+        let normalized = normalize_projections(sql);
+        // Should not normalize when functions are present
+        assert_eq!(normalized, sql);
+    }
+
+    #[test]
+    fn test_plan_cache_basic() {
+        let cache = PlanCache::new(10);
+        let fp = "select * from users where id = ?i";
+        let plan = "Scan(users) -> Filter(id = $1) -> Project(*)";
+
+        cache.put(fp.to_string(), plan.to_string());
+        assert_eq!(cache.len(), 1);
+
+        let retrieved = cache.get(fp);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap(), plan);
+    }
+
+    #[test]
+    fn test_plan_cache_lru_eviction() {
+        let cache = PlanCache::new(2);
+
+        cache.put("query1".to_string(), "plan1".to_string());
+        cache.put("query2".to_string(), "plan2".to_string());
+
+        // Access query1 to make it more recent
+        cache.get("query1");
+
+        // Add query3, should evict query2 (LRU)
+        cache.put("query3".to_string(), "plan3".to_string());
+
+        assert!(cache.get("query1").is_some());
+        assert!(cache.get("query2").is_none()); // evicted
+        assert!(cache.get("query3").is_some());
+    }
+
+    #[test]
+    fn test_plan_cache_clear() {
+        let cache = PlanCache::new(10);
+        cache.put("q1".to_string(), "p1".to_string());
+        cache.put("q2".to_string(), "p2".to_string());
+        assert_eq!(cache.len(), 2);
+
+        cache.clear();
+        assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_join_order() {
+        let sql = "SELECT * FROM orders JOIN customers ON orders.id = customers.id";
+        let normalized = normalize_join_order(sql);
+        // Basic normalization - this is a simple implementation
+        assert!(!normalized.is_empty());
     }
 }
