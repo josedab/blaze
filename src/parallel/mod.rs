@@ -20,13 +20,13 @@
 //! let results = executor.execute(plan)?;
 //! ```
 
-mod partition;
 mod exchange;
+mod partition;
 mod worker;
 
-pub use partition::{Partitioning, HashPartitioner, RangePartitioner, RoundRobinPartitioner};
-pub use exchange::{ExchangeType, Exchange, ShuffleExchange, BroadcastExchange};
-pub use worker::{WorkerPool, WorkerTask, TaskResult};
+pub use exchange::{BroadcastExchange, Exchange, ExchangeType, ShuffleExchange};
+pub use partition::{HashPartitioner, Partitioning, RangePartitioner, RoundRobinPartitioner};
+pub use worker::{TaskResult, WorkerPool, WorkerTask};
 
 use std::sync::Arc;
 use std::thread;
@@ -34,8 +34,8 @@ use std::thread;
 use arrow::record_batch::RecordBatch;
 
 use crate::error::Result;
-use crate::planner::PhysicalPlan;
 use crate::executor::ExecutionContext;
+use crate::planner::PhysicalPlan;
 
 /// Default parallelism level (number of CPU cores)
 pub fn default_parallelism() -> usize {
@@ -118,7 +118,10 @@ impl ParallelExecutor {
     /// Create a new parallel executor with the given configuration.
     pub fn new(config: ExecutionConfig) -> Self {
         let worker_pool = WorkerPool::new(config.parallelism);
-        Self { config, worker_pool }
+        Self {
+            config,
+            worker_pool,
+        }
     }
 
     /// Execute a physical plan in parallel.
@@ -162,7 +165,11 @@ impl ParallelExecutor {
     }
 
     /// Execute plan with specified number of partitions.
-    fn execute_with_partitions(&self, plan: &PhysicalPlan, partitions: usize) -> Result<Vec<RecordBatch>> {
+    fn execute_with_partitions(
+        &self,
+        plan: &PhysicalPlan,
+        partitions: usize,
+    ) -> Result<Vec<RecordBatch>> {
         if partitions == 1 {
             // Single partition - use regular execution
             let ctx = ExecutionContext::new();

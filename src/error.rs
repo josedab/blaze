@@ -12,7 +12,10 @@ use thiserror::Error;
 pub enum BlazeError {
     /// SQL parsing error
     #[error("SQL parse error: {message}")]
-    Parse { message: String, location: Option<Location> },
+    Parse {
+        message: String,
+        location: Option<Location>,
+    },
 
     /// SQL binding/analysis error
     #[error("Analysis error: {message}")]
@@ -224,10 +227,7 @@ impl BlazeError {
     }
 
     /// Create a catalog error with suggestions for similar table names.
-    pub fn catalog_with_suggestions(
-        not_found: &str,
-        available: &[String],
-    ) -> Self {
+    pub fn catalog_with_suggestions(not_found: &str, available: &[String]) -> Self {
         let suggestions = find_similar_names(not_found, available, 3);
         let mut message = format!("Table '{}' not found", not_found);
 
@@ -241,10 +241,7 @@ impl BlazeError {
     }
 
     /// Create an analysis error with suggestions for similar function names.
-    pub fn function_not_found(
-        not_found: &str,
-        available: &[String],
-    ) -> Self {
+    pub fn function_not_found(not_found: &str, available: &[String]) -> Self {
         let suggestions = find_similar_names(not_found, available, 3);
         let mut message = format!("Function '{}' not found", not_found);
 
@@ -262,7 +259,11 @@ impl BlazeError {
 ///
 /// Returns up to `max_suggestions` names that are similar to `target`,
 /// sorted by similarity (most similar first).
-pub fn find_similar_names(target: &str, candidates: &[String], max_suggestions: usize) -> Vec<String> {
+pub fn find_similar_names(
+    target: &str,
+    candidates: &[String],
+    max_suggestions: usize,
+) -> Vec<String> {
     const MIN_SIMILARITY: f64 = 0.7; // Threshold for considering a match
 
     let target_lower = target.to_lowercase();
@@ -358,11 +359,7 @@ mod tests {
 
     #[test]
     fn test_schema_error_with_suggestions() {
-        let available = vec![
-            "id".to_string(),
-            "name".to_string(),
-            "email".to_string(),
-        ];
+        let available = vec!["id".to_string(), "name".to_string(), "email".to_string()];
 
         let err = BlazeError::schema_with_suggestions("nam", &available, "Column");
         let msg = err.to_string();

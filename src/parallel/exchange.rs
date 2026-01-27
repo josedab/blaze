@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use arrow::record_batch::RecordBatch;
 
-use crate::error::{BlazeError, Result};
 use super::partition::{HashPartitioner, RoundRobinPartitioner};
+use crate::error::{BlazeError, Result};
 
 /// Type of exchange operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,8 +76,7 @@ impl Exchange for ShuffleExchange {
         let partitioner = HashPartitioner::new(self.output_partitions, self.key_columns.clone());
 
         // Partition each input batch
-        let mut output_buffers: Vec<Vec<RecordBatch>> =
-            vec![Vec::new(); self.output_partitions];
+        let mut output_buffers: Vec<Vec<RecordBatch>> = vec![Vec::new(); self.output_partitions];
 
         for input_batches in inputs {
             for batch in input_batches {
@@ -143,10 +142,12 @@ impl Exchange for BroadcastExchange {
 
 /// Gather exchange collects all data into a single partition.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct GatherExchange {
     input_partitions: usize,
 }
 
+#[allow(dead_code)]
 impl GatherExchange {
     /// Create a new gather exchange.
     pub fn new(input_partitions: usize) -> Self {
@@ -176,11 +177,13 @@ impl Exchange for GatherExchange {
 
 /// Round-robin exchange distributes data evenly.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct RoundRobinExchange {
     input_partitions: usize,
     output_partitions: usize,
 }
 
+#[allow(dead_code)]
 impl RoundRobinExchange {
     /// Create a new round-robin exchange.
     pub fn new(input_partitions: usize, output_partitions: usize) -> Self {
@@ -207,8 +210,7 @@ impl Exchange for RoundRobinExchange {
     fn execute(&self, inputs: Vec<Vec<RecordBatch>>) -> Result<Vec<Vec<RecordBatch>>> {
         let partitioner = RoundRobinPartitioner::new(self.output_partitions);
 
-        let mut output_buffers: Vec<Vec<RecordBatch>> =
-            vec![Vec::new(); self.output_partitions];
+        let mut output_buffers: Vec<Vec<RecordBatch>> = vec![Vec::new(); self.output_partitions];
 
         for input_batches in inputs {
             for batch in input_batches {
@@ -231,11 +233,13 @@ impl Exchange for RoundRobinExchange {
 
 /// Exchange buffer for collecting data during parallel execution.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ExchangeBuffer {
     buffers: Vec<Mutex<Vec<RecordBatch>>>,
     num_partitions: usize,
 }
 
+#[allow(dead_code)]
 impl ExchangeBuffer {
     /// Create a new exchange buffer.
     pub fn new(num_partitions: usize) -> Self {
@@ -254,11 +258,13 @@ impl ExchangeBuffer {
         if partition_id >= self.num_partitions {
             return Err(BlazeError::execution(format!(
                 "Invalid partition id: {} (max: {})",
-                partition_id, self.num_partitions - 1
+                partition_id,
+                self.num_partitions - 1
             )));
         }
 
-        let mut buffer = self.buffers[partition_id].lock()
+        let mut buffer = self.buffers[partition_id]
+            .lock()
             .map_err(|_| BlazeError::execution("Failed to acquire buffer lock"))?;
         buffer.push(batch);
         Ok(())
@@ -269,11 +275,13 @@ impl ExchangeBuffer {
         if partition_id >= self.num_partitions {
             return Err(BlazeError::execution(format!(
                 "Invalid partition id: {} (max: {})",
-                partition_id, self.num_partitions - 1
+                partition_id,
+                self.num_partitions - 1
             )));
         }
 
-        let mut buffer = self.buffers[partition_id].lock()
+        let mut buffer = self.buffers[partition_id]
+            .lock()
             .map_err(|_| BlazeError::execution("Failed to acquire buffer lock"))?;
         Ok(std::mem::take(&mut *buffer))
     }
@@ -295,6 +303,7 @@ impl ExchangeBuffer {
 
 /// Builder for creating exchange operators.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ExchangeBuilder {
     input_partitions: usize,
     output_partitions: usize,
@@ -302,6 +311,7 @@ pub struct ExchangeBuilder {
     key_columns: Vec<usize>,
 }
 
+#[allow(dead_code)]
 impl ExchangeBuilder {
     /// Create a new exchange builder.
     pub fn new(input_partitions: usize, output_partitions: usize) -> Self {
@@ -352,12 +362,9 @@ impl ExchangeBuilder {
                 self.output_partitions,
             )),
             ExchangeType::Gather => Box::new(GatherExchange::new(self.input_partitions)),
-            ExchangeType::RoundRobin | ExchangeType::Repartition => {
-                Box::new(RoundRobinExchange::new(
-                    self.input_partitions,
-                    self.output_partitions,
-                ))
-            }
+            ExchangeType::RoundRobin | ExchangeType::Repartition => Box::new(
+                RoundRobinExchange::new(self.input_partitions, self.output_partitions),
+            ),
         }
     }
 }
@@ -365,9 +372,9 @@ impl ExchangeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     fn make_test_batch(ids: &[i64], names: &[&str]) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -391,7 +398,8 @@ mod tests {
 
         assert_eq!(result.len(), 4);
 
-        let total_rows: usize = result.iter()
+        let total_rows: usize = result
+            .iter()
             .flat_map(|batches| batches.iter())
             .map(|b| b.num_rows())
             .sum();
@@ -447,9 +455,7 @@ mod tests {
 
     #[test]
     fn test_exchange_builder() {
-        let exchange = ExchangeBuilder::new(4, 8)
-            .shuffle(vec![0])
-            .build();
+        let exchange = ExchangeBuilder::new(4, 8).shuffle(vec![0]).build();
 
         assert_eq!(exchange.exchange_type(), ExchangeType::Shuffle);
         assert_eq!(exchange.input_partitions(), 4);

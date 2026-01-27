@@ -43,7 +43,14 @@ impl JoinOrderOptimizer {
     /// Recursively optimize join ordering in a plan.
     fn optimize_plan(&self, plan: &LogicalPlan, cost_model: &CostModel) -> Result<LogicalPlan> {
         match plan {
-            LogicalPlan::Join { left, right, join_type, on, filter, schema } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                schema,
+            } => {
                 // First, recursively optimize children
                 let optimized_left = self.optimize_plan(left, cost_model)?;
                 let optimized_right = self.optimize_plan(right, cost_model)?;
@@ -64,20 +71,12 @@ impl JoinOrderOptimizer {
 
                 // If we have multiple relations, optimize join order
                 if relations.len() > 2 && relations.len() <= self.max_relations_exhaustive {
-                    self.optimize_join_order(
-                        relations,
-                        join_conditions,
-                        schema.clone(),
-                        cost_model,
-                    )
-                } else if relations.len() > self.max_relations_exhaustive && self.use_greedy_fallback {
+                    self.optimize_join_order(relations, join_conditions, schema.clone(), cost_model)
+                } else if relations.len() > self.max_relations_exhaustive
+                    && self.use_greedy_fallback
+                {
                     // Use greedy algorithm for large join graphs
-                    self.greedy_join_order(
-                        relations,
-                        join_conditions,
-                        schema.clone(),
-                        cost_model,
-                    )
+                    self.greedy_join_order(relations, join_conditions, schema.clone(), cost_model)
                 } else {
                     // Keep original order
                     Ok(LogicalPlan::Join {
@@ -97,7 +96,11 @@ impl JoinOrderOptimizer {
                     predicate: predicate.clone(),
                 })
             }
-            LogicalPlan::Projection { input, exprs, schema } => {
+            LogicalPlan::Projection {
+                input,
+                exprs,
+                schema,
+            } => {
                 let optimized_input = self.optimize_plan(input, cost_model)?;
                 Ok(LogicalPlan::Projection {
                     input: Arc::new(optimized_input),
@@ -105,7 +108,12 @@ impl JoinOrderOptimizer {
                     schema: schema.clone(),
                 })
             }
-            LogicalPlan::Aggregate { input, group_by, aggr_exprs, schema } => {
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggr_exprs,
+                schema,
+            } => {
                 let optimized_input = self.optimize_plan(input, cost_model)?;
                 Ok(LogicalPlan::Aggregate {
                     input: Arc::new(optimized_input),
@@ -129,7 +137,11 @@ impl JoinOrderOptimizer {
                     fetch: *fetch,
                 })
             }
-            LogicalPlan::SubqueryAlias { input, alias, schema } => {
+            LogicalPlan::SubqueryAlias {
+                input,
+                alias,
+                schema,
+            } => {
                 let optimized_input = self.optimize_plan(input, cost_model)?;
                 Ok(LogicalPlan::SubqueryAlias {
                     input: Arc::new(optimized_input),
@@ -175,7 +187,9 @@ impl JoinOrderOptimizer {
         join_conditions: &mut Vec<JoinCondition>,
     ) {
         match plan {
-            LogicalPlan::Join { left, right, on, .. } => {
+            LogicalPlan::Join {
+                left, right, on, ..
+            } => {
                 self.extract_relations_recursive(left, relations, join_conditions);
                 self.extract_relations_recursive(right, relations, join_conditions);
                 for (left_expr, right_expr) in on {
@@ -198,7 +212,11 @@ impl JoinOrderOptimizer {
     }
 
     /// Parse an equality condition from two expressions.
-    fn parse_equality_condition(&self, left: &LogicalExpr, right: &LogicalExpr) -> Option<JoinCondition> {
+    fn parse_equality_condition(
+        &self,
+        left: &LogicalExpr,
+        right: &LogicalExpr,
+    ) -> Option<JoinCondition> {
         let left_col = self.extract_column(left)?;
         let right_col = self.extract_column(right)?;
         Some(JoinCondition {
@@ -230,12 +248,13 @@ impl JoinOrderOptimizer {
     ) -> Result<LogicalPlan> {
         let n = relations.len();
         if n <= 1 {
-            return Ok(relations.into_iter().next().unwrap_or_else(|| {
-                LogicalPlan::Values {
+            return Ok(relations
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| LogicalPlan::Values {
                     values: vec![],
                     schema: schema.clone(),
-                }
-            }));
+                }));
         }
 
         // Build a join graph
@@ -248,11 +267,14 @@ impl JoinOrderOptimizer {
         for (i, rel) in relations.iter().enumerate() {
             let set = RelationSet::singleton(i);
             let cost = cost_model.estimate(rel).unwrap_or_else(|_| Cost::zero());
-            dp.insert(set, DpEntry {
-                plan: rel.clone(),
-                cost,
-                cardinality: 1000, // Default estimate
-            });
+            dp.insert(
+                set,
+                DpEntry {
+                    plan: rel.clone(),
+                    cost,
+                    cardinality: 1000, // Default estimate
+                },
+            );
         }
 
         // Build up larger sets
@@ -306,10 +328,8 @@ impl JoinOrderOptimizer {
                         );
 
                         // Create the combined schema
-                        let combined_schema = Self::combine_schemas(
-                            &left_entry.plan,
-                            &right_entry.plan,
-                        );
+                        let combined_schema =
+                            Self::combine_schemas(&left_entry.plan, &right_entry.plan);
 
                         best_plan = Some(LogicalPlan::Join {
                             left: Arc::new(left_entry.plan.clone()),
@@ -323,15 +343,16 @@ impl JoinOrderOptimizer {
                 }
 
                 if let Some(plan) = best_plan {
-                    let cardinality = dp.get(&subset)
-                        .map(|e| e.cardinality)
-                        .unwrap_or(1000);
+                    let cardinality = dp.get(&subset).map(|e| e.cardinality).unwrap_or(1000);
 
-                    dp.insert(subset, DpEntry {
-                        plan,
-                        cost: best_cost,
-                        cardinality,
-                    });
+                    dp.insert(
+                        subset,
+                        DpEntry {
+                            plan,
+                            cost: best_cost,
+                            cardinality,
+                        },
+                    );
                 }
             }
         }
@@ -572,9 +593,7 @@ impl JoinGraph {
         let table_to_idx: HashMap<String, usize> = relations
             .iter()
             .enumerate()
-            .filter_map(|(i, plan)| {
-                Self::get_table_name(plan).map(|name| (name, i))
-            })
+            .filter_map(|(i, plan)| Self::get_table_name(plan).map(|name| (name, i)))
             .collect();
 
         // Build edges from join conditions
@@ -609,7 +628,12 @@ impl JoinGraph {
     }
 
     /// Check if there's a join edge between two relation sets.
-    fn has_join_edge(&self, left: &RelationSet, right: &RelationSet, _relations: &[LogicalPlan]) -> bool {
+    fn has_join_edge(
+        &self,
+        left: &RelationSet,
+        right: &RelationSet,
+        _relations: &[LogicalPlan],
+    ) -> bool {
         for &(i, j) in &self.edges {
             if (left.contains(i) && right.contains(j)) || (left.contains(j) && right.contains(i)) {
                 return true;
@@ -646,7 +670,11 @@ impl JoinGraph {
     }
 
     /// Find direct join conditions between two plans.
-    fn find_direct_conditions(&self, _left: &LogicalPlan, _right: &LogicalPlan) -> Vec<(LogicalExpr, LogicalExpr)> {
+    fn find_direct_conditions(
+        &self,
+        _left: &LogicalPlan,
+        _right: &LogicalPlan,
+    ) -> Vec<(LogicalExpr, LogicalExpr)> {
         // Return empty for now - would need table name extraction
         Vec::new()
     }
@@ -832,18 +860,14 @@ mod tests {
             create_test_scan("c"),
         ];
 
-        let conditions = vec![
-            JoinCondition {
-                left_table: "a".to_string(),
-                left_column: "id".to_string(),
-                right_table: "b".to_string(),
-                right_column: "a_id".to_string(),
-            },
-        ];
+        let conditions = vec![JoinCondition {
+            left_table: "a".to_string(),
+            left_column: "id".to_string(),
+            right_table: "b".to_string(),
+            right_column: "a_id".to_string(),
+        }];
 
-        let schema = Schema::new(vec![
-            Field::new("id", DataType::Int32, false),
-        ]);
+        let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
 
         let result = optimizer.greedy_join_order(relations, conditions, schema, &cost_model);
         assert!(result.is_ok());

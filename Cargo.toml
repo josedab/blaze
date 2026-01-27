@@ -22,9 +22,28 @@ default = []
 python = ["pyo3"]
 c-ffi = []
 wasm = []
+gpu = []
+flight = []
+nlq = []
+simd = []
+federation = []
+lakehouse = []
+streaming = []
+timeseries = []
+adaptive = []
+learned-optimizer = []
+all-extensions = [
+    "gpu", "flight", "nlq", "simd", "federation",
+    "lakehouse", "streaming", "timeseries", "adaptive",
+    "learned-optimizer",
+]
 
 [[bench]]
 name = "query_benchmarks"
+harness = false
+
+[[bench]]
+name = "tpch_benchmarks"
 harness = false
 
 [dependencies]
@@ -39,6 +58,10 @@ strsim = "0.11"
 
 # Regular expressions
 regex = "1.10"
+
+# Hashing
+md5 = "0.7"
+sha2 = "0.10"
 
 # Apache Arrow ecosystem
 arrow = { version = "57", features = ["prettyprint"] }
@@ -89,6 +112,9 @@ crossbeam-channel = "0.5"
 
 # Delta Lake
 deltalake = { version = "0.30", features = ["datafusion"] }
+
+# Base64 encoding (for WAL persistence)
+base64 = "0.22"
 
 # LRU cache
 lru = "0.12"

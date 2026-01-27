@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-pub use table::{Table, TableProvider, TableType, TableStatistics, ColumnStatistics};
+pub use table::{ColumnStatistics, Table, TableProvider, TableStatistics, TableType};
 
 use crate::error::{BlazeError, Result};
 
@@ -33,10 +33,10 @@ impl Catalog {
             schemas: RwLock::new(HashMap::new()),
         };
         // Create default schema
-        catalog.schemas.write().insert(
-            "main".to_string(),
-            Arc::new(SchemaProvider::new("main")),
-        );
+        catalog
+            .schemas
+            .write()
+            .insert("main".to_string(), Arc::new(SchemaProvider::new("main")));
         catalog
     }
 
@@ -82,7 +82,10 @@ impl Catalog {
     pub fn create_schema(&mut self, name: &str) -> Result<()> {
         let mut schemas = self.schemas.write();
         if schemas.contains_key(name) {
-            return Err(BlazeError::schema(format!("Schema '{}' already exists", name)));
+            return Err(BlazeError::schema(format!(
+                "Schema '{}' already exists",
+                name
+            )));
         }
         schemas.insert(name.to_string(), Arc::new(SchemaProvider::new(name)));
         Ok(())
@@ -276,7 +279,11 @@ pub struct ResolvedTableRef {
 
 impl ResolvedTableRef {
     /// Create a new resolved table reference.
-    pub fn new(catalog: impl Into<String>, schema: impl Into<String>, table: impl Into<String>) -> Self {
+    pub fn new(
+        catalog: impl Into<String>,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+    ) -> Self {
         Self {
             catalog: catalog.into(),
             schema: schema.into(),

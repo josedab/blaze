@@ -2,9 +2,8 @@
 //!
 //! Estimates the number of rows produced by query operators using statistics.
 
-
 use crate::error::Result;
-use crate::planner::{BinaryOp, LogicalExpr, LogicalPlan, JoinType};
+use crate::planner::{BinaryOp, JoinType, LogicalExpr, LogicalPlan};
 
 use super::statistics::StatisticsManager;
 
@@ -68,26 +67,31 @@ impl CardinalityEstimator {
             LogicalPlan::TableScan { table_ref, .. } => {
                 self.estimate_scan(&table_ref.to_string(), stats_manager)
             }
-            LogicalPlan::Filter { input, predicate, .. } => {
+            LogicalPlan::Filter {
+                input, predicate, ..
+            } => {
                 let input_cardinality = self.estimate_plan(input, stats_manager)?;
                 let selectivity = self.estimate_selectivity(predicate, stats_manager);
                 Ok((input_cardinality as f64 * selectivity).ceil() as usize)
             }
-            LogicalPlan::Projection { input, .. } => {
-                self.estimate_plan(input, stats_manager)
-            }
-            LogicalPlan::Aggregate { input, group_by, .. } => {
+            LogicalPlan::Projection { input, .. } => self.estimate_plan(input, stats_manager),
+            LogicalPlan::Aggregate {
+                input, group_by, ..
+            } => {
                 let input_cardinality = self.estimate_plan(input, stats_manager)?;
                 self.estimate_aggregate(input_cardinality, group_by.len())
             }
-            LogicalPlan::Sort { input, .. } => {
-                self.estimate_plan(input, stats_manager)
-            }
+            LogicalPlan::Sort { input, .. } => self.estimate_plan(input, stats_manager),
             LogicalPlan::Limit { input, fetch, .. } => {
                 let input_cardinality = self.estimate_plan(input, stats_manager)?;
                 Ok(fetch.unwrap_or(input_cardinality).min(input_cardinality))
             }
-            LogicalPlan::Join { left, right, join_type, .. } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                ..
+            } => {
                 let left_cardinality = self.estimate_plan(left, stats_manager)?;
                 let right_cardinality = self.estimate_plan(right, stats_manager)?;
                 self.estimate_join(left_cardinality, right_cardinality, join_type)
@@ -107,29 +111,19 @@ impl CardinalityEstimator {
                 let right_cardinality = self.estimate_plan(right, stats_manager)?;
                 Ok(left_cardinality + right_cardinality)
             }
-            LogicalPlan::Values { values, .. } => {
-                Ok(values.len())
-            }
-            LogicalPlan::SubqueryAlias { input, .. } => {
-                self.estimate_plan(input, stats_manager)
-            }
-            LogicalPlan::Window { input, .. } => {
-                self.estimate_plan(input, stats_manager)
-            }
-            LogicalPlan::EmptyRelation { produce_one_row, .. } => {
-                Ok(if *produce_one_row { 1 } else { 0 })
-            }
+            LogicalPlan::Values { values, .. } => Ok(values.len()),
+            LogicalPlan::SubqueryAlias { input, .. } => self.estimate_plan(input, stats_manager),
+            LogicalPlan::Window { input, .. } => self.estimate_plan(input, stats_manager),
+            LogicalPlan::EmptyRelation {
+                produce_one_row, ..
+            } => Ok(if *produce_one_row { 1 } else { 0 }),
             LogicalPlan::Explain { .. } => {
                 Ok(1) // Explain returns a single row
             }
-            LogicalPlan::ExplainAnalyze { plan, .. } => {
-                self.estimate_plan(plan, stats_manager)
-            }
+            LogicalPlan::ExplainAnalyze { plan, .. } => self.estimate_plan(plan, stats_manager),
             LogicalPlan::CreateTable { .. } => Ok(0),
             LogicalPlan::DropTable { .. } => Ok(0),
-            LogicalPlan::Insert { input, .. } => {
-                self.estimate_plan(input, stats_manager)
-            }
+            LogicalPlan::Insert { input, .. } => self.estimate_plan(input, stats_manager),
             LogicalPlan::Delete { .. } => Ok(0),
             LogicalPlan::Update { .. } => Ok(0),
             LogicalPlan::Copy { input, .. } => {
@@ -160,9 +154,7 @@ impl CardinalityEstimator {
             LogicalExpr::BinaryExpr { left, op, right } => {
                 self.estimate_binary_selectivity(left, op, right, stats_manager)
             }
-            LogicalExpr::Not(inner) => {
-                1.0 - self.estimate_selectivity(inner, stats_manager)
-            }
+            LogicalExpr::Not(inner) => 1.0 - self.estimate_selectivity(inner, stats_manager),
             LogicalExpr::IsNull(_) => DEFAULT_NULL_SELECTIVITY,
             LogicalExpr::IsNotNull(_) => 1.0 - DEFAULT_NULL_SELECTIVITY,
             LogicalExpr::Between { .. } => {
@@ -182,7 +174,11 @@ impl CardinalityEstimator {
             LogicalExpr::Literal(value) => {
                 // Boolean literals
                 if let crate::types::ScalarValue::Boolean(Some(b)) = value {
-                    if *b { 1.0 } else { 0.0 }
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
                 } else {
                     1.0
                 }
@@ -214,7 +210,10 @@ impl CardinalityEstimator {
             BinaryOp::Eq => {
                 // Check if comparing column to literal
                 if self.is_column_to_literal(left, right) {
-                    if let Some(col_name) = self.get_column_name(left).or_else(|| self.get_column_name(right)) {
+                    if let Some(col_name) = self
+                        .get_column_name(left)
+                        .or_else(|| self.get_column_name(right))
+                    {
                         // Try to use statistics
                         for table_name in stats_manager.list_tables() {
                             if let Some(table_stats) = stats_manager.get(&table_name) {
@@ -228,7 +227,9 @@ impl CardinalityEstimator {
                 DEFAULT_EQ_SELECTIVITY
             }
             BinaryOp::NotEq => 1.0 - DEFAULT_EQ_SELECTIVITY,
-            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => DEFAULT_RANGE_SELECTIVITY,
+            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => {
+                DEFAULT_RANGE_SELECTIVITY
+            }
             _ => 1.0,
         }
     }
@@ -316,6 +317,7 @@ impl CardinalityEstimator {
 
 /// Statistics about estimated cardinality for a plan node.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CardinalityInfo {
     /// Estimated number of rows
     pub row_count: usize,
@@ -325,6 +327,7 @@ pub struct CardinalityInfo {
     pub distinct_counts: Vec<usize>,
 }
 
+#[allow(dead_code)]
 impl CardinalityInfo {
     /// Create new cardinality info.
     pub fn new(row_count: usize) -> Self {
@@ -350,9 +353,9 @@ impl CardinalityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::catalog::ResolvedTableRef;
     use crate::types::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     fn create_test_schema() -> Schema {
         Schema::new(vec![
@@ -371,7 +374,9 @@ mod tests {
         let estimator = CardinalityEstimator::new();
         let stats_manager = StatisticsManager::new();
 
-        let cardinality = estimator.estimate_scan("test_table", &stats_manager).unwrap();
+        let cardinality = estimator
+            .estimate_scan("test_table", &stats_manager)
+            .unwrap();
         assert_eq!(cardinality, DEFAULT_ROW_COUNT);
     }
 
@@ -385,7 +390,9 @@ mod tests {
         let table_stats = TableStatistics::new("test_table", 50000);
         stats_manager.register(table_stats).unwrap();
 
-        let cardinality = estimator.estimate_scan("test_table", &stats_manager).unwrap();
+        let cardinality = estimator
+            .estimate_scan("test_table", &stats_manager)
+            .unwrap();
         assert_eq!(cardinality, 50000);
     }
 
@@ -406,9 +413,13 @@ mod tests {
         let filter = LogicalPlan::Filter {
             input: Arc::new(scan),
             predicate: LogicalExpr::BinaryExpr {
-                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified("id"))),
+                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified(
+                    "id",
+                ))),
                 op: BinaryOp::Eq,
-                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(Some(1)))),
+                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(
+                    Some(1),
+                ))),
             },
         };
 
@@ -439,7 +450,9 @@ mod tests {
         let estimator = CardinalityEstimator::new();
 
         // Inner join
-        let cardinality = estimator.estimate_join(1000, 500, &JoinType::Inner).unwrap();
+        let cardinality = estimator
+            .estimate_join(1000, 500, &JoinType::Inner)
+            .unwrap();
         assert_eq!(cardinality, 50000); // 1000 * 500 * 0.1
 
         // Cross join
@@ -454,15 +467,23 @@ mod tests {
 
         let expr = LogicalExpr::BinaryExpr {
             left: Box::new(LogicalExpr::BinaryExpr {
-                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified("a"))),
+                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified(
+                    "a",
+                ))),
                 op: BinaryOp::Eq,
-                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(Some(1)))),
+                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(
+                    Some(1),
+                ))),
             }),
             op: BinaryOp::And,
             right: Box::new(LogicalExpr::BinaryExpr {
-                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified("b"))),
+                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified(
+                    "b",
+                ))),
                 op: BinaryOp::Eq,
-                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(Some(2)))),
+                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(
+                    Some(2),
+                ))),
             }),
         };
 
@@ -478,15 +499,23 @@ mod tests {
 
         let expr = LogicalExpr::BinaryExpr {
             left: Box::new(LogicalExpr::BinaryExpr {
-                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified("a"))),
+                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified(
+                    "a",
+                ))),
                 op: BinaryOp::Eq,
-                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(Some(1)))),
+                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(
+                    Some(1),
+                ))),
             }),
             op: BinaryOp::Or,
             right: Box::new(LogicalExpr::BinaryExpr {
-                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified("b"))),
+                left: Box::new(LogicalExpr::Column(crate::planner::Column::unqualified(
+                    "b",
+                ))),
                 op: BinaryOp::Eq,
-                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(Some(2)))),
+                right: Box::new(LogicalExpr::Literal(crate::types::ScalarValue::Int32(
+                    Some(2),
+                ))),
             }),
         };
 
@@ -497,8 +526,7 @@ mod tests {
 
     #[test]
     fn test_cardinality_info() {
-        let info = CardinalityInfo::new(10000)
-            .with_row_width(50);
+        let info = CardinalityInfo::new(10000).with_row_width(50);
 
         assert_eq!(info.row_count, 10000);
         assert_eq!(info.row_width, 50);
