@@ -1801,10 +1801,7 @@ impl IncrementalCheckpointManager {
     ///
     /// `tables` must provide all table data keyed by name; only dirty entries
     /// are actually written.
-    pub fn checkpoint_dirty(
-        &mut self,
-        tables: &HashMap<String, Vec<RecordBatch>>,
-    ) -> Result<()> {
+    pub fn checkpoint_dirty(&mut self, tables: &HashMap<String, Vec<RecordBatch>>) -> Result<()> {
         if self.dirty.is_empty() {
             return Ok(());
         }
@@ -2054,14 +2051,759 @@ impl RecoveryManager {
         self.recovery_time_ms = ms;
     }
 
-    pub fn entries_replayed(&self) -> u64 { self.entries_replayed }
-    pub fn entries_skipped(&self) -> u64 { self.entries_skipped }
-    pub fn corrupt_entries(&self) -> u64 { self.corrupt_entries }
-    pub fn recovery_time_ms(&self) -> u64 { self.recovery_time_ms }
+    pub fn entries_replayed(&self) -> u64 {
+        self.entries_replayed
+    }
+    pub fn entries_skipped(&self) -> u64 {
+        self.entries_skipped
+    }
+    pub fn corrupt_entries(&self) -> u64 {
+        self.corrupt_entries
+    }
+    pub fn recovery_time_ms(&self) -> u64 {
+        self.recovery_time_ms
+    }
 
     /// Returns true if recovery completed without data corruption.
     pub fn is_clean(&self) -> bool {
         self.corrupt_entries == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clock-Sweep Buffer Pool (Production-Grade Eviction)
+// ---------------------------------------------------------------------------
+
+/// A page frame in the clock-sweep buffer pool, with a reference bit for
+/// second-chance eviction and pin count for concurrent access.
+#[derive(Debug, Clone)]
+pub struct ClockPageFrame {
+    /// Unique page identifier.
+    pub page_id: u64,
+    /// Raw page data.
+    pub data: Vec<u8>,
+    /// Whether the page has been modified since last flush.
+    pub dirty: bool,
+    /// Reference bit for clock-sweep (set on access, cleared by sweep hand).
+    pub referenced: bool,
+    /// Number of active pins preventing eviction.
+    pub pin_count: u32,
+    /// Log sequence number of the last modification.
+    pub lsn: u64,
+}
+
+/// Production-grade buffer pool using clock-sweep eviction.
+///
+/// Unlike simple LRU, clock-sweep approximates LRU with O(1) amortised
+/// eviction cost and supports pinned pages that cannot be evicted while
+/// in use.
+#[derive(Debug)]
+pub struct ClockSweepBufferPool {
+    frames: Vec<Option<ClockPageFrame>>,
+    /// Maps page_id → frame index for O(1) lookups.
+    page_map: HashMap<u64, usize>,
+    /// Current position of the clock hand.
+    clock_hand: usize,
+    capacity: usize,
+    stats: ClockSweepStats,
+}
+
+/// Statistics for [`ClockSweepBufferPool`].
+#[derive(Debug, Clone, Default)]
+pub struct ClockSweepStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub dirty_evictions: u64,
+    pub pin_failures: u64,
+}
+
+impl ClockSweepBufferPool {
+    /// Create a pool with the given page capacity.
+    pub fn new(capacity: usize) -> Self {
+        let mut frames = Vec::with_capacity(capacity);
+        frames.resize_with(capacity, || None);
+        Self {
+            frames,
+            page_map: HashMap::new(),
+            clock_hand: 0,
+            capacity,
+            stats: ClockSweepStats::default(),
+        }
+    }
+
+    /// Fetch a page, pinning it to prevent eviction. Returns `None` on miss.
+    pub fn fetch_page(&mut self, page_id: u64) -> Option<&ClockPageFrame> {
+        if let Some(&idx) = self.page_map.get(&page_id) {
+            if let Some(ref mut frame) = self.frames[idx] {
+                frame.referenced = true;
+                frame.pin_count += 1;
+                self.stats.hits += 1;
+                return self.frames[idx].as_ref();
+            }
+        }
+        self.stats.misses += 1;
+        None
+    }
+
+    /// Release a pin acquired by `fetch_page`.
+    pub fn unpin_page(&mut self, page_id: u64, dirty: bool) {
+        if let Some(&idx) = self.page_map.get(&page_id) {
+            if let Some(ref mut frame) = self.frames[idx] {
+                if frame.pin_count > 0 {
+                    frame.pin_count -= 1;
+                }
+                if dirty {
+                    frame.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Insert a page into the pool. Evicts if at capacity.
+    /// Returns the evicted dirty page data if one was flushed.
+    pub fn insert_page(
+        &mut self,
+        page_id: u64,
+        data: Vec<u8>,
+        lsn: u64,
+    ) -> Option<(u64, Vec<u8>)> {
+        // Already present — just update
+        if let Some(&idx) = self.page_map.get(&page_id) {
+            if let Some(ref mut frame) = self.frames[idx] {
+                frame.data = data;
+                frame.lsn = lsn;
+                frame.referenced = true;
+                return None;
+            }
+        }
+
+        // Find a free slot
+        let free = self.frames.iter().position(|f| f.is_none());
+        let slot = if let Some(s) = free {
+            s
+        } else {
+            match self.evict_one() {
+                Some(s) => s,
+                None => {
+                    self.stats.pin_failures += 1;
+                    return None;
+                }
+            }
+        };
+
+        let evicted_dirty = self.frames[slot].take().and_then(|f| {
+            self.page_map.remove(&f.page_id);
+            if f.dirty {
+                self.stats.dirty_evictions += 1;
+                Some((f.page_id, f.data))
+            } else {
+                None
+            }
+        });
+
+        self.frames[slot] = Some(ClockPageFrame {
+            page_id,
+            data,
+            dirty: false,
+            referenced: true,
+            pin_count: 0,
+            lsn,
+        });
+        self.page_map.insert(page_id, slot);
+        evicted_dirty
+    }
+
+    /// Clock-sweep: advance the hand until an unpinned, unreferenced frame is
+    /// found. Clears reference bits as the hand passes.
+    fn evict_one(&mut self) -> Option<usize> {
+        let max_iters = self.capacity * 2;
+        for _ in 0..max_iters {
+            let idx = self.clock_hand;
+            self.clock_hand = (self.clock_hand + 1) % self.capacity;
+
+            if let Some(ref mut frame) = self.frames[idx] {
+                if frame.pin_count > 0 {
+                    continue;
+                }
+                if frame.referenced {
+                    frame.referenced = false;
+                    continue;
+                }
+                self.stats.evictions += 1;
+                return Some(idx);
+            } else {
+                return Some(idx);
+            }
+        }
+        None // all pages pinned
+    }
+
+    /// Flush all dirty pages, returning their `(page_id, data)`.
+    pub fn flush_dirty(&mut self) -> Vec<(u64, Vec<u8>)> {
+        let mut dirty = Vec::new();
+        for frame in self.frames.iter_mut().flatten() {
+            if frame.dirty {
+                dirty.push((frame.page_id, frame.data.clone()));
+                frame.dirty = false;
+            }
+        }
+        dirty
+    }
+
+    pub fn stats(&self) -> &ClockSweepStats {
+        &self.stats
+    }
+
+    pub fn len(&self) -> usize {
+        self.page_map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.page_map.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B-Tree Range Scan Iterator & Bulk Loading
+// ---------------------------------------------------------------------------
+
+/// Iterator over B-tree index range scan results, yielding `(key, row_indices)`
+/// pairs lazily without collecting into a `Vec`.
+pub struct BTreeRangeScanIter<'a> {
+    inner: std::collections::btree_map::Range<'a, Vec<u8>, Vec<usize>>,
+}
+
+impl<'a> Iterator for BTreeRangeScanIter<'a> {
+    type Item = (&'a Vec<u8>, &'a Vec<usize>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+impl BTreeIndex {
+    /// Lazy range scan returning an iterator instead of a collected Vec.
+    pub fn range_scan_iter<'a>(
+        &'a self,
+        start: &[u8],
+        end: &[u8],
+    ) -> BTreeRangeScanIter<'a> {
+        use std::ops::RangeInclusive;
+        let range: RangeInclusive<Vec<u8>> = start.to_vec()..=end.to_vec();
+        BTreeRangeScanIter {
+            inner: self.tree.range(range),
+        }
+    }
+
+    /// Bulk load pre-sorted `(key, row_index)` pairs. More efficient than
+    /// repeated single inserts because the BTreeMap can batch-insert in order.
+    pub fn bulk_load(&mut self, entries: Vec<(Vec<u8>, usize)>) {
+        for (key, row_idx) in entries {
+            self.tree.entry(key).or_default().push(row_idx);
+        }
+    }
+
+    /// Return the total number of row references across all keys.
+    pub fn total_entries(&self) -> usize {
+        self.tree.values().map(|v| v.len()).sum()
+    }
+
+    /// Return the minimum key in the index, if any.
+    pub fn min_key(&self) -> Option<&Vec<u8>> {
+        self.tree.keys().next()
+    }
+
+    /// Return the maximum key in the index, if any.
+    pub fn max_key(&self) -> Option<&Vec<u8>> {
+        self.tree.keys().next_back()
+    }
+
+    /// Prefix scan — return all entries whose key starts with `prefix`.
+    pub fn prefix_scan(&self, prefix: &[u8]) -> Vec<(&Vec<u8>, &Vec<usize>)> {
+        let start = prefix.to_vec();
+        let mut end = prefix.to_vec();
+        // Increment the last byte to create an exclusive upper bound
+        if let Some(last) = end.last_mut() {
+            if *last < 255 {
+                *last += 1;
+            } else {
+                end.push(0);
+            }
+        }
+        self.tree
+            .range(start..end)
+            .map(|(k, v)| (k, v))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Point-in-Time Recovery (PITR)
+// ---------------------------------------------------------------------------
+
+/// Enables recovery to a specific log sequence number (LSN), replaying
+/// only WAL entries up to the target LSN.
+#[derive(Debug)]
+pub struct PointInTimeRecovery {
+    /// Target LSN to recover to (inclusive).
+    target_lsn: u64,
+    /// Number of entries applied during recovery.
+    entries_applied: u64,
+    /// Number of entries skipped (beyond target LSN).
+    entries_skipped: u64,
+    /// Whether recovery has completed.
+    completed: bool,
+}
+
+impl PointInTimeRecovery {
+    /// Create a PITR targeting the given LSN.
+    pub fn new(target_lsn: u64) -> Self {
+        Self {
+            target_lsn,
+            entries_applied: 0,
+            entries_skipped: 0,
+            completed: false,
+        }
+    }
+
+    /// Check whether a WAL entry with the given sequence number should be
+    /// applied during recovery.
+    pub fn should_apply(&self, entry_lsn: u64) -> bool {
+        !self.completed && entry_lsn <= self.target_lsn
+    }
+
+    /// Record that an entry was applied.
+    pub fn record_applied(&mut self) {
+        self.entries_applied += 1;
+    }
+
+    /// Record that an entry was skipped.
+    pub fn record_skipped(&mut self) {
+        self.entries_skipped += 1;
+    }
+
+    /// Mark recovery as complete.
+    pub fn complete(&mut self) {
+        self.completed = true;
+    }
+
+    pub fn target_lsn(&self) -> u64 {
+        self.target_lsn
+    }
+    pub fn entries_applied(&self) -> u64 {
+        self.entries_applied
+    }
+    pub fn entries_skipped(&self) -> u64 {
+        self.entries_skipped
+    }
+    pub fn is_completed(&self) -> bool {
+        self.completed
+    }
+
+    /// Perform point-in-time recovery on a set of WAL entries.
+    /// Returns only the entries that should be replayed.
+    pub fn filter_entries(&mut self, entries: &[(u64, WalEntry)]) -> Vec<WalEntry> {
+        let mut result = Vec::new();
+        for (lsn, entry) in entries {
+            if self.should_apply(*lsn) {
+                result.push(entry.clone());
+                self.record_applied();
+            } else {
+                self.record_skipped();
+            }
+        }
+        self.complete();
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Database File Format (Magic Bytes + Version Header)
+// ---------------------------------------------------------------------------
+
+/// Magic bytes identifying a Blaze database file: "BLZD" (0x424C5A44).
+pub const BLAZE_DB_MAGIC: [u8; 4] = [0x42, 0x4C, 0x5A, 0x44];
+
+/// Current database file format version.
+pub const BLAZE_DB_FORMAT_VERSION: u32 = 1;
+
+/// Header written at the start of every Blaze database file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseFileHeader {
+    /// Magic bytes (must equal [`BLAZE_DB_MAGIC`]).
+    pub magic: [u8; 4],
+    /// File format version.
+    pub version: u32,
+    /// Page size in bytes.
+    pub page_size: u32,
+    /// Total number of pages in the file.
+    pub page_count: u64,
+    /// LSN of the last WAL entry flushed to this file.
+    pub flushed_lsn: u64,
+    /// Creation timestamp (epoch seconds).
+    pub created_at: u64,
+    /// Flags (reserved for future use).
+    pub flags: u32,
+}
+
+impl DatabaseFileHeader {
+    /// Create a new header with defaults.
+    pub fn new(page_size: u32) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            magic: BLAZE_DB_MAGIC,
+            version: BLAZE_DB_FORMAT_VERSION,
+            page_size,
+            page_count: 0,
+            flushed_lsn: 0,
+            created_at: now,
+            flags: 0,
+        }
+    }
+
+    /// Serialise the header to bytes (fixed 40-byte layout).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(40);
+        buf.extend_from_slice(&self.magic);
+        buf.extend_from_slice(&self.version.to_le_bytes());
+        buf.extend_from_slice(&self.page_size.to_le_bytes());
+        buf.extend_from_slice(&self.page_count.to_le_bytes());
+        buf.extend_from_slice(&self.flushed_lsn.to_le_bytes());
+        buf.extend_from_slice(&self.created_at.to_le_bytes());
+        buf.extend_from_slice(&self.flags.to_le_bytes());
+        buf
+    }
+
+    /// Deserialise a header from bytes.
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        if data.len() < 40 {
+            return Err(BlazeError::execution("Database header too short"));
+        }
+        let mut magic = [0u8; 4];
+        magic.copy_from_slice(&data[0..4]);
+        if magic != BLAZE_DB_MAGIC {
+            return Err(BlazeError::execution("Invalid database file: bad magic bytes"));
+        }
+        let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        if version > BLAZE_DB_FORMAT_VERSION {
+            return Err(BlazeError::execution(format!(
+                "Unsupported format version {version} (max supported: {BLAZE_DB_FORMAT_VERSION})"
+            )));
+        }
+        let page_size = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let page_count = u64::from_le_bytes(data[12..20].try_into().unwrap());
+        let flushed_lsn = u64::from_le_bytes(data[20..28].try_into().unwrap());
+        let created_at = u64::from_le_bytes(data[28..36].try_into().unwrap());
+        let flags = u32::from_le_bytes(data[36..40].try_into().unwrap());
+        Ok(Self {
+            magic,
+            version,
+            page_size,
+            page_count,
+            flushed_lsn,
+            created_at,
+            flags,
+        })
+    }
+
+    /// Write the header to a file.
+    pub fn write_to(&self, path: &Path) -> Result<()> {
+        let mut file = BufWriter::new(
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)
+                .map_err(|e| BlazeError::execution(format!("Cannot create db file: {e}")))?,
+        );
+        file.write_all(&self.to_bytes())
+            .map_err(|e| BlazeError::execution(format!("Cannot write db header: {e}")))?;
+        file.flush()
+            .map_err(|e| BlazeError::execution(format!("Cannot flush db header: {e}")))?;
+        Ok(())
+    }
+
+    /// Read a header from an existing file.
+    pub fn read_from(path: &Path) -> Result<Self> {
+        let data = fs::read(path)
+            .map_err(|e| BlazeError::execution(format!("Cannot read db file: {e}")))?;
+        Self::from_bytes(&data)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LSN Tracker
+// ---------------------------------------------------------------------------
+
+/// Tracks the global log sequence number for WAL coordination.
+#[derive(Debug)]
+pub struct LsnTracker {
+    current: u64,
+    flushed: u64,
+}
+
+impl LsnTracker {
+    pub fn new() -> Self {
+        Self {
+            current: 0,
+            flushed: 0,
+        }
+    }
+
+    /// Advance and return the next LSN.
+    pub fn next_lsn(&mut self) -> u64 {
+        self.current += 1;
+        self.current
+    }
+
+    /// Record that all entries up to this LSN have been flushed to disk.
+    pub fn mark_flushed(&mut self, lsn: u64) {
+        if lsn > self.flushed {
+            self.flushed = lsn;
+        }
+    }
+
+    pub fn current_lsn(&self) -> u64 {
+        self.current
+    }
+
+    pub fn flushed_lsn(&self) -> u64 {
+        self.flushed
+    }
+
+    /// How many entries are ahead of the flush point?
+    pub fn unflushed_count(&self) -> u64 {
+        self.current.saturating_sub(self.flushed)
+    }
+}
+
+impl Default for LsnTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bitmap Index (Feature 8: Multi-Index Acceleration)
+// ---------------------------------------------------------------------------
+
+/// A bitmap index for low-cardinality columns (e.g. status, gender).
+/// Each distinct value maps to a bitset of row positions.
+#[derive(Debug, Clone)]
+pub struct BitmapIndex {
+    column_name: String,
+    /// Maps value → bitset (each bit = one row; 1 = match)
+    bitmaps: HashMap<Vec<u8>, Vec<u64>>,
+    /// Total rows indexed.
+    num_rows: usize,
+}
+
+impl BitmapIndex {
+    pub fn new(column_name: impl Into<String>) -> Self {
+        Self {
+            column_name: column_name.into(),
+            bitmaps: HashMap::new(),
+            num_rows: 0,
+        }
+    }
+
+    /// Add a row with the given value.
+    pub fn add_row(&mut self, value: Vec<u8>) {
+        let row = self.num_rows;
+        let word_idx = row / 64;
+        let bit_idx = row % 64;
+
+        let bitmap = self.bitmaps.entry(value).or_default();
+        while bitmap.len() <= word_idx {
+            bitmap.push(0);
+        }
+        bitmap[word_idx] |= 1 << bit_idx;
+
+        self.num_rows += 1;
+    }
+
+    /// Get the bitmap for a specific value (for equality predicates).
+    pub fn get_bitmap(&self, value: &[u8]) -> Option<&[u64]> {
+        self.bitmaps.get(value).map(|v| v.as_slice())
+    }
+
+    /// AND two bitmaps (for conjunctive predicates).
+    pub fn bitmap_and(a: &[u64], b: &[u64]) -> Vec<u64> {
+        let len = a.len().max(b.len());
+        (0..len)
+            .map(|i| {
+                let va = a.get(i).copied().unwrap_or(0);
+                let vb = b.get(i).copied().unwrap_or(0);
+                va & vb
+            })
+            .collect()
+    }
+
+    /// OR two bitmaps (for disjunctive predicates).
+    pub fn bitmap_or(a: &[u64], b: &[u64]) -> Vec<u64> {
+        let len = a.len().max(b.len());
+        (0..len)
+            .map(|i| {
+                let va = a.get(i).copied().unwrap_or(0);
+                let vb = b.get(i).copied().unwrap_or(0);
+                va | vb
+            })
+            .collect()
+    }
+
+    /// NOT a bitmap.
+    pub fn bitmap_not(a: &[u64], total_rows: usize) -> Vec<u64> {
+        let words = (total_rows + 63) / 64;
+        (0..words)
+            .map(|i| {
+                let va = a.get(i).copied().unwrap_or(0);
+                !va
+            })
+            .collect()
+    }
+
+    /// Count set bits in a bitmap.
+    pub fn popcount(bitmap: &[u64]) -> usize {
+        bitmap.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Convert bitmap to row indices.
+    pub fn bitmap_to_indices(bitmap: &[u64]) -> Vec<usize> {
+        let mut indices = Vec::new();
+        for (word_idx, &word) in bitmap.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                indices.push(word_idx * 64 + bit);
+                w &= w - 1; // clear lowest set bit
+            }
+        }
+        indices
+    }
+
+    pub fn column_name(&self) -> &str {
+        &self.column_name
+    }
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+    pub fn distinct_values(&self) -> usize {
+        self.bitmaps.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Index Advisor (Feature 8)
+// ---------------------------------------------------------------------------
+
+/// Recommends indexes based on observed query workload patterns.
+#[derive(Debug)]
+pub struct IndexAdvisor {
+    /// Column access patterns: (table, column) -> access_count
+    column_accesses: HashMap<(String, String), u64>,
+    /// Column cardinality estimates: (table, column) -> estimated distinct values
+    cardinalities: HashMap<(String, String), usize>,
+}
+
+/// A recommendation from the index advisor.
+#[derive(Debug, Clone)]
+pub struct IndexAdvice {
+    pub table: String,
+    pub column: String,
+    pub recommended_type: RecommendedIndexType,
+    pub estimated_benefit: f64,
+    pub reason: String,
+}
+
+/// Types of indexes the advisor can recommend.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecommendedIndexType {
+    BTree,
+    Bitmap,
+    BloomFilter,
+}
+
+impl IndexAdvisor {
+    pub fn new() -> Self {
+        Self {
+            column_accesses: HashMap::new(),
+            cardinalities: HashMap::new(),
+        }
+    }
+
+    /// Record a column access from a query.
+    pub fn record_access(&mut self, table: &str, column: &str) {
+        *self
+            .column_accesses
+            .entry((table.to_string(), column.to_string()))
+            .or_insert(0) += 1;
+    }
+
+    /// Record estimated cardinality for a column.
+    pub fn record_cardinality(&mut self, table: &str, column: &str, cardinality: usize) {
+        self.cardinalities
+            .insert((table.to_string(), column.to_string()), cardinality);
+    }
+
+    /// Generate index recommendations sorted by estimated benefit.
+    pub fn recommend(&self, min_accesses: u64) -> Vec<IndexAdvice> {
+        let mut advice = Vec::new();
+
+        for ((table, column), &accesses) in &self.column_accesses {
+            if accesses < min_accesses {
+                continue;
+            }
+
+            let cardinality = self
+                .cardinalities
+                .get(&(table.clone(), column.clone()))
+                .copied()
+                .unwrap_or(1000);
+
+            let (idx_type, reason) = if cardinality <= 20 {
+                (
+                    RecommendedIndexType::Bitmap,
+                    format!("Low cardinality ({cardinality}): bitmap index is optimal"),
+                )
+            } else if cardinality > 10_000 {
+                (
+                    RecommendedIndexType::BloomFilter,
+                    format!("High cardinality ({cardinality}): bloom filter for existence checks"),
+                )
+            } else {
+                (
+                    RecommendedIndexType::BTree,
+                    format!("Medium cardinality ({cardinality}): B-tree supports range scans"),
+                )
+            };
+
+            let benefit = accesses as f64 * (1.0 - 1.0 / cardinality.max(1) as f64);
+
+            advice.push(IndexAdvice {
+                table: table.clone(),
+                column: column.clone(),
+                recommended_type: idx_type,
+                estimated_benefit: benefit,
+                reason,
+            });
+        }
+
+        advice.sort_by(|a, b| {
+            b.estimated_benefit
+                .partial_cmp(&a.estimated_benefit)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        advice
+    }
+}
+
+impl Default for IndexAdvisor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2803,9 +3545,7 @@ mod tests {
         };
         let mut gc = GroupCommitWal::new(wal, config);
 
-        let entry = WalEntry::DropTable {
-            name: "t".into(),
-        };
+        let entry = WalEntry::DropTable { name: "t".into() };
         gc.append(entry).unwrap();
         assert_eq!(gc.pending_count(), 1);
 
@@ -2965,5 +3705,307 @@ mod tests {
         rm.record_replay();
         rm.record_corrupt();
         assert!(!rm.is_clean());
+    }
+
+    // -----------------------------------------------------------------------
+    // Clock-Sweep Buffer Pool tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_clock_sweep_basic_ops() {
+        let mut pool = ClockSweepBufferPool::new(3);
+        pool.insert_page(1, vec![0x01; 4096], 1);
+        pool.insert_page(2, vec![0x02; 4096], 2);
+        pool.insert_page(3, vec![0x03; 4096], 3);
+        assert_eq!(pool.len(), 3);
+
+        let page = pool.fetch_page(1).unwrap();
+        assert_eq!(page.page_id, 1);
+        pool.unpin_page(1, false);
+        assert_eq!(pool.stats().hits, 1);
+    }
+
+    #[test]
+    fn test_clock_sweep_eviction() {
+        let mut pool = ClockSweepBufferPool::new(2);
+        pool.insert_page(1, vec![0x01], 1);
+        pool.insert_page(2, vec![0x02], 2);
+
+        // Insert a 3rd page, forcing eviction of one existing page
+        pool.insert_page(3, vec![0x03], 3);
+        assert_eq!(pool.len(), 2);
+        assert!(pool.stats().evictions >= 1);
+        // Page 3 must be present
+        assert!(pool.fetch_page(3).is_some());
+        pool.unpin_page(3, false);
+    }
+
+    #[test]
+    fn test_clock_sweep_dirty_flush() {
+        let mut pool = ClockSweepBufferPool::new(4);
+        pool.insert_page(1, vec![0xAA], 1);
+        pool.insert_page(2, vec![0xBB], 2);
+
+        // Mark page 1 as dirty
+        pool.fetch_page(1);
+        pool.unpin_page(1, true);
+
+        let dirty = pool.flush_dirty();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].0, 1);
+    }
+
+    #[test]
+    fn test_clock_sweep_pin_prevents_eviction() {
+        let mut pool = ClockSweepBufferPool::new(2);
+        pool.insert_page(1, vec![0x01], 1);
+        pool.insert_page(2, vec![0x02], 2);
+
+        // Pin both pages
+        pool.fetch_page(1);
+        pool.fetch_page(2);
+
+        // Cannot evict - all pinned
+        pool.insert_page(3, vec![0x03], 3);
+        assert_eq!(pool.stats().pin_failures, 1);
+
+        // Unpin and retry
+        pool.unpin_page(1, false);
+        pool.unpin_page(2, false);
+        pool.insert_page(3, vec![0x03], 3);
+        assert_eq!(pool.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // B-Tree Range Scan Iterator & Bulk Load tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_btree_range_scan_iter() {
+        let mut idx = BTreeIndex::new("col");
+        idx.insert(vec![1], 0);
+        idx.insert(vec![2], 1);
+        idx.insert(vec![3], 2);
+        idx.insert(vec![4], 3);
+        idx.insert(vec![5], 4);
+
+        let results: Vec<_> = idx.range_scan_iter(&[2], &[4]).collect();
+        assert_eq!(results.len(), 3);
+        assert_eq!(*results[0].0, vec![2]);
+        assert_eq!(*results[2].0, vec![4]);
+    }
+
+    #[test]
+    fn test_btree_bulk_load() {
+        let mut idx = BTreeIndex::new("col");
+        let entries: Vec<(Vec<u8>, usize)> = (0..1000).map(|i| (vec![(i % 256) as u8], i)).collect();
+        idx.bulk_load(entries);
+        assert_eq!(idx.total_entries(), 1000);
+    }
+
+    #[test]
+    fn test_btree_min_max_key() {
+        let mut idx = BTreeIndex::new("col");
+        idx.insert(vec![5], 0);
+        idx.insert(vec![1], 1);
+        idx.insert(vec![9], 2);
+        assert_eq!(idx.min_key(), Some(&vec![1]));
+        assert_eq!(idx.max_key(), Some(&vec![9]));
+    }
+
+    #[test]
+    fn test_btree_prefix_scan() {
+        let mut idx = BTreeIndex::new("col");
+        idx.insert(vec![0x41, 0x42], 0); // "AB"
+        idx.insert(vec![0x41, 0x43], 1); // "AC"
+        idx.insert(vec![0x42, 0x41], 2); // "BA"
+
+        let results = idx.prefix_scan(&[0x41]);
+        assert_eq!(results.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Point-in-Time Recovery tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pitr_filters_entries() {
+        let entries = vec![
+            (1, WalEntry::CreateTable { name: "t1".into(), schema: Schema::new(vec![]) }),
+            (2, WalEntry::InsertBatch { table: "t1".into(), batch_data: vec![] }),
+            (3, WalEntry::InsertBatch { table: "t1".into(), batch_data: vec![] }),
+            (4, WalEntry::InsertBatch { table: "t1".into(), batch_data: vec![] }),
+        ];
+
+        let mut pitr = PointInTimeRecovery::new(2);
+        let filtered = pitr.filter_entries(&entries);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(pitr.entries_applied(), 2);
+        assert_eq!(pitr.entries_skipped(), 2);
+        assert!(pitr.is_completed());
+    }
+
+    #[test]
+    fn test_pitr_all_entries() {
+        let pitr = PointInTimeRecovery::new(100);
+        assert!(pitr.should_apply(1));
+        assert!(pitr.should_apply(100));
+        assert!(!pitr.should_apply(101));
+    }
+
+    // -----------------------------------------------------------------------
+    // Database File Header tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_db_header_roundtrip() {
+        let header = DatabaseFileHeader::new(4096);
+        let bytes = header.to_bytes();
+        assert_eq!(bytes.len(), 40);
+
+        let parsed = DatabaseFileHeader::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.magic, BLAZE_DB_MAGIC);
+        assert_eq!(parsed.version, BLAZE_DB_FORMAT_VERSION);
+        assert_eq!(parsed.page_size, 4096);
+        assert_eq!(parsed.page_count, 0);
+    }
+
+    #[test]
+    fn test_db_header_bad_magic() {
+        let bad = vec![0xFF; 40];
+        assert!(DatabaseFileHeader::from_bytes(&bad).is_err());
+    }
+
+    #[test]
+    fn test_db_header_file_io() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.blaze");
+
+        let header = DatabaseFileHeader::new(8192);
+        header.write_to(&path).unwrap();
+
+        let loaded = DatabaseFileHeader::read_from(&path).unwrap();
+        assert_eq!(loaded.page_size, 8192);
+        assert_eq!(loaded.version, BLAZE_DB_FORMAT_VERSION);
+    }
+
+    // -----------------------------------------------------------------------
+    // LSN Tracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lsn_tracker() {
+        let mut tracker = LsnTracker::new();
+        assert_eq!(tracker.current_lsn(), 0);
+
+        let lsn1 = tracker.next_lsn();
+        let lsn2 = tracker.next_lsn();
+        assert_eq!(lsn1, 1);
+        assert_eq!(lsn2, 2);
+        assert_eq!(tracker.unflushed_count(), 2);
+
+        tracker.mark_flushed(1);
+        assert_eq!(tracker.flushed_lsn(), 1);
+        assert_eq!(tracker.unflushed_count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitmap Index tests (Feature 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bitmap_index_basic() {
+        let mut idx = BitmapIndex::new("status");
+        idx.add_row(b"active".to_vec());
+        idx.add_row(b"inactive".to_vec());
+        idx.add_row(b"active".to_vec());
+        idx.add_row(b"active".to_vec());
+
+        assert_eq!(idx.num_rows(), 4);
+        assert_eq!(idx.distinct_values(), 2);
+
+        let active = idx.get_bitmap(b"active").unwrap();
+        assert_eq!(BitmapIndex::popcount(active), 3);
+
+        let inactive = idx.get_bitmap(b"inactive").unwrap();
+        assert_eq!(BitmapIndex::popcount(inactive), 1);
+    }
+
+    #[test]
+    fn test_bitmap_and_or_not() {
+        let a = vec![0b1010_1010u64];
+        let b = vec![0b1100_1100u64];
+
+        let and_result = BitmapIndex::bitmap_and(&a, &b);
+        assert_eq!(and_result[0], 0b1000_1000);
+
+        let or_result = BitmapIndex::bitmap_or(&a, &b);
+        assert_eq!(or_result[0], 0b1110_1110);
+
+        let not_a = BitmapIndex::bitmap_not(&a, 8);
+        assert_eq!(not_a[0] & 0xFF, 0b0101_0101);
+    }
+
+    #[test]
+    fn test_bitmap_to_indices() {
+        let bitmap = vec![0b0000_1011u64]; // bits 0, 1, 3
+        let indices = BitmapIndex::bitmap_to_indices(&bitmap);
+        assert_eq!(indices, vec![0, 1, 3]);
+    }
+
+    #[test]
+    fn test_bitmap_large() {
+        let mut idx = BitmapIndex::new("col");
+        for i in 0..200 {
+            idx.add_row(vec![(i % 5) as u8]);
+        }
+        assert_eq!(idx.num_rows(), 200);
+        assert_eq!(idx.distinct_values(), 5);
+        let bm = idx.get_bitmap(&[0]).unwrap();
+        assert_eq!(BitmapIndex::popcount(bm), 40); // 200/5
+    }
+
+    // -----------------------------------------------------------------------
+    // Index Advisor tests (Feature 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_index_advisor_recommendations() {
+        let mut advisor = IndexAdvisor::new();
+
+        // Simulate workload
+        for _ in 0..100 {
+            advisor.record_access("orders", "status");
+            advisor.record_access("orders", "customer_id");
+            advisor.record_access("users", "email");
+        }
+        advisor.record_cardinality("orders", "status", 5); // low card
+        advisor.record_cardinality("orders", "customer_id", 500); // medium
+        advisor.record_cardinality("users", "email", 50_000); // high card
+
+        let recs = advisor.recommend(50);
+        assert_eq!(recs.len(), 3);
+
+        // Status should get bitmap
+        let status_rec = recs.iter().find(|r| r.column == "status").unwrap();
+        assert_eq!(status_rec.recommended_type, RecommendedIndexType::Bitmap);
+
+        // Email should get bloom filter
+        let email_rec = recs.iter().find(|r| r.column == "email").unwrap();
+        assert_eq!(email_rec.recommended_type, RecommendedIndexType::BloomFilter);
+
+        // Customer_id should get B-tree
+        let cid_rec = recs.iter().find(|r| r.column == "customer_id").unwrap();
+        assert_eq!(cid_rec.recommended_type, RecommendedIndexType::BTree);
+    }
+
+    #[test]
+    fn test_index_advisor_min_accesses() {
+        let mut advisor = IndexAdvisor::new();
+        advisor.record_access("t", "c");
+        advisor.record_access("t", "c");
+
+        let recs = advisor.recommend(10); // min 10 accesses
+        assert!(recs.is_empty());
     }
 }
