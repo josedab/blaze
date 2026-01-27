@@ -8,6 +8,8 @@
 //! - JSON_ARRAY: Construct a JSON array from values
 //! - JSON_VALID: Check if a string is valid JSON
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value};
 
 use crate::error::{BlazeError, Result};
@@ -701,19 +703,356 @@ fn extract_path<'a>(value: &'a Value, path: &str) -> Result<Option<&'a Value>> {
     Ok(Some(current))
 }
 
+// ---------------------------------------------------------------------------
+// JSON Aggregate Functions
+// ---------------------------------------------------------------------------
+
+/// Aggregate function: collect values into a JSON array.
+/// Each value is a JSON string representation.
+pub fn json_agg(values: &[String]) -> Result<String> {
+    let parsed: std::result::Result<Vec<Value>, _> =
+        values.iter().map(|v| serde_json::from_str(v)).collect();
+    let arr = parsed.map_err(|e| BlazeError::execution(format!("Invalid JSON value: {e}")))?;
+    serde_json::to_string(&arr)
+        .map_err(|e| BlazeError::execution(format!("JSON serialization error: {e}")))
+}
+
+/// Aggregate function: collect key-value pairs into a JSON object.
+/// Each pair is `(key, value_json_string)`.
+pub fn json_object_agg(pairs: &[(String, String)]) -> Result<String> {
+    let mut obj = serde_json::Map::new();
+    for (key, val_str) in pairs {
+        let val: Value = serde_json::from_str(val_str)
+            .map_err(|e| BlazeError::execution(format!("Invalid JSON value for key '{key}': {e}")))?;
+        obj.insert(key.clone(), val);
+    }
+    serde_json::to_string(&Value::Object(obj))
+        .map_err(|e| BlazeError::execution(format!("JSON serialization error: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// JSON Schema Inference
+// ---------------------------------------------------------------------------
+
+/// Infer a flat schema from a collection of JSON documents.
+/// Returns a map of `field_name → inferred_type` where type is one of:
+/// "string", "number", "boolean", "array", "object", "null", "mixed".
+pub fn infer_json_schema(documents: &[String]) -> Result<HashMap<String, String>> {
+    let mut field_types: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+
+    for doc_str in documents {
+        let doc: Value = serde_json::from_str(doc_str)
+            .map_err(|e| BlazeError::execution(format!("Invalid JSON: {e}")))?;
+
+        if let Value::Object(obj) = doc {
+            for (key, val) in obj {
+                let type_name = match val {
+                    Value::Null => "null",
+                    Value::Bool(_) => "boolean",
+                    Value::Number(_) => "number",
+                    Value::String(_) => "string",
+                    Value::Array(_) => "array",
+                    Value::Object(_) => "object",
+                };
+                field_types
+                    .entry(key)
+                    .or_default()
+                    .insert(type_name.to_string());
+            }
+        }
+    }
+
+    Ok(field_types
+        .into_iter()
+        .map(|(k, types)| {
+            let resolved = if types.len() == 1 {
+                types.into_iter().next().unwrap()
+            } else {
+                // Multiple types seen — mark as mixed
+                let non_null: std::collections::HashSet<_> =
+                    types.into_iter().filter(|t| t != "null").collect();
+                if non_null.len() == 1 {
+                    non_null.into_iter().next().unwrap()
+                } else {
+                    "mixed".to_string()
+                }
+            };
+            (k, resolved)
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// JSON Merge Patch (RFC 7396)
+// ---------------------------------------------------------------------------
+
+/// Apply a JSON Merge Patch (RFC 7396) to a target document.
+/// - If patch has a key with value `null`, that key is removed from target.
+/// - Otherwise the key's value is replaced or added.
+/// - For nested objects, merge is recursive.
+pub fn json_merge_patch(target: &str, patch: &str) -> Result<String> {
+    let mut target_val: Value = serde_json::from_str(target)
+        .map_err(|e| BlazeError::execution(format!("Invalid target JSON: {e}")))?;
+    let patch_val: Value = serde_json::from_str(patch)
+        .map_err(|e| BlazeError::execution(format!("Invalid patch JSON: {e}")))?;
+
+    apply_merge_patch(&mut target_val, &patch_val);
+
+    serde_json::to_string(&target_val)
+        .map_err(|e| BlazeError::execution(format!("Serialization error: {e}")))
+}
+
+fn apply_merge_patch(target: &mut Value, patch: &Value) {
+    if let Value::Object(patch_obj) = patch {
+        if !target.is_object() {
+            *target = Value::Object(serde_json::Map::new());
+        }
+        if let Value::Object(target_obj) = target {
+            for (key, value) in patch_obj {
+                if value.is_null() {
+                    target_obj.remove(key);
+                } else if value.is_object() {
+                    let entry = target_obj
+                        .entry(key.clone())
+                        .or_insert(Value::Object(serde_json::Map::new()));
+                    apply_merge_patch(entry, value);
+                } else {
+                    target_obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    } else {
+        *target = patch.clone();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON Path Wildcard Support
+// ---------------------------------------------------------------------------
+
+/// Extract all values matching a JSONPath with wildcard (`*`) support.
+/// Supports `$.store.book[*].author` and `$.users.*.name` patterns.
+pub fn json_extract_wildcard(json_str: &str, path: &str) -> Result<Vec<String>> {
+    let value: Value = serde_json::from_str(json_str)
+        .map_err(|e| BlazeError::execution(format!("Invalid JSON: {e}")))?;
+
+    let segments = parse_wildcard_path(path);
+    let mut results = Vec::new();
+    extract_wildcard_recursive(&value, &segments, 0, &mut results);
+    Ok(results)
+}
+
+fn parse_wildcard_path(path: &str) -> Vec<String> {
+    let trimmed = path.strip_prefix("$.").unwrap_or(path);
+    let mut segments = Vec::new();
+    let mut current = String::new();
+
+    for ch in trimmed.chars() {
+        match ch {
+            '.' => {
+                if !current.is_empty() {
+                    segments.push(current.clone());
+                    current.clear();
+                }
+            }
+            '[' => {
+                if !current.is_empty() {
+                    segments.push(current.clone());
+                    current.clear();
+                }
+            }
+            ']' => {
+                if !current.is_empty() {
+                    segments.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+fn extract_wildcard_recursive(
+    value: &Value,
+    segments: &[String],
+    idx: usize,
+    results: &mut Vec<String>,
+) {
+    if idx >= segments.len() {
+        results.push(value.to_string());
+        return;
+    }
+
+    let segment = &segments[idx];
+
+    if segment == "*" {
+        match value {
+            Value::Object(obj) => {
+                for (_, v) in obj {
+                    extract_wildcard_recursive(v, segments, idx + 1, results);
+                }
+            }
+            Value::Array(arr) => {
+                for v in arr {
+                    extract_wildcard_recursive(v, segments, idx + 1, results);
+                }
+            }
+            _ => {}
+        }
+    } else if let Ok(array_idx) = segment.parse::<usize>() {
+        if let Value::Array(arr) = value {
+            if let Some(elem) = arr.get(array_idx) {
+                extract_wildcard_recursive(elem, segments, idx + 1, results);
+            }
+        }
+    } else if let Value::Object(obj) = value {
+        if let Some(child) = obj.get(segment.as_str()) {
+            extract_wildcard_recursive(child, segments, idx + 1, results);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON Deep Merge
+// ---------------------------------------------------------------------------
+
+/// Deep merge two JSON objects. Unlike merge patch, this never removes keys
+/// (null values in `b` overwrite with null rather than removing).
+pub fn json_deep_merge(a: &str, b: &str) -> Result<String> {
+    let mut val_a: Value = serde_json::from_str(a)
+        .map_err(|e| BlazeError::execution(format!("Invalid JSON a: {e}")))?;
+    let val_b: Value = serde_json::from_str(b)
+        .map_err(|e| BlazeError::execution(format!("Invalid JSON b: {e}")))?;
+
+    deep_merge_values(&mut val_a, &val_b);
+
+    serde_json::to_string(&val_a)
+        .map_err(|e| BlazeError::execution(format!("Serialization error: {e}")))
+}
+
+fn deep_merge_values(a: &mut Value, b: &Value) {
+    match (a, b) {
+        (Value::Object(a_obj), Value::Object(b_obj)) => {
+            for (key, b_val) in b_obj {
+                let entry = a_obj.entry(key.clone()).or_insert(Value::Null);
+                deep_merge_values(entry, b_val);
+            }
+        }
+        (a, b) => {
+            *a = b.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // New JSON enhancement tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn test_json_extract_simple() {
         let json = r#"{"name": "John", "age": 30}"#;
+        assert_eq!(
+            json_extract(json, "$.name").unwrap(),
+            Some("\"John\"".to_string())
+        );
+        assert_eq!(
+            json_extract(json, "$.age").unwrap(),
+            Some("30".to_string())
+        );
+    }
 
-        let result = json_extract(json, "$.name").unwrap();
-        assert_eq!(result, Some("\"John\"".to_string()));
+    #[test]
+    fn test_json_agg_basic() {
+        let values = vec!["1".to_string(), "\"hello\"".to_string(), "true".to_string()];
+        let result = json_agg(&values).unwrap();
+        let parsed: Vec<Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed.len(), 3);
+    }
 
-        let result = json_extract(json, "$.age").unwrap();
-        assert_eq!(result, Some("30".to_string()));
+    #[test]
+    fn test_json_object_agg() {
+        let pairs = vec![
+            ("name".to_string(), "\"Alice\"".to_string()),
+            ("age".to_string(), "30".to_string()),
+        ];
+        let result = json_object_agg(&pairs).unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["name"], "Alice");
+        assert_eq!(parsed["age"], 30);
+    }
+
+    #[test]
+    fn test_json_schema_inference() {
+        let docs = vec![
+            r#"{"name": "Alice", "age": 30, "active": true}"#.to_string(),
+            r#"{"name": "Bob", "age": 25, "email": "bob@test.com"}"#.to_string(),
+        ];
+        let schema = infer_json_schema(&docs).unwrap();
+        assert!(schema.contains_key("name"));
+        assert_eq!(schema["name"], "string");
+        assert!(schema.contains_key("age"));
+        assert_eq!(schema["age"], "number");
+        assert!(schema.contains_key("active"));
+        assert!(schema.contains_key("email"));
+    }
+
+    #[test]
+    fn test_json_merge_patch() {
+        let target = r#"{"name": "Alice", "age": 30, "city": "NYC"}"#;
+        let patch = r#"{"age": 31, "city": null, "email": "alice@test.com"}"#;
+        let result = json_merge_patch(target, patch).unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["name"], "Alice");
+        assert_eq!(parsed["age"], 31);
+        assert!(parsed.get("city").is_none());
+        assert_eq!(parsed["email"], "alice@test.com");
+    }
+
+    #[test]
+    fn test_json_merge_patch_nested() {
+        let target = r#"{"a": {"b": 1, "c": 2}}"#;
+        let patch = r#"{"a": {"b": 10}}"#;
+        let result = json_merge_patch(target, patch).unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["a"]["b"], 10);
+        assert_eq!(parsed["a"]["c"], 2);
+    }
+
+    #[test]
+    fn test_json_wildcard_path() {
+        let json = r#"{"store": {"book": [{"author": "Alice"}, {"author": "Bob"}]}}"#;
+        let results = json_extract_wildcard(json, "$.store.book[*].author").unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&"\"Alice\"".to_string()));
+        assert!(results.contains(&"\"Bob\"".to_string()));
+    }
+
+    #[test]
+    fn test_json_wildcard_object() {
+        let json = r#"{"users": {"alice": {"age": 30}, "bob": {"age": 25}}}"#;
+        let results = json_extract_wildcard(json, "$.users.*.age").unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_json_deep_merge() {
+        let a = r#"{"x": 1, "y": {"a": 1, "b": 2}}"#;
+        let b = r#"{"y": {"b": 20, "c": 30}, "z": 3}"#;
+        let result = json_deep_merge(a, b).unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["x"], 1);
+        assert_eq!(parsed["y"]["a"], 1);
+        assert_eq!(parsed["y"]["b"], 20);
+        assert_eq!(parsed["y"]["c"], 30);
+        assert_eq!(parsed["z"], 3);
     }
 
     #[test]
