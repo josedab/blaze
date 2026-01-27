@@ -1164,6 +1164,284 @@ impl QueryExplainProvider {
 }
 
 // ---------------------------------------------------------------------------
+// SQL Formatter
+// ---------------------------------------------------------------------------
+
+/// SQL query formatter with configurable style options.
+#[derive(Debug)]
+pub struct SqlFormatter {
+    pub uppercase_keywords: bool,
+    pub indent_size: usize,
+    pub max_line_width: usize,
+}
+
+impl Default for SqlFormatter {
+    fn default() -> Self {
+        Self {
+            uppercase_keywords: true,
+            indent_size: 2,
+            max_line_width: 80,
+        }
+    }
+}
+
+impl SqlFormatter {
+    /// Format a SQL query string.
+    pub fn format(&self, sql: &str) -> String {
+        let keywords = [
+            "SELECT", "FROM", "WHERE", "AND", "OR", "JOIN", "INNER", "LEFT",
+            "RIGHT", "FULL", "OUTER", "ON", "GROUP", "BY", "ORDER", "HAVING",
+            "LIMIT", "OFFSET", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
+            "DELETE", "CREATE", "TABLE", "DROP", "ALTER", "AS", "CASE", "WHEN",
+            "THEN", "ELSE", "END", "UNION", "ALL", "DISTINCT", "EXISTS", "IN",
+            "NOT", "BETWEEN", "LIKE", "IS", "NULL", "WITH", "RECURSIVE", "ASC",
+            "DESC", "CROSS", "NATURAL", "USING",
+        ];
+
+        let mut result = String::new();
+        let mut indent_level = 0;
+
+        // Simple tokenization by whitespace, preserving strings
+        let tokens = self.tokenize(sql);
+
+        for (i, token) in tokens.iter().enumerate() {
+            let upper = token.to_uppercase();
+
+            // Determine if this is a keyword that should start a new line
+            let new_line_before = matches!(
+                upper.as_str(),
+                "SELECT" | "FROM" | "WHERE" | "GROUP" | "ORDER" | "HAVING"
+                | "LIMIT" | "UNION" | "INSERT" | "UPDATE" | "DELETE" | "WITH"
+            ) && i > 0;
+
+            let indent_before = matches!(upper.as_str(), "AND" | "OR") && i > 0;
+
+            if new_line_before {
+                result.push('\n');
+                for _ in 0..indent_level * self.indent_size {
+                    result.push(' ');
+                }
+            } else if indent_before {
+                result.push('\n');
+                for _ in 0..(indent_level + 1) * self.indent_size {
+                    result.push(' ');
+                }
+            } else if i > 0 {
+                result.push(' ');
+            }
+
+            if upper == "(" {
+                indent_level += 1;
+            } else if upper == ")" {
+                indent_level = indent_level.saturating_sub(1);
+            }
+
+            if self.uppercase_keywords && keywords.contains(&upper.as_str()) {
+                result.push_str(&upper);
+            } else {
+                result.push_str(token);
+            }
+        }
+
+        result.trim().to_string()
+    }
+
+    fn tokenize(&self, sql: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut in_string = false;
+        let mut string_char = '"';
+
+        for ch in sql.chars() {
+            if in_string {
+                current.push(ch);
+                if ch == string_char {
+                    in_string = false;
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            } else if ch == '\'' || ch == '"' {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                in_string = true;
+                string_char = ch;
+                current.push(ch);
+            } else if ch.is_whitespace() {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            } else if ch == '(' || ch == ')' || ch == ',' || ch == ';' {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+                tokens.push(ch.to_string());
+            } else {
+                current.push(ch);
+            }
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        tokens
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Definition Location
+// ---------------------------------------------------------------------------
+
+/// Location of a symbol definition (table, column, CTE, etc.).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefinitionLocation {
+    pub name: String,
+    pub kind: DefinitionKind,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefinitionKind {
+    Table,
+    Column,
+    Cte,
+    Function,
+    Alias,
+}
+
+/// Finds definition locations for symbols in SQL queries.
+pub struct DefinitionFinder;
+
+impl DefinitionFinder {
+    /// Find the definition of a symbol at the given position in the query.
+    pub fn find_definition(
+        sql: &str,
+        symbol: &str,
+        table_schemas: &std::collections::HashMap<String, Schema>,
+    ) -> Option<DefinitionLocation> {
+        let lower_symbol = symbol.to_lowercase();
+
+        // Check if it's a table name
+        if table_schemas.contains_key(&lower_symbol) {
+            return Some(DefinitionLocation {
+                name: lower_symbol,
+                kind: DefinitionKind::Table,
+                source: "catalog".to_string(),
+            });
+        }
+
+        // Check if it's a column in any registered table
+        for (table_name, schema) in table_schemas {
+            for field in schema.fields() {
+                if field.name().to_lowercase() == lower_symbol {
+                    return Some(DefinitionLocation {
+                        name: field.name().to_string(),
+                        kind: DefinitionKind::Column,
+                        source: table_name.clone(),
+                    });
+                }
+            }
+        }
+
+        // Check if it's a CTE name
+        let upper = sql.to_uppercase();
+        if upper.contains("WITH") {
+            let cte_pattern = format!("{} AS", lower_symbol.to_uppercase());
+            if upper.contains(&cte_pattern) {
+                return Some(DefinitionLocation {
+                    name: lower_symbol,
+                    kind: DefinitionKind::Cte,
+                    source: "query".to_string(),
+                });
+            }
+        }
+
+        // Check built-in functions
+        let functions = [
+            "count", "sum", "avg", "min", "max", "upper", "lower", "length",
+            "trim", "concat", "coalesce", "abs", "round", "now", "cast",
+        ];
+        if functions.contains(&lower_symbol.as_str()) {
+            return Some(DefinitionLocation {
+                name: lower_symbol,
+                kind: DefinitionKind::Function,
+                source: "builtin".to_string(),
+            });
+        }
+
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Symbol References
+// ---------------------------------------------------------------------------
+
+/// Finds all references to a symbol in SQL queries.
+pub struct ReferenceFinder;
+
+impl ReferenceFinder {
+    /// Find all positions where a symbol is referenced in the query.
+    pub fn find_references(sql: &str, symbol: &str) -> Vec<Range> {
+        let lower_sql = sql.to_lowercase();
+        let lower_symbol = symbol.to_lowercase();
+        let mut references = Vec::new();
+        let mut search_from = 0;
+
+        while let Some(pos) = lower_sql[search_from..].find(&lower_symbol) {
+            let abs_pos = search_from + pos;
+            // Ensure it's a word boundary (not part of a larger identifier)
+            let before_ok = abs_pos == 0
+                || !sql.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
+                    && sql.as_bytes()[abs_pos - 1] != b'_';
+            let end_pos = abs_pos + lower_symbol.len();
+            let after_ok = end_pos >= sql.len()
+                || !sql.as_bytes()[end_pos].is_ascii_alphanumeric()
+                    && sql.as_bytes()[end_pos] != b'_';
+
+            if before_ok && after_ok {
+                // Convert byte offset to line/col
+                let (line, col) = Self::offset_to_position(sql, abs_pos);
+                let (end_line, end_col) =
+                    Self::offset_to_position(sql, abs_pos + lower_symbol.len());
+                references.push(Range {
+                    start: Position {
+                        line,
+                        character: col,
+                    },
+                    end: Position {
+                        line: end_line,
+                        character: end_col,
+                    },
+                });
+            }
+            search_from = abs_pos + 1;
+        }
+
+        references
+    }
+
+    fn offset_to_position(text: &str, offset: usize) -> (u32, u32) {
+        let mut line = 0u32;
+        let mut col = 0u32;
+        for (i, ch) in text.char_indices() {
+            if i >= offset {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1555,5 +1833,108 @@ mod tests {
     fn test_explain_invalid_sql() {
         let provider = QueryExplainProvider::new();
         assert!(provider.explain("SELECTT broken").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL Formatter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_formatter_basic() {
+        let formatter = SqlFormatter::default();
+        let formatted = formatter.format("select id, name from users where id > 5");
+        assert!(formatted.contains("SELECT"));
+        assert!(formatted.contains("FROM"));
+        assert!(formatted.contains("WHERE"));
+    }
+
+    #[test]
+    fn test_formatter_preserves_strings() {
+        let formatter = SqlFormatter::default();
+        let formatted = formatter.format("select * from t where name = 'alice'");
+        assert!(formatted.contains("'alice'"));
+    }
+
+    #[test]
+    fn test_formatter_uppercase_keywords() {
+        let formatter = SqlFormatter {
+            uppercase_keywords: true,
+            ..SqlFormatter::default()
+        };
+        let formatted = formatter.format("select count(*) from t group by id");
+        assert!(formatted.contains("SELECT"));
+        assert!(formatted.contains("GROUP"));
+        assert!(formatted.contains("BY"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Definition Finder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_definition_table() {
+        let mut schemas = std::collections::HashMap::new();
+        schemas.insert("users".to_string(), sample_schema());
+
+        let def = DefinitionFinder::find_definition(
+            "SELECT * FROM users", "users", &schemas
+        );
+        assert!(def.is_some());
+        assert_eq!(def.unwrap().kind, DefinitionKind::Table);
+    }
+
+    #[test]
+    fn test_find_definition_column() {
+        let mut schemas = std::collections::HashMap::new();
+        schemas.insert("users".to_string(), sample_schema());
+
+        let def = DefinitionFinder::find_definition(
+            "SELECT name FROM users", "name", &schemas
+        );
+        assert!(def.is_some());
+        let d = def.unwrap();
+        assert_eq!(d.kind, DefinitionKind::Column);
+        assert_eq!(d.source, "users");
+    }
+
+    #[test]
+    fn test_find_definition_builtin_function() {
+        let schemas = std::collections::HashMap::new();
+        let def = DefinitionFinder::find_definition(
+            "SELECT COUNT(*) FROM t", "count", &schemas
+        );
+        assert!(def.is_some());
+        assert_eq!(def.unwrap().kind, DefinitionKind::Function);
+    }
+
+    #[test]
+    fn test_find_definition_cte() {
+        let schemas = std::collections::HashMap::new();
+        let def = DefinitionFinder::find_definition(
+            "WITH active_users AS (SELECT * FROM users) SELECT * FROM active_users",
+            "active_users",
+            &schemas,
+        );
+        assert!(def.is_some());
+        assert_eq!(def.unwrap().kind, DefinitionKind::Cte);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reference Finder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_references() {
+        let sql = "SELECT id, name FROM users WHERE id > 5 ORDER BY id";
+        let refs = ReferenceFinder::find_references(sql, "id");
+        assert_eq!(refs.len(), 3); // id appears 3 times
+    }
+
+    #[test]
+    fn test_find_references_no_partial_match() {
+        let sql = "SELECT user_id FROM users";
+        let refs = ReferenceFinder::find_references(sql, "id");
+        // "id" should NOT match "user_id" (not a word boundary)
+        assert_eq!(refs.len(), 0);
     }
 }
