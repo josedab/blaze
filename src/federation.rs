@@ -1371,8 +1371,8 @@ impl FederationMetrics {
         self.total_bytes_transferred += bytes;
         self.total_rows_fetched += rows;
         // Incremental average update.
-        self.avg_query_latency_ms =
-            (self.avg_query_latency_ms * prev_total + latency_ms) / self.total_federated_queries as f64;
+        self.avg_query_latency_ms = (self.avg_query_latency_ms * prev_total + latency_ms)
+            / self.total_federated_queries as f64;
     }
 
     /// Record an error from a specific source.
@@ -1429,18 +1429,23 @@ impl FederationResultCache {
     pub fn put(&mut self, key: String, batches: Vec<RecordBatch>) {
         if self.entries.len() >= self.max_entries {
             // Evict least recently used
-            if let Some(lru_key) = self.entries.iter()
+            if let Some(lru_key) = self
+                .entries
+                .iter()
                 .min_by_key(|(_, e)| e.access_count)
                 .map(|(k, _)| k.clone())
             {
                 self.entries.remove(&lru_key);
             }
         }
-        self.entries.insert(key, FederationCacheEntry {
-            batches,
-            inserted_at: std::time::Instant::now(),
-            access_count: 0,
-        });
+        self.entries.insert(
+            key,
+            FederationCacheEntry {
+                batches,
+                inserted_at: std::time::Instant::now(),
+                access_count: 0,
+            },
+        );
     }
 
     /// Invalidate a specific cache entry.
@@ -1456,16 +1461,25 @@ impl FederationResultCache {
     /// Cache hit rate (0.0 to 1.0).
     pub fn hit_rate(&self) -> f64 {
         let total = self.hits + self.misses;
-        if total == 0 { 0.0 } else { self.hits as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     /// Remove expired entries.
     pub fn evict_expired(&mut self) {
         let ttl = self.ttl_secs;
-        self.entries.retain(|_, e| e.inserted_at.elapsed().as_secs() < ttl);
+        self.entries
+            .retain(|_, e| e.inserted_at.elapsed().as_secs() < ttl);
     }
 }
 
@@ -1497,13 +1511,15 @@ impl ParallelQueryExecutor {
 
     /// Plan parallel execution for a federated query.
     pub fn plan_execution(&self, sources: &[&str]) -> Vec<ExecutionPlan> {
-        sources.iter().enumerate().map(|(i, &source)| {
-            ExecutionPlan {
+        sources
+            .iter()
+            .enumerate()
+            .map(|(i, &source)| ExecutionPlan {
                 source: source.to_string(),
                 priority: i,
                 batch_idx: i / self.max_concurrent,
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Add a result from a source.
@@ -1523,14 +1539,19 @@ impl ParallelQueryExecutor {
 
     /// Sources that returned errors.
     pub fn failed_sources(&self) -> Vec<&str> {
-        self.results.iter()
+        self.results
+            .iter()
             .filter(|r| r.error.is_some())
             .map(|r| r.source_name.as_str())
             .collect()
     }
 
-    pub fn max_concurrent(&self) -> usize { self.max_concurrent }
-    pub fn timeout_ms(&self) -> u64 { self.timeout_ms }
+    pub fn max_concurrent(&self) -> usize {
+        self.max_concurrent
+    }
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
 }
 
 /// Execution plan for a single source query.
@@ -1603,7 +1624,9 @@ impl RestApiConnector {
     pub fn auth_header(&self) -> Option<(String, String)> {
         match &self.auth {
             RestAuth::None => None,
-            RestAuth::Bearer(token) => Some(("Authorization".to_string(), format!("Bearer {}", token))),
+            RestAuth::Bearer(token) => {
+                Some(("Authorization".to_string(), format!("Bearer {}", token)))
+            }
             RestAuth::Basic { username, password } => {
                 let encoded = base64_encode(&format!("{}:{}", username, password));
                 Some(("Authorization".to_string(), format!("Basic {}", encoded)))
@@ -1670,13 +1693,21 @@ impl CredentialVault {
     }
 
     /// Store a credential for a data source.
-    pub fn store(&mut self, name: &str, credential: CredentialType, expires_at: Option<std::time::SystemTime>) {
-        self.credentials.insert(name.to_string(), StoredCredential {
-            source_name: name.to_string(),
-            credential_type: credential,
-            created_at: std::time::SystemTime::now(),
-            expires_at,
-        });
+    pub fn store(
+        &mut self,
+        name: &str,
+        credential: CredentialType,
+        expires_at: Option<std::time::SystemTime>,
+    ) {
+        self.credentials.insert(
+            name.to_string(),
+            StoredCredential {
+                source_name: name.to_string(),
+                credential_type: credential,
+                created_at: std::time::SystemTime::now(),
+                expires_at,
+            },
+        );
     }
 
     /// Retrieve a credential by source name.
@@ -1701,8 +1732,12 @@ impl CredentialVault {
         self.credentials.keys().map(|k| k.as_str()).collect()
     }
 
-    pub fn len(&self) -> usize { self.credentials.len() }
-    pub fn is_empty(&self) -> bool { self.credentials.is_empty() }
+    pub fn len(&self) -> usize {
+        self.credentials.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.credentials.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -2403,11 +2438,10 @@ mod tests {
 
     #[test]
     fn test_rest_connector_api_key() {
-        let conn = RestApiConnector::new("https://api.example.com")
-            .with_auth(RestAuth::ApiKey {
-                header: "X-Api-Key".to_string(),
-                key: "secret123".to_string(),
-            });
+        let conn = RestApiConnector::new("https://api.example.com").with_auth(RestAuth::ApiKey {
+            header: "X-Api-Key".to_string(),
+            key: "secret123".to_string(),
+        });
         let (header, value) = conn.auth_header().unwrap();
         assert_eq!(header, "X-Api-Key");
         assert_eq!(value, "secret123");
@@ -2420,11 +2454,15 @@ mod tests {
     #[test]
     fn test_credential_vault() {
         let mut vault = CredentialVault::new();
-        vault.store("postgres", CredentialType::UsernamePassword {
-            username: "admin".to_string(),
-            password: "secret".to_string(),
-        }, None);
-        
+        vault.store(
+            "postgres",
+            CredentialType::UsernamePassword {
+                username: "admin".to_string(),
+                password: "secret".to_string(),
+            },
+            None,
+        );
+
         assert_eq!(vault.len(), 1);
         assert!(vault.get("postgres").is_some());
         assert!(vault.get("nonexistent").is_none());
@@ -2445,5 +2483,687 @@ mod tests {
         vault.store("mysql", CredentialType::Token("t2".to_string()), None);
         let sources = vault.list_sources();
         assert_eq!(sources.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive Router tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_runtime_stats() {
+        let mut stats = RuntimeStats::new("pg".to_string());
+        assert_eq!(stats.total_requests, 0);
+
+        stats.record_execution(100, true);
+        stats.record_execution(200, true);
+        stats.record_execution(300, false);
+
+        assert_eq!(stats.total_requests, 3);
+        assert_eq!(stats.successful_requests, 2);
+        assert_eq!(stats.failed_requests, 1);
+        assert!((stats.avg_latency_ms() - 200.0).abs() < 0.1);
+        assert!((stats.error_rate() - 0.333).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_adaptive_router_selection() {
+        let mut router = AdaptiveRouter::new();
+
+        // Record fast source
+        router.record_execution("fast", 50, true);
+        router.record_execution("fast", 60, true);
+
+        // Record slow source
+        router.record_execution("slow", 500, true);
+        router.record_execution("slow", 600, true);
+
+        let sources = vec!["fast".to_string(), "slow".to_string()];
+        let selected = router.select_best_source(&sources);
+        assert_eq!(selected, "fast");
+    }
+
+    #[test]
+    fn test_schema_drift_detector() {
+        let schema1 = Schema::new(vec![
+            crate::types::Field::new("id", DataType::Int32, false),
+            crate::types::Field::new("name", DataType::Utf8, true),
+        ]);
+
+        let schema2 = Schema::new(vec![
+            crate::types::Field::new("id", DataType::Int64, false), // Type changed
+            crate::types::Field::new("name", DataType::Utf8, false), // Nullability changed
+            crate::types::Field::new("email", DataType::Utf8, true), // Column added
+        ]);
+
+        let snap1 = SchemaSnapshot::new("source1".to_string(), schema1.clone(), 1);
+        let snap2 = SchemaSnapshot::new("source1".to_string(), schema2, 2);
+
+        let detector = SchemaDriftDetector::new();
+        let drifts = detector.detect_drift(&snap1, &snap2);
+
+        assert!(drifts.len() >= 3);
+        assert!(drifts
+            .iter()
+            .any(|d| matches!(d, SchemaDrift::TypeChanged { .. })));
+        assert!(drifts
+            .iter()
+            .any(|d| matches!(d, SchemaDrift::NullabilityChanged { .. })));
+        assert!(drifts
+            .iter()
+            .any(|d| matches!(d, SchemaDrift::ColumnAdded { .. })));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive routing and schema drift detection
+// ---------------------------------------------------------------------------
+
+use parking_lot::RwLock;
+use std::time::Instant;
+
+/// Runtime statistics for a federated source.
+#[derive(Debug, Clone)]
+pub struct RuntimeStats {
+    pub source_id: String,
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub failed_requests: u64,
+    pub total_latency_ms: f64,
+    pub last_request_time: Option<Instant>,
+}
+
+impl RuntimeStats {
+    pub fn new(source_id: String) -> Self {
+        Self {
+            source_id,
+            total_requests: 0,
+            successful_requests: 0,
+            failed_requests: 0,
+            total_latency_ms: 0.0,
+            last_request_time: None,
+        }
+    }
+
+    /// Record an execution result.
+    pub fn record_execution(&mut self, duration_ms: u64, success: bool) {
+        self.total_requests += 1;
+        self.total_latency_ms += duration_ms as f64;
+        self.last_request_time = Some(Instant::now());
+
+        if success {
+            self.successful_requests += 1;
+        } else {
+            self.failed_requests += 1;
+        }
+    }
+
+    /// Get average latency in milliseconds.
+    pub fn avg_latency_ms(&self) -> f64 {
+        if self.total_requests == 0 {
+            f64::MAX
+        } else {
+            self.total_latency_ms / self.total_requests as f64
+        }
+    }
+
+    /// Get error rate (0.0 to 1.0).
+    pub fn error_rate(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            self.failed_requests as f64 / self.total_requests as f64
+        }
+    }
+
+    /// Get throughput score (lower latency and error rate = higher score).
+    pub fn score(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            let latency_factor = 1000.0 / (self.avg_latency_ms() + 1.0);
+            let reliability_factor = 1.0 - self.error_rate();
+            latency_factor * reliability_factor
+        }
+    }
+}
+
+/// Adaptive router that selects the best source based on runtime statistics.
+#[derive(Debug)]
+pub struct AdaptiveRouter {
+    stats: RwLock<HashMap<String, RuntimeStats>>,
+}
+
+impl AdaptiveRouter {
+    pub fn new() -> Self {
+        Self {
+            stats: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Record an execution result for a source.
+    pub fn record_execution(&self, source_id: &str, duration_ms: u64, success: bool) {
+        let mut stats = self.stats.write();
+        let entry = stats
+            .entry(source_id.to_string())
+            .or_insert_with(|| RuntimeStats::new(source_id.to_string()));
+        entry.record_execution(duration_ms, success);
+    }
+
+    /// Select the best source from a list of compatible sources.
+    pub fn select_best_source(&self, compatible_sources: &[String]) -> String {
+        let stats = self.stats.read();
+
+        let mut best_source = compatible_sources.first().cloned().unwrap_or_default();
+        let mut best_score = 0.0;
+
+        for source_id in compatible_sources {
+            if let Some(source_stats) = stats.get(source_id) {
+                let score = source_stats.score();
+                if score > best_score {
+                    best_score = score;
+                    best_source = source_id.clone();
+                }
+            } else {
+                // If no stats available, prefer unknown sources (might be faster)
+                if best_score == 0.0 {
+                    best_source = source_id.clone();
+                }
+            }
+        }
+
+        best_source
+    }
+
+    /// Get statistics for a specific source.
+    pub fn get_stats(&self, source_id: &str) -> Option<RuntimeStats> {
+        self.stats.read().get(source_id).cloned()
+    }
+
+    /// Get all recorded statistics.
+    pub fn all_stats(&self) -> HashMap<String, RuntimeStats> {
+        self.stats.read().clone()
+    }
+
+    /// Reset statistics for all sources.
+    pub fn reset(&self) {
+        self.stats.write().clear();
+    }
+}
+
+impl Default for AdaptiveRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Schema snapshot for drift detection.
+#[derive(Debug, Clone)]
+pub struct SchemaSnapshot {
+    pub source_id: String,
+    pub schema: Schema,
+    pub version: u64,
+    pub captured_at: std::time::SystemTime,
+}
+
+impl SchemaSnapshot {
+    pub fn new(source_id: String, schema: Schema, version: u64) -> Self {
+        Self {
+            source_id,
+            schema,
+            version,
+            captured_at: std::time::SystemTime::now(),
+        }
+    }
+}
+
+/// Types of schema drift.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemaDrift {
+    ColumnAdded {
+        column_name: String,
+        data_type: String,
+    },
+    ColumnRemoved {
+        column_name: String,
+    },
+    TypeChanged {
+        column_name: String,
+        old_type: String,
+        new_type: String,
+    },
+    NullabilityChanged {
+        column_name: String,
+        old_nullable: bool,
+        new_nullable: bool,
+    },
+}
+
+/// Detects schema drift between snapshots.
+#[derive(Debug)]
+pub struct SchemaDriftDetector;
+
+impl SchemaDriftDetector {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Capture a schema snapshot.
+    pub fn capture_snapshot(&self, source_id: impl Into<String>, schema: Schema) -> SchemaSnapshot {
+        SchemaSnapshot::new(source_id.into(), schema, 1)
+    }
+
+    /// Detect drift between two schema snapshots.
+    pub fn detect_drift(&self, old: &SchemaSnapshot, new: &SchemaSnapshot) -> Vec<SchemaDrift> {
+        let mut drifts = Vec::new();
+
+        let old_fields: HashMap<&str, _> =
+            old.schema.fields().iter().map(|f| (f.name(), f)).collect();
+
+        let new_fields: HashMap<&str, _> =
+            new.schema.fields().iter().map(|f| (f.name(), f)).collect();
+
+        // Check for removed columns
+        for (name, _) in &old_fields {
+            if !new_fields.contains_key(name) {
+                drifts.push(SchemaDrift::ColumnRemoved {
+                    column_name: name.to_string(),
+                });
+            }
+        }
+
+        // Check for added columns and changes
+        for (name, new_field) in &new_fields {
+            if let Some(old_field) = old_fields.get(name) {
+                // Check type change
+                if old_field.data_type() != new_field.data_type() {
+                    drifts.push(SchemaDrift::TypeChanged {
+                        column_name: name.to_string(),
+                        old_type: format!("{:?}", old_field.data_type()),
+                        new_type: format!("{:?}", new_field.data_type()),
+                    });
+                }
+
+                // Check nullability change
+                if old_field.is_nullable() != new_field.is_nullable() {
+                    drifts.push(SchemaDrift::NullabilityChanged {
+                        column_name: name.to_string(),
+                        old_nullable: old_field.is_nullable(),
+                        new_nullable: new_field.is_nullable(),
+                    });
+                }
+            } else {
+                // Column added
+                drifts.push(SchemaDrift::ColumnAdded {
+                    column_name: name.to_string(),
+                    data_type: format!("{:?}", new_field.data_type()),
+                });
+            }
+        }
+
+        drifts
+    }
+}
+
+impl Default for SchemaDriftDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Object Store Abstraction (S3/GCS/Azure/Local)
+// ---------------------------------------------------------------------------
+
+/// Unified trait for reading from cloud object stores.
+pub trait ObjectStore: Send + Sync + std::fmt::Debug {
+    /// List objects under the given prefix.
+    fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>>;
+
+    /// Read a range of bytes from an object.
+    fn read_range(&self, path: &str, start: usize, length: usize) -> Result<Vec<u8>>;
+
+    /// Read an entire object.
+    fn read(&self, path: &str) -> Result<Vec<u8>>;
+
+    /// Return the store type name.
+    fn store_type(&self) -> &str;
+}
+
+/// Metadata about a remote object.
+#[derive(Debug, Clone)]
+pub struct ObjectMeta {
+    /// Full path/key of the object.
+    pub path: String,
+    /// Size in bytes.
+    pub size: usize,
+    /// Last modified timestamp (epoch seconds).
+    pub last_modified: u64,
+}
+
+/// Local filesystem implementation of [`ObjectStore`].
+#[derive(Debug)]
+pub struct LocalFileStore {
+    base_path: String,
+}
+
+impl LocalFileStore {
+    pub fn new(base_path: impl Into<String>) -> Self {
+        Self {
+            base_path: base_path.into(),
+        }
+    }
+}
+
+impl ObjectStore for LocalFileStore {
+    fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
+        let dir = std::path::Path::new(&self.base_path).join(prefix);
+        let mut results = Vec::new();
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(&dir)
+                .map_err(|e| BlazeError::execution(format!("Cannot list {}: {e}", dir.display())))?
+            {
+                let entry = entry.map_err(|e| BlazeError::execution(e.to_string()))?;
+                let meta = entry.metadata().map_err(|e| BlazeError::execution(e.to_string()))?;
+                if meta.is_file() {
+                    results.push(ObjectMeta {
+                        path: entry.path().to_string_lossy().to_string(),
+                        size: meta.len() as usize,
+                        last_modified: meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                    });
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    fn read_range(&self, path: &str, start: usize, length: usize) -> Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| BlazeError::execution(format!("Cannot open {path}: {e}")))?;
+        file.seek(SeekFrom::Start(start as u64))
+            .map_err(|e| BlazeError::execution(format!("Seek failed: {e}")))?;
+        let mut buf = vec![0u8; length];
+        file.read_exact(&mut buf)
+            .map_err(|e| BlazeError::execution(format!("Read failed: {e}")))?;
+        Ok(buf)
+    }
+
+    fn read(&self, path: &str) -> Result<Vec<u8>> {
+        std::fs::read(path)
+            .map_err(|e| BlazeError::execution(format!("Cannot read {path}: {e}")))
+    }
+
+    fn store_type(&self) -> &str {
+        "local"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hive-Style Partition Discovery
+// ---------------------------------------------------------------------------
+
+/// A discovered partition in a Hive-style directory layout.
+#[derive(Debug, Clone)]
+pub struct HivePartition {
+    /// Partition column values, e.g. [("year", "2024"), ("month", "01")].
+    pub columns: Vec<(String, String)>,
+    /// Files in this partition.
+    pub files: Vec<String>,
+}
+
+/// Discovers partitions from Hive-style paths like `year=2024/month=01/data.parquet`.
+#[derive(Debug)]
+pub struct HivePartitionDiscovery;
+
+impl HivePartitionDiscovery {
+    /// Parse partition columns from a path segment.
+    /// e.g. "year=2024" → Some(("year", "2024"))
+    pub fn parse_partition_segment(segment: &str) -> Option<(String, String)> {
+        let parts: Vec<&str> = segment.splitn(2, '=').collect();
+        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            Some((parts[0].to_string(), parts[1].to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// Discover partitions from a list of object paths.
+    pub fn discover(paths: &[String]) -> Vec<HivePartition> {
+        let mut partitions: HashMap<Vec<(String, String)>, Vec<String>> = HashMap::new();
+
+        for path in paths {
+            let segments: Vec<&str> = path.split('/').collect();
+            let mut partition_cols = Vec::new();
+            let mut is_hive = false;
+
+            for seg in &segments {
+                if let Some(kv) = Self::parse_partition_segment(seg) {
+                    partition_cols.push(kv);
+                    is_hive = true;
+                }
+            }
+
+            if is_hive {
+                partitions
+                    .entry(partition_cols)
+                    .or_default()
+                    .push(path.clone());
+            } else {
+                partitions
+                    .entry(vec![])
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
+
+        partitions
+            .into_iter()
+            .map(|(columns, files)| HivePartition { columns, files })
+            .collect()
+    }
+
+    /// Prune partitions based on predicate: `column = value`.
+    pub fn prune(
+        partitions: &[HivePartition],
+        column: &str,
+        value: &str,
+    ) -> Vec<HivePartition> {
+        partitions
+            .iter()
+            .filter(|p| {
+                // Keep partitions that match or don't have the column
+                p.columns
+                    .iter()
+                    .find(|(k, _)| k == column)
+                    .map(|(_, v)| v == value)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel Scan Scheduler
+// ---------------------------------------------------------------------------
+
+/// A unit of work for the parallel scan scheduler.
+#[derive(Debug, Clone)]
+pub struct ScanTask {
+    /// Unique task identifier.
+    pub id: usize,
+    /// File path to scan.
+    pub path: String,
+    /// Estimated size in bytes.
+    pub size_bytes: usize,
+    /// Assigned worker (set during scheduling).
+    pub worker_id: Option<usize>,
+}
+
+/// Schedules file scans across a worker pool with size-based balancing.
+#[derive(Debug)]
+pub struct ParallelScanScheduler {
+    num_workers: usize,
+}
+
+impl ParallelScanScheduler {
+    pub fn new(num_workers: usize) -> Self {
+        Self {
+            num_workers: num_workers.max(1),
+        }
+    }
+
+    /// Assign tasks to workers using a greedy load-balancing strategy:
+    /// assign each task to the worker with the lowest current load.
+    pub fn schedule(&self, tasks: &mut [ScanTask]) {
+        // Sort tasks by size descending (largest first for better balance)
+        tasks.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+
+        let mut worker_loads = vec![0usize; self.num_workers];
+
+        for task in tasks.iter_mut() {
+            let min_worker = worker_loads
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, load)| *load)
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            task.worker_id = Some(min_worker);
+            worker_loads[min_worker] += task.size_bytes;
+        }
+    }
+
+    /// Return the load distribution across workers after scheduling.
+    pub fn worker_loads(tasks: &[ScanTask], num_workers: usize) -> Vec<usize> {
+        let mut loads = vec![0usize; num_workers];
+        for task in tasks {
+            if let Some(wid) = task.worker_id {
+                if wid < num_workers {
+                    loads[wid] += task.size_bytes;
+                }
+            }
+        }
+        loads
+    }
+}
+
+#[cfg(test)]
+mod federation_new_tests {
+    use super::*;
+
+    #[test]
+    fn test_local_file_store_list() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.parquet"), b"data1").unwrap();
+        std::fs::write(tmp.path().join("b.parquet"), b"data22").unwrap();
+
+        let store = LocalFileStore::new(tmp.path().parent().unwrap().to_string_lossy().to_string());
+        let dir_name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let objects = store.list(&dir_name).unwrap();
+        assert_eq!(objects.len(), 2);
+    }
+
+    #[test]
+    fn test_local_file_store_read() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("test.dat");
+        std::fs::write(&path, b"Hello, World!").unwrap();
+
+        let store = LocalFileStore::new(tmp.path().to_string_lossy().to_string());
+        let data = store.read(&path.to_string_lossy()).unwrap();
+        assert_eq!(data, b"Hello, World!");
+    }
+
+    #[test]
+    fn test_local_file_store_read_range() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("range.dat");
+        std::fs::write(&path, b"ABCDEFGHIJ").unwrap();
+
+        let store = LocalFileStore::new(tmp.path().to_string_lossy().to_string());
+        let data = store.read_range(&path.to_string_lossy(), 3, 4).unwrap();
+        assert_eq!(data, b"DEFG");
+    }
+
+    #[test]
+    fn test_hive_partition_parse() {
+        let seg = HivePartitionDiscovery::parse_partition_segment("year=2024");
+        assert_eq!(seg, Some(("year".into(), "2024".into())));
+
+        let none = HivePartitionDiscovery::parse_partition_segment("not_a_partition");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn test_hive_partition_discovery() {
+        let paths = vec![
+            "data/year=2024/month=01/file1.parquet".into(),
+            "data/year=2024/month=01/file2.parquet".into(),
+            "data/year=2024/month=02/file3.parquet".into(),
+            "data/year=2023/month=12/file4.parquet".into(),
+        ];
+        let partitions = HivePartitionDiscovery::discover(&paths);
+        assert_eq!(partitions.len(), 3); // 3 distinct partitions
+    }
+
+    #[test]
+    fn test_hive_partition_pruning() {
+        let paths = vec![
+            "data/year=2024/month=01/f1.parquet".into(),
+            "data/year=2024/month=02/f2.parquet".into(),
+            "data/year=2023/month=01/f3.parquet".into(),
+        ];
+        let partitions = HivePartitionDiscovery::discover(&paths);
+        let pruned = HivePartitionDiscovery::prune(&partitions, "year", "2024");
+        // Should keep only year=2024 partitions
+        assert!(pruned.iter().all(|p| {
+            p.columns
+                .iter()
+                .find(|(k, _)| k == "year")
+                .map(|(_, v)| v == "2024")
+                .unwrap_or(true)
+        }));
+    }
+
+    #[test]
+    fn test_parallel_scan_scheduler() {
+        let mut tasks: Vec<ScanTask> = (0..6)
+            .map(|i| ScanTask {
+                id: i,
+                path: format!("file_{i}.parquet"),
+                size_bytes: (i + 1) * 100,
+                worker_id: None,
+            })
+            .collect();
+
+        let scheduler = ParallelScanScheduler::new(3);
+        scheduler.schedule(&mut tasks);
+
+        // All tasks assigned
+        assert!(tasks.iter().all(|t| t.worker_id.is_some()));
+
+        // Check load balance — no worker should have vastly more load
+        let loads = ParallelScanScheduler::worker_loads(&tasks, 3);
+        let max_load = *loads.iter().max().unwrap();
+        let min_load = *loads.iter().min().unwrap();
+        // With greedy scheduling, imbalance should be bounded
+        assert!(max_load <= min_load * 3 + 100);
+    }
+
+    #[test]
+    fn test_scan_task_single_worker() {
+        let mut tasks = vec![
+            ScanTask { id: 0, path: "a".into(), size_bytes: 1000, worker_id: None },
+            ScanTask { id: 1, path: "b".into(), size_bytes: 2000, worker_id: None },
+        ];
+        let scheduler = ParallelScanScheduler::new(1);
+        scheduler.schedule(&mut tasks);
+        assert!(tasks.iter().all(|t| t.worker_id == Some(0)));
     }
 }
