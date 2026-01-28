@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 
+use crate::error::{BlazeError, Result};
+
 /// A recorded query execution for training.
 #[derive(Debug, Clone)]
 pub struct WorkloadEntry {
@@ -1035,7 +1037,11 @@ impl CardinalityFeedbackLoop {
 
     /// Updates the running correction factor using exponential moving average (alpha=0.1).
     pub fn record_feedback(&self, table: &str, estimated: f64, actual: f64) {
-        let new_factor = if estimated <= 0.0 { 1.0 } else { actual / estimated };
+        let new_factor = if estimated <= 0.0 {
+            1.0
+        } else {
+            actual / estimated
+        };
         let alpha = 0.1;
         let mut corrections = self.corrections.write();
         let mut counts = self.observation_count.write();
@@ -1137,7 +1143,8 @@ impl AdaptiveParallelism {
         if self.cpu_utilization_history.len() >= self.max_history {
             self.cpu_utilization_history.remove(0);
         }
-        self.cpu_utilization_history.push(utilization.clamp(0.0, 1.0));
+        self.cpu_utilization_history
+            .push(utilization.clamp(0.0, 1.0));
         self.adjust();
     }
 
@@ -1162,8 +1169,12 @@ impl AdaptiveParallelism {
         }
     }
 
-    pub fn min_threads(&self) -> usize { self.min_threads }
-    pub fn max_threads(&self) -> usize { self.max_threads }
+    pub fn min_threads(&self) -> usize {
+        self.min_threads
+    }
+    pub fn max_threads(&self) -> usize {
+        self.max_threads
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,7 +1241,10 @@ impl WorkloadClusterer {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let dist: f64 = c.centroid.iter().zip(features.iter())
+                let dist: f64 = c
+                    .centroid
+                    .iter()
+                    .zip(features.iter())
                     .map(|(a, b)| (a - b).powi(2))
                     .sum::<f64>()
                     .sqrt();
@@ -1246,7 +1260,9 @@ impl WorkloadClusterer {
         sorted
     }
 
-    pub fn num_clusters(&self) -> usize { self.clusters.len() }
+    pub fn num_clusters(&self) -> usize {
+        self.clusters.len()
+    }
 }
 
 /// Pattern detector that identifies recurring query shapes.
@@ -1276,19 +1292,35 @@ impl PatternDetector {
     pub fn extract_pattern(sql: &str) -> String {
         let upper = sql.to_uppercase();
         let mut pattern = String::new();
-        
-        if upper.contains("SELECT") { pattern.push_str("S"); }
-        if upper.contains("JOIN") { pattern.push_str("J"); }
-        if upper.contains("WHERE") { pattern.push_str("W"); }
-        if upper.contains("GROUP BY") { pattern.push_str("G"); }
-        if upper.contains("HAVING") { pattern.push_str("H"); }
-        if upper.contains("ORDER BY") { pattern.push_str("O"); }
-        if upper.contains("LIMIT") { pattern.push_str("L"); }
+
+        if upper.contains("SELECT") {
+            pattern.push_str("S");
+        }
+        if upper.contains("JOIN") {
+            pattern.push_str("J");
+        }
+        if upper.contains("WHERE") {
+            pattern.push_str("W");
+        }
+        if upper.contains("GROUP BY") {
+            pattern.push_str("G");
+        }
+        if upper.contains("HAVING") {
+            pattern.push_str("H");
+        }
+        if upper.contains("ORDER BY") {
+            pattern.push_str("O");
+        }
+        if upper.contains("LIMIT") {
+            pattern.push_str("L");
+        }
         if upper.contains("UNION") || upper.contains("INTERSECT") || upper.contains("EXCEPT") {
             pattern.push_str("U");
         }
-        if upper.contains("WITH") { pattern.push_str("C"); } // CTE
-        
+        if upper.contains("WITH") {
+            pattern.push_str("C");
+        } // CTE
+
         pattern
     }
 
@@ -1296,18 +1328,25 @@ impl PatternDetector {
     pub fn record(&mut self, sql: &str, execution_time_us: u64) {
         let pattern = Self::extract_pattern(sql);
         let upper = sql.to_uppercase();
-        
-        let entry = self.patterns.entry(pattern.clone()).or_insert(PatternStats {
-            pattern: pattern.clone(),
-            count: 0,
-            avg_execution_time_us: 0.0,
-            tables: Vec::new(),
-            has_join: upper.contains("JOIN"),
-            has_aggregation: upper.contains("GROUP BY") || upper.contains("SUM") || upper.contains("COUNT") || upper.contains("AVG"),
-        });
-        
+
+        let entry = self
+            .patterns
+            .entry(pattern.clone())
+            .or_insert(PatternStats {
+                pattern: pattern.clone(),
+                count: 0,
+                avg_execution_time_us: 0.0,
+                tables: Vec::new(),
+                has_join: upper.contains("JOIN"),
+                has_aggregation: upper.contains("GROUP BY")
+                    || upper.contains("SUM")
+                    || upper.contains("COUNT")
+                    || upper.contains("AVG"),
+            });
+
         let n = entry.count as f64;
-        entry.avg_execution_time_us = (entry.avg_execution_time_us * n + execution_time_us as f64) / (n + 1.0);
+        entry.avg_execution_time_us =
+            (entry.avg_execution_time_us * n + execution_time_us as f64) / (n + 1.0);
         entry.count += 1;
     }
 
@@ -1319,7 +1358,9 @@ impl PatternDetector {
         patterns
     }
 
-    pub fn num_patterns(&self) -> usize { self.patterns.len() }
+    pub fn num_patterns(&self) -> usize {
+        self.patterns.len()
+    }
 }
 
 /// Auto-indexer that recommends and tracks index creation.
@@ -1339,9 +1380,13 @@ impl AutoIndexer {
     }
 
     /// Analyze a workload and generate index recommendations.
-    pub fn analyze_workload(&mut self, patterns: &[&PatternStats], column_access: &HashMap<String, usize>) {
+    pub fn analyze_workload(
+        &mut self,
+        patterns: &[&PatternStats],
+        column_access: &HashMap<String, usize>,
+    ) {
         self.recommendations.clear();
-        
+
         for (column, &access_count) in column_access {
             if access_count >= self.min_query_count {
                 let parts: Vec<&str> = column.splitn(2, '.').collect();
@@ -1354,7 +1399,8 @@ impl AutoIndexer {
                         } else {
                             IndexType::BTree
                         },
-                        estimated_benefit: (access_count as f64 / self.min_query_count as f64).min(10.0),
+                        estimated_benefit: (access_count as f64 / self.min_query_count as f64)
+                            .min(10.0),
                         reason: format!("Column accessed {} times", access_count),
                     });
                 }
@@ -1362,7 +1408,9 @@ impl AutoIndexer {
         }
 
         self.recommendations.sort_by(|a, b| {
-            b.estimated_benefit.partial_cmp(&a.estimated_benefit).unwrap_or(std::cmp::Ordering::Equal)
+            b.estimated_benefit
+                .partial_cmp(&a.estimated_benefit)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 
@@ -1372,8 +1420,12 @@ impl AutoIndexer {
         self.applied.push(key);
     }
 
-    pub fn recommendations(&self) -> &[IndexRecommendation] { &self.recommendations }
-    pub fn applied_count(&self) -> usize { self.applied.len() }
+    pub fn recommendations(&self) -> &[IndexRecommendation] {
+        &self.recommendations
+    }
+    pub fn applied_count(&self) -> usize {
+        self.applied.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1423,7 +1475,12 @@ impl GradientCardinalityModel {
     pub fn predict(&self, features: &[f64]) -> f64 {
         let weights = self.weights.read();
         let bias = *self.bias.read();
-        let raw: f64 = weights.iter().zip(features.iter()).map(|(w, f)| w * f).sum::<f64>() + bias;
+        let raw: f64 = weights
+            .iter()
+            .zip(features.iter())
+            .map(|(w, f)| w * f)
+            .sum::<f64>()
+            + bias;
         *self.predictions.write() += 1;
         raw.max(0.0)
     }
@@ -1433,7 +1490,12 @@ impl GradientCardinalityModel {
         let predicted = {
             let weights = self.weights.read();
             let bias = *self.bias.read();
-            weights.iter().zip(features.iter()).map(|(w, f)| w * f).sum::<f64>() + bias
+            weights
+                .iter()
+                .zip(features.iter())
+                .map(|(w, f)| w * f)
+                .sum::<f64>()
+                + bias
         };
         let error = predicted - actual;
 
@@ -1640,7 +1702,11 @@ impl IndexRecommender {
                 }
             })
             .collect();
-        recs.sort_by(|a, b| b.estimated_speedup.partial_cmp(&a.estimated_speedup).unwrap());
+        recs.sort_by(|a, b| {
+            b.estimated_speedup
+                .partial_cmp(&a.estimated_speedup)
+                .unwrap()
+        });
         recs
     }
 }
@@ -2231,7 +2297,7 @@ mod tests {
         detector.record_prediction(100.0, 200.0); // q-error = 2
         detector.record_prediction(100.0, 300.0); // q-error = 3
         detector.record_prediction(100.0, 400.0); // q-error = 4
-        // Mean = 3.0, threshold = 5.0 => not drifting
+                                                  // Mean = 3.0, threshold = 5.0 => not drifting
         assert!(!detector.is_drifting());
         // But window is full => should retrain
         assert!(detector.should_retrain());
@@ -2265,12 +2331,20 @@ mod tests {
         // Single observation: factor = 0.9 * 1.0 + 0.1 * (500/100) = 0.9 + 0.5 = 1.4
         fb.record_feedback("orders", 100.0, 500.0);
         let correction = fb.get_correction("orders");
-        assert!((correction - 1.4).abs() < 0.01, "correction was {}", correction);
+        assert!(
+            (correction - 1.4).abs() < 0.01,
+            "correction was {}",
+            correction
+        );
 
         // Second observation: factor = 0.9 * 1.4 + 0.1 * (500/100) = 1.26 + 0.5 = 1.76
         fb.record_feedback("orders", 100.0, 500.0);
         let correction = fb.get_correction("orders");
-        assert!((correction - 1.76).abs() < 0.01, "correction was {}", correction);
+        assert!(
+            (correction - 1.76).abs() < 0.01,
+            "correction was {}",
+            correction
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2338,8 +2412,12 @@ mod tests {
         let mut clusterer = WorkloadClusterer::new(5.0);
         clusterer.add_query(&[1.0, 2.0, 3.0], "SELECT * FROM users", 100);
         clusterer.add_query(&[1.1, 2.1, 3.1], "SELECT * FROM users WHERE id = 1", 150);
-        clusterer.add_query(&[10.0, 20.0, 30.0], "SELECT * FROM orders JOIN products", 500);
-        
+        clusterer.add_query(
+            &[10.0, 20.0, 30.0],
+            "SELECT * FROM orders JOIN products",
+            500,
+        );
+
         assert_eq!(clusterer.num_clusters(), 2); // Two distinct clusters
     }
 
@@ -2348,7 +2426,7 @@ mod tests {
         let mut clusterer = WorkloadClusterer::new(5.0);
         clusterer.add_query(&[1.0, 0.0], "fast query", 10);
         clusterer.add_query(&[100.0, 100.0], "slow query", 10000);
-        
+
         let hot = clusterer.hot_clusters();
         assert_eq!(hot[0].total_execution_time_us, 10000);
     }
@@ -2363,7 +2441,7 @@ mod tests {
         detector.record("SELECT * FROM users WHERE id = 1", 100);
         detector.record("SELECT * FROM orders WHERE status = 'active'", 200);
         detector.record("SELECT * FROM users WHERE name = 'Alice'", 150);
-        
+
         assert_eq!(detector.num_patterns(), 1); // Same pattern: SW
         let top = detector.top_patterns(1);
         assert_eq!(top[0].count, 3);
@@ -2374,8 +2452,11 @@ mod tests {
         let mut detector = PatternDetector::new();
         detector.record("SELECT * FROM users", 100);
         detector.record("SELECT * FROM users WHERE id = 1 ORDER BY name", 200);
-        detector.record("SELECT * FROM users JOIN orders ON u.id = o.user_id GROUP BY u.name", 300);
-        
+        detector.record(
+            "SELECT * FROM users JOIN orders ON u.id = o.user_id GROUP BY u.name",
+            300,
+        );
+
         assert!(detector.num_patterns() >= 2); // Different shapes
     }
 
@@ -2391,10 +2472,13 @@ mod tests {
         access.insert("users.id".to_string(), 10);
         access.insert("users.name".to_string(), 5);
         access.insert("orders.date".to_string(), 1); // Below threshold
-        
+
         indexer.analyze_workload(&patterns, &access);
         assert_eq!(indexer.recommendations().len(), 2); // users.id and users.name
-        assert!(indexer.recommendations()[0].estimated_benefit >= indexer.recommendations()[1].estimated_benefit);
+        assert!(
+            indexer.recommendations()[0].estimated_benefit
+                >= indexer.recommendations()[1].estimated_benefit
+        );
     }
 
     #[test]
@@ -2500,10 +2584,7 @@ mod tests {
             &["users.id".into(), "orders.total".into()],
             &["users.id".into(), "orders.total".into()],
         );
-        rec.record_query(
-            &["orders.total".into()],
-            &["orders.total".into()],
-        );
+        rec.record_query(&["orders.total".into()], &["orders.total".into()]);
         let recs = rec.recommend();
         // users.id appears in filters 2 times, orders.total 2 times
         assert_eq!(recs.len(), 2);
@@ -2573,5 +2654,711 @@ mod tests {
         assert_eq!(exp.name(), "my_exp");
         assert_eq!(exp.plan_a_hash(), 42);
         assert_eq!(exp.plan_b_hash(), 84);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cost model learning and runtime adaptation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cost_model_learner() {
+        let mut learner = CostModelLearner::new();
+
+        // Record observations
+        learner.record_observation("HashJoin", 1000, 100.0);
+        learner.record_observation("HashJoin", 2000, 200.0);
+        learner.record_observation("HashJoin", 3000, 300.0);
+
+        // Predict cost
+        let predicted = learner.predict_cost("HashJoin", 1500);
+        assert!(predicted > 0.0);
+        assert!(predicted < 400.0);
+    }
+
+    #[test]
+    fn test_cost_model_learner_retrain() {
+        let mut learner = CostModelLearner::new();
+
+        learner.record_observation("Scan", 100, 10.0);
+        learner.record_observation("Scan", 200, 20.0);
+
+        learner.retrain();
+
+        let predicted = learner.predict_cost("Scan", 150);
+        assert!((predicted - 15.0).abs() < 5.0);
+    }
+
+    #[test]
+    fn test_runtime_advisor() {
+        let advisor = RuntimeAdvisor::new();
+
+        let stats = ExecutionStats {
+            peak_memory: 2 * 1024 * 1024 * 1024, // 2GB
+            cpu_utilization: 0.2,
+            spill_count: 5,
+            operator_timings: HashMap::new(),
+        };
+
+        let adaptations = advisor.advise(&stats);
+        assert!(adaptations.len() > 0);
+    }
+
+    #[test]
+    fn test_runtime_advisor_hash_join_oom() {
+        let advisor = RuntimeAdvisor::new();
+
+        let stats = ExecutionStats {
+            peak_memory: 3 * 1024 * 1024 * 1024, // 3GB
+            cpu_utilization: 0.5,
+            spill_count: 0,
+            operator_timings: HashMap::from([("HashJoin".to_string(), 1000.0)]),
+        };
+
+        let adaptations = advisor.advise(&stats);
+        assert!(adaptations
+            .iter()
+            .any(|a| matches!(a, PlanAdaptation::SwitchJoinAlgorithm)));
+    }
+
+    #[test]
+    fn test_plan_adaptation_types() {
+        let adapt1 = PlanAdaptation::SwitchJoinAlgorithm;
+        let adapt2 = PlanAdaptation::IncreaseParallelism;
+        let adapt3 = PlanAdaptation::ReduceBatchSize;
+        let adapt4 = PlanAdaptation::EnablePrefetch;
+
+        assert!(matches!(adapt1, PlanAdaptation::SwitchJoinAlgorithm));
+        assert!(matches!(adapt2, PlanAdaptation::IncreaseParallelism));
+        assert!(matches!(adapt3, PlanAdaptation::ReduceBatchSize));
+        assert!(matches!(adapt4, PlanAdaptation::EnablePrefetch));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cost model learning and runtime adaptation implementation
+// ---------------------------------------------------------------------------
+
+/// Cost model learner using simple linear regression per operator type.
+#[derive(Debug)]
+pub struct CostModelLearner {
+    /// Observations: operator_type -> (input_rows, actual_cost_ms)
+    observations: HashMap<String, Vec<(usize, f64)>>,
+    /// Learned models: operator_type -> (slope, intercept)
+    models: HashMap<String, (f64, f64)>,
+}
+
+impl CostModelLearner {
+    pub fn new() -> Self {
+        Self {
+            observations: HashMap::new(),
+            models: HashMap::new(),
+        }
+    }
+
+    /// Record an observation of operator execution.
+    pub fn record_observation(
+        &mut self,
+        operator_type: &str,
+        input_rows: usize,
+        actual_cost_ms: f64,
+    ) {
+        self.observations
+            .entry(operator_type.to_string())
+            .or_insert_with(Vec::new)
+            .push((input_rows, actual_cost_ms));
+    }
+
+    /// Predict cost for an operator given estimated input rows.
+    pub fn predict_cost(&self, operator_type: &str, estimated_input_rows: usize) -> f64 {
+        if let Some((slope, intercept)) = self.models.get(operator_type) {
+            slope * estimated_input_rows as f64 + intercept
+        } else {
+            // No model available - return a default
+            estimated_input_rows as f64 * 0.01 // 0.01ms per row default
+        }
+    }
+
+    /// Retrain all models based on collected observations.
+    pub fn retrain(&mut self) {
+        for (operator_type, observations) in &self.observations {
+            if observations.len() < 2 {
+                continue; // Need at least 2 points for linear regression
+            }
+
+            // Simple linear regression: y = slope * x + intercept
+            let n = observations.len() as f64;
+            let sum_x: f64 = observations.iter().map(|(x, _)| *x as f64).sum();
+            let sum_y: f64 = observations.iter().map(|(_, y)| *y).sum();
+            let sum_xy: f64 = observations.iter().map(|(x, y)| *x as f64 * y).sum();
+            let sum_x2: f64 = observations.iter().map(|(x, _)| (*x as f64).powi(2)).sum();
+
+            let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2));
+            let intercept = (sum_y - slope * sum_x) / n;
+
+            self.models
+                .insert(operator_type.clone(), (slope, intercept));
+        }
+    }
+
+    /// Get the number of operator types with learned models.
+    pub fn model_count(&self) -> usize {
+        self.models.len()
+    }
+
+    /// Get the number of observations for an operator type.
+    pub fn observation_count(&self, operator_type: &str) -> usize {
+        self.observations
+            .get(operator_type)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+}
+
+impl Default for CostModelLearner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Plan adaptation suggestions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanAdaptation {
+    /// Switch from hash join to sort-merge join
+    SwitchJoinAlgorithm,
+    /// Increase degree of parallelism
+    IncreaseParallelism,
+    /// Reduce batch size to lower memory usage
+    ReduceBatchSize,
+    /// Enable prefetching for sequential scans
+    EnablePrefetch,
+}
+
+/// Execution statistics for runtime advice.
+#[derive(Debug, Clone)]
+pub struct ExecutionStats {
+    pub peak_memory: usize,                     // bytes
+    pub cpu_utilization: f64,                   // 0.0 to 1.0
+    pub spill_count: usize,                     // number of times data spilled to disk
+    pub operator_timings: HashMap<String, f64>, // operator -> elapsed_ms
+}
+
+/// Runtime advisor that suggests plan adaptations.
+#[derive(Debug)]
+pub struct RuntimeAdvisor {
+    // Configuration thresholds
+    high_memory_threshold: usize,
+    low_cpu_threshold: f64,
+    spill_threshold: usize,
+}
+
+impl RuntimeAdvisor {
+    pub fn new() -> Self {
+        Self {
+            high_memory_threshold: 2 * 1024 * 1024 * 1024, // 2GB
+            low_cpu_threshold: 0.3,                        // 30%
+            spill_threshold: 3,
+        }
+    }
+
+    /// Analyze execution stats and provide adaptation suggestions.
+    pub fn advise(&self, execution_stats: &ExecutionStats) -> Vec<PlanAdaptation> {
+        let mut adaptations = Vec::new();
+
+        // Check for hash join OOM
+        if execution_stats.peak_memory > self.high_memory_threshold {
+            if execution_stats.operator_timings.contains_key("HashJoin") {
+                adaptations.push(PlanAdaptation::SwitchJoinAlgorithm);
+            }
+        }
+
+        // Check for sort spilling
+        if execution_stats.spill_count > self.spill_threshold {
+            adaptations.push(PlanAdaptation::ReduceBatchSize);
+        }
+
+        // Check for CPU underutilization
+        if execution_stats.cpu_utilization < self.low_cpu_threshold {
+            adaptations.push(PlanAdaptation::IncreaseParallelism);
+        }
+
+        // Check for sequential scans
+        if execution_stats.operator_timings.contains_key("TableScan")
+            || execution_stats.operator_timings.contains_key("Scan")
+        {
+            adaptations.push(PlanAdaptation::EnablePrefetch);
+        }
+
+        adaptations
+    }
+
+    /// Set high memory threshold.
+    pub fn with_high_memory_threshold(mut self, threshold: usize) -> Self {
+        self.high_memory_threshold = threshold;
+        self
+    }
+
+    /// Set low CPU utilization threshold.
+    pub fn with_low_cpu_threshold(mut self, threshold: f64) -> Self {
+        self.low_cpu_threshold = threshold;
+        self
+    }
+
+    /// Set spill threshold.
+    pub fn with_spill_threshold(mut self, threshold: usize) -> Self {
+        self.spill_threshold = threshold;
+        self
+    }
+}
+
+impl Default for RuntimeAdvisor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Execution Telemetry (Per-Operator Metrics Collection)
+// ---------------------------------------------------------------------------
+
+/// Detailed per-operator execution metrics for feedback-driven optimization.
+#[derive(Debug, Clone)]
+pub struct OperatorTelemetry {
+    /// Operator name (e.g. "HashJoin", "TableScan").
+    pub operator: String,
+    /// Estimated rows (from cost model).
+    pub estimated_rows: usize,
+    /// Actual rows produced.
+    pub actual_rows: usize,
+    /// Wall-clock execution time in microseconds.
+    pub execution_us: u64,
+    /// Peak memory usage in bytes.
+    pub peak_memory_bytes: usize,
+    /// Whether the operator spilled to disk.
+    pub spilled: bool,
+    /// Batch size used.
+    pub batch_size: usize,
+}
+
+/// Collects execution telemetry across query runs and produces aggregate stats.
+#[derive(Debug)]
+pub struct TelemetryCollector {
+    records: Vec<OperatorTelemetry>,
+    max_records: usize,
+}
+
+impl TelemetryCollector {
+    pub fn new(max_records: usize) -> Self {
+        Self {
+            records: Vec::new(),
+            max_records,
+        }
+    }
+
+    /// Record a new operator execution.
+    pub fn record(&mut self, telemetry: OperatorTelemetry) {
+        if self.records.len() >= self.max_records {
+            self.records.remove(0);
+        }
+        self.records.push(telemetry);
+    }
+
+    /// Compute the average estimation error across all recorded operators.
+    /// Returns the ratio `actual / estimated` (1.0 = perfect).
+    pub fn estimation_accuracy(&self) -> f64 {
+        if self.records.is_empty() {
+            return 1.0;
+        }
+        let mut total_ratio = 0.0;
+        let mut count = 0;
+        for r in &self.records {
+            if r.estimated_rows > 0 {
+                total_ratio += r.actual_rows as f64 / r.estimated_rows as f64;
+                count += 1;
+            }
+        }
+        if count == 0 { 1.0 } else { total_ratio / count as f64 }
+    }
+
+    /// Return the fraction of operators that spilled.
+    pub fn spill_rate(&self) -> f64 {
+        if self.records.is_empty() {
+            return 0.0;
+        }
+        let spilled = self.records.iter().filter(|r| r.spilled).count();
+        spilled as f64 / self.records.len() as f64
+    }
+
+    /// Average execution time per operator type.
+    pub fn avg_time_by_operator(&self) -> HashMap<String, f64> {
+        let mut sums: HashMap<String, (f64, usize)> = HashMap::new();
+        for r in &self.records {
+            let entry = sums.entry(r.operator.clone()).or_insert((0.0, 0));
+            entry.0 += r.execution_us as f64;
+            entry.1 += 1;
+        }
+        sums.into_iter()
+            .map(|(k, (sum, count))| (k, sum / count as f64))
+            .collect()
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+}
+
+impl Default for TelemetryCollector {
+    fn default() -> Self {
+        Self::new(10_000)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Batch Size Tuner
+// ---------------------------------------------------------------------------
+
+/// Dynamically adjusts query batch size based on memory pressure and spill rate.
+#[derive(Debug)]
+pub struct BatchSizeTuner {
+    current_batch_size: usize,
+    min_batch_size: usize,
+    max_batch_size: usize,
+    /// Target spill rate below which we can increase batch size.
+    target_spill_rate: f64,
+    /// Memory pressure threshold (0.0-1.0) above which we shrink.
+    memory_pressure_threshold: f64,
+    adjustments: u64,
+}
+
+impl BatchSizeTuner {
+    pub fn new(initial_batch_size: usize) -> Self {
+        Self {
+            current_batch_size: initial_batch_size,
+            min_batch_size: 256,
+            max_batch_size: 65_536,
+            target_spill_rate: 0.05,
+            memory_pressure_threshold: 0.8,
+            adjustments: 0,
+        }
+    }
+
+    /// Tune batch size based on observed spill rate and memory pressure.
+    /// Returns the recommended batch size.
+    pub fn tune(&mut self, spill_rate: f64, memory_pressure: f64) -> usize {
+        self.adjustments += 1;
+
+        if memory_pressure > self.memory_pressure_threshold || spill_rate > self.target_spill_rate {
+            // Shrink batch size by 25%
+            self.current_batch_size = (self.current_batch_size * 3 / 4).max(self.min_batch_size);
+        } else if memory_pressure < self.memory_pressure_threshold * 0.5
+            && spill_rate < self.target_spill_rate * 0.5
+        {
+            // Grow batch size by 25%
+            self.current_batch_size = (self.current_batch_size * 5 / 4).min(self.max_batch_size);
+        }
+
+        self.current_batch_size
+    }
+
+    pub fn current_batch_size(&self) -> usize {
+        self.current_batch_size
+    }
+
+    pub fn adjustments(&self) -> u64 {
+        self.adjustments
+    }
+
+    pub fn with_bounds(mut self, min: usize, max: usize) -> Self {
+        self.min_batch_size = min;
+        self.max_batch_size = max;
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Armed Bandit Join Selector
+// ---------------------------------------------------------------------------
+
+/// Uses Upper Confidence Bound (UCB1) to select the best join algorithm
+/// for a given query shape based on observed performance.
+#[derive(Debug)]
+pub struct BanditJoinSelector {
+    /// For each join strategy: (total_reward, times_selected)
+    arms: HashMap<String, (f64, u64)>,
+    total_selections: u64,
+    exploration_factor: f64,
+}
+
+impl BanditJoinSelector {
+    pub fn new() -> Self {
+        let mut arms = HashMap::new();
+        for strategy in &["HashJoin", "SortMergeJoin", "NestedLoopJoin"] {
+            arms.insert(strategy.to_string(), (0.0, 0));
+        }
+        Self {
+            arms,
+            total_selections: 0,
+            exploration_factor: 1.41, // sqrt(2)
+        }
+    }
+
+    /// Select the best join algorithm using UCB1.
+    pub fn select(&self) -> String {
+        // If any arm hasn't been tried, pick it
+        for (name, (_, count)) in &self.arms {
+            if *count == 0 {
+                return name.clone();
+            }
+        }
+
+        let total = self.total_selections as f64;
+        self.arms
+            .iter()
+            .map(|(name, (reward, count))| {
+                let avg_reward = reward / *count as f64;
+                let exploration = self.exploration_factor * (total.ln() / *count as f64).sqrt();
+                (name.clone(), avg_reward + exploration)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(name, _)| name)
+            .unwrap_or_else(|| "HashJoin".to_string())
+    }
+
+    /// Record the outcome of using a join strategy.
+    /// `reward` should be inversely proportional to execution time
+    /// (e.g. `1.0 / execution_time_ms`).
+    pub fn record_outcome(&mut self, strategy: &str, reward: f64) {
+        if let Some(arm) = self.arms.get_mut(strategy) {
+            arm.0 += reward;
+            arm.1 += 1;
+        }
+        self.total_selections += 1;
+    }
+
+    /// Return the best-performing strategy based on average reward.
+    pub fn best_strategy(&self) -> Option<String> {
+        self.arms
+            .iter()
+            .filter(|(_, (_, count))| *count > 0)
+            .max_by(|a, b| {
+                let avg_a = a.1 .0 / a.1 .1 as f64;
+                let avg_b = b.1 .0 / b.1 .1 as f64;
+                avg_a.partial_cmp(&avg_b).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(name, _)| name.clone())
+    }
+
+    pub fn total_selections(&self) -> u64 {
+        self.total_selections
+    }
+}
+
+impl Default for BanditJoinSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Model Serialization for Persistence
+// ---------------------------------------------------------------------------
+
+/// Serializable snapshot of a learned cost model for persistence across restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelSnapshot {
+    /// Version for forward compatibility.
+    pub version: u32,
+    /// Learned cost model parameters: operator_type -> (slope, intercept).
+    pub cost_models: HashMap<String, (f64, f64)>,
+    /// Join strategy rewards: strategy -> (total_reward, count).
+    pub join_rewards: HashMap<String, (f64, u64)>,
+    /// Recommended batch size.
+    pub batch_size: usize,
+    /// Number of queries observed when this snapshot was taken.
+    pub queries_observed: u64,
+    /// Timestamp (epoch seconds).
+    pub created_at: u64,
+}
+
+impl ModelSnapshot {
+    /// Create a snapshot from current optimizer state.
+    pub fn capture(
+        cost_models: &HashMap<String, (f64, f64)>,
+        join_selector: &BanditJoinSelector,
+        batch_size: usize,
+        queries_observed: u64,
+    ) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            version: 1,
+            cost_models: cost_models.clone(),
+            join_rewards: join_selector.arms.clone(),
+            batch_size,
+            queries_observed,
+            created_at: now,
+        }
+    }
+
+    /// Serialize to JSON bytes.
+    pub fn to_json(&self) -> Result<Vec<u8>> {
+        serde_json::to_vec_pretty(self)
+            .map_err(|e| BlazeError::execution(format!("Failed to serialize model: {e}")))
+    }
+
+    /// Deserialize from JSON bytes.
+    pub fn from_json(data: &[u8]) -> Result<Self> {
+        serde_json::from_slice(data)
+            .map_err(|e| BlazeError::execution(format!("Failed to deserialize model: {e}")))
+    }
+
+    /// Save snapshot to a file.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
+        let json = self.to_json()?;
+        std::fs::write(path, json)
+            .map_err(|e| BlazeError::execution(format!("Failed to save model: {e}")))?;
+        Ok(())
+    }
+
+    /// Load snapshot from a file.
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
+        let data = std::fs::read(path)
+            .map_err(|e| BlazeError::execution(format!("Failed to load model: {e}")))?;
+        Self::from_json(&data)
+    }
+}
+
+#[cfg(test)]
+mod learned_optimizer_new_tests {
+    use super::*;
+
+    #[test]
+    fn test_telemetry_collector() {
+        let mut tc = TelemetryCollector::new(100);
+        tc.record(OperatorTelemetry {
+            operator: "HashJoin".into(),
+            estimated_rows: 100,
+            actual_rows: 120,
+            execution_us: 5000,
+            peak_memory_bytes: 1024,
+            spilled: false,
+            batch_size: 8192,
+        });
+        tc.record(OperatorTelemetry {
+            operator: "TableScan".into(),
+            estimated_rows: 1000,
+            actual_rows: 1000,
+            execution_us: 2000,
+            peak_memory_bytes: 512,
+            spilled: false,
+            batch_size: 8192,
+        });
+
+        assert_eq!(tc.record_count(), 2);
+        assert!(tc.estimation_accuracy() > 0.0);
+        assert_eq!(tc.spill_rate(), 0.0);
+
+        let avg = tc.avg_time_by_operator();
+        assert_eq!(avg.len(), 2);
+        assert_eq!(avg["HashJoin"], 5000.0);
+    }
+
+    #[test]
+    fn test_telemetry_spill_rate() {
+        let mut tc = TelemetryCollector::new(100);
+        for i in 0..10 {
+            tc.record(OperatorTelemetry {
+                operator: "Agg".into(),
+                estimated_rows: 100,
+                actual_rows: 100,
+                execution_us: 1000,
+                peak_memory_bytes: 1024,
+                spilled: i < 3, // 3 out of 10 spill
+                batch_size: 8192,
+            });
+        }
+        assert!((tc.spill_rate() - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_batch_size_tuner_shrink() {
+        let mut tuner = BatchSizeTuner::new(8192);
+        // High memory pressure → shrink
+        let new_size = tuner.tune(0.1, 0.9);
+        assert!(new_size < 8192);
+        assert_eq!(tuner.adjustments(), 1);
+    }
+
+    #[test]
+    fn test_batch_size_tuner_grow() {
+        let mut tuner = BatchSizeTuner::new(4096);
+        // Low pressure → grow
+        let new_size = tuner.tune(0.01, 0.2);
+        assert!(new_size > 4096);
+    }
+
+    #[test]
+    fn test_batch_size_tuner_bounds() {
+        let mut tuner = BatchSizeTuner::new(300).with_bounds(256, 1024);
+        // Shrink below min
+        for _ in 0..20 {
+            tuner.tune(0.5, 0.95);
+        }
+        assert!(tuner.current_batch_size() >= 256);
+    }
+
+    #[test]
+    fn test_bandit_join_selector() {
+        let mut selector = BanditJoinSelector::new();
+
+        // First 3 selections should explore all arms
+        let s1 = selector.select();
+        selector.record_outcome(&s1, 1.0);
+        let s2 = selector.select();
+        selector.record_outcome(&s2, 0.5);
+        let s3 = selector.select();
+        selector.record_outcome(&s3, 0.1);
+
+        assert_eq!(selector.total_selections(), 3);
+
+        // After more observations, HashJoin should win if it got highest reward
+        for _ in 0..10 {
+            selector.record_outcome("HashJoin", 1.0);
+            selector.record_outcome("SortMergeJoin", 0.3);
+            selector.record_outcome("NestedLoopJoin", 0.1);
+        }
+        assert_eq!(selector.best_strategy(), Some("HashJoin".to_string()));
+    }
+
+    #[test]
+    fn test_model_snapshot_roundtrip() {
+        let mut cost_models = HashMap::new();
+        cost_models.insert("HashJoin".to_string(), (0.5, 10.0));
+        cost_models.insert("TableScan".to_string(), (0.1, 1.0));
+
+        let selector = BanditJoinSelector::new();
+        let snapshot = ModelSnapshot::capture(&cost_models, &selector, 8192, 500);
+
+        let json = snapshot.to_json().unwrap();
+        let restored = ModelSnapshot::from_json(&json).unwrap();
+        assert_eq!(restored.version, 1);
+        assert_eq!(restored.batch_size, 8192);
+        assert_eq!(restored.queries_observed, 500);
+        assert_eq!(restored.cost_models.len(), 2);
+    }
+
+    #[test]
+    fn test_model_snapshot_file_io() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("model.json");
+
+        let cost_models = HashMap::new();
+        let selector = BanditJoinSelector::new();
+        let snapshot = ModelSnapshot::capture(&cost_models, &selector, 4096, 100);
+
+        snapshot.save_to(&path).unwrap();
+        let loaded = ModelSnapshot::load_from(&path).unwrap();
+        assert_eq!(loaded.batch_size, 4096);
     }
 }
