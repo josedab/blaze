@@ -654,166 +654,202 @@ impl SignatureHelpProvider {
     pub fn new() -> Self {
         let mut signatures = HashMap::new();
 
-        signatures.insert("COUNT".to_string(), FunctionSignature {
-            name: "COUNT".to_string(),
-            description: "Returns the number of rows matching the query.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "expression".to_string(),
-                type_name: "Any".to_string(),
-                description: "Column or expression to count. Use * for all rows.".to_string(),
-                optional: false,
-            }],
-            return_type: "Int64".to_string(),
-        });
-        signatures.insert("SUM".to_string(), FunctionSignature {
-            name: "SUM".to_string(),
-            description: "Returns the sum of a numeric column.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "expression".to_string(),
-                type_name: "Numeric".to_string(),
-                description: "Numeric column or expression to sum.".to_string(),
-                optional: false,
-            }],
-            return_type: "Numeric".to_string(),
-        });
-        signatures.insert("AVG".to_string(), FunctionSignature {
-            name: "AVG".to_string(),
-            description: "Returns the average of a numeric column.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "expression".to_string(),
-                type_name: "Numeric".to_string(),
-                description: "Numeric column or expression to average.".to_string(),
-                optional: false,
-            }],
-            return_type: "Float64".to_string(),
-        });
-        signatures.insert("MIN".to_string(), FunctionSignature {
-            name: "MIN".to_string(),
-            description: "Returns the minimum value in a column.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "expression".to_string(),
-                type_name: "Any".to_string(),
-                description: "Column or expression to find the minimum of.".to_string(),
-                optional: false,
-            }],
-            return_type: "Same as input".to_string(),
-        });
-        signatures.insert("MAX".to_string(), FunctionSignature {
-            name: "MAX".to_string(),
-            description: "Returns the maximum value in a column.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "expression".to_string(),
-                type_name: "Any".to_string(),
-                description: "Column or expression to find the maximum of.".to_string(),
-                optional: false,
-            }],
-            return_type: "Same as input".to_string(),
-        });
-        signatures.insert("UPPER".to_string(), FunctionSignature {
-            name: "UPPER".to_string(),
-            description: "Converts a string to uppercase.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "string".to_string(),
-                type_name: "Utf8".to_string(),
-                description: "String expression to convert.".to_string(),
-                optional: false,
-            }],
-            return_type: "Utf8".to_string(),
-        });
-        signatures.insert("LOWER".to_string(), FunctionSignature {
-            name: "LOWER".to_string(),
-            description: "Converts a string to lowercase.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "string".to_string(),
-                type_name: "Utf8".to_string(),
-                description: "String expression to convert.".to_string(),
-                optional: false,
-            }],
-            return_type: "Utf8".to_string(),
-        });
-        signatures.insert("LENGTH".to_string(), FunctionSignature {
-            name: "LENGTH".to_string(),
-            description: "Returns the length of a string.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "string".to_string(),
-                type_name: "Utf8".to_string(),
-                description: "String expression to measure.".to_string(),
-                optional: false,
-            }],
-            return_type: "Int64".to_string(),
-        });
-        signatures.insert("COALESCE".to_string(), FunctionSignature {
-            name: "COALESCE".to_string(),
-            description: "Returns the first non-null argument.".to_string(),
-            parameters: vec![
-                FunctionParameterInfo {
-                    name: "expr1".to_string(),
+        signatures.insert(
+            "COUNT".to_string(),
+            FunctionSignature {
+                name: "COUNT".to_string(),
+                description: "Returns the number of rows matching the query.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "expression".to_string(),
                     type_name: "Any".to_string(),
-                    description: "First expression to evaluate.".to_string(),
+                    description: "Column or expression to count. Use * for all rows.".to_string(),
                     optional: false,
-                },
-                FunctionParameterInfo {
-                    name: "expr2".to_string(),
+                }],
+                return_type: "Int64".to_string(),
+            },
+        );
+        signatures.insert(
+            "SUM".to_string(),
+            FunctionSignature {
+                name: "SUM".to_string(),
+                description: "Returns the sum of a numeric column.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "expression".to_string(),
+                    type_name: "Numeric".to_string(),
+                    description: "Numeric column or expression to sum.".to_string(),
+                    optional: false,
+                }],
+                return_type: "Numeric".to_string(),
+            },
+        );
+        signatures.insert(
+            "AVG".to_string(),
+            FunctionSignature {
+                name: "AVG".to_string(),
+                description: "Returns the average of a numeric column.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "expression".to_string(),
+                    type_name: "Numeric".to_string(),
+                    description: "Numeric column or expression to average.".to_string(),
+                    optional: false,
+                }],
+                return_type: "Float64".to_string(),
+            },
+        );
+        signatures.insert(
+            "MIN".to_string(),
+            FunctionSignature {
+                name: "MIN".to_string(),
+                description: "Returns the minimum value in a column.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "expression".to_string(),
                     type_name: "Any".to_string(),
-                    description: "Second expression (fallback).".to_string(),
+                    description: "Column or expression to find the minimum of.".to_string(),
                     optional: false,
-                },
-                FunctionParameterInfo {
-                    name: "exprN".to_string(),
+                }],
+                return_type: "Same as input".to_string(),
+            },
+        );
+        signatures.insert(
+            "MAX".to_string(),
+            FunctionSignature {
+                name: "MAX".to_string(),
+                description: "Returns the maximum value in a column.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "expression".to_string(),
                     type_name: "Any".to_string(),
-                    description: "Additional fallback expressions.".to_string(),
-                    optional: true,
-                },
-            ],
-            return_type: "Any".to_string(),
-        });
-        signatures.insert("ABS".to_string(), FunctionSignature {
-            name: "ABS".to_string(),
-            description: "Returns the absolute value of a number.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "value".to_string(),
-                type_name: "Numeric".to_string(),
-                description: "Numeric expression to take the absolute value of.".to_string(),
-                optional: false,
-            }],
-            return_type: "Numeric".to_string(),
-        });
-        signatures.insert("CONCAT".to_string(), FunctionSignature {
-            name: "CONCAT".to_string(),
-            description: "Concatenates two or more strings.".to_string(),
-            parameters: vec![
-                FunctionParameterInfo {
-                    name: "string1".to_string(),
-                    type_name: "Utf8".to_string(),
-                    description: "First string.".to_string(),
+                    description: "Column or expression to find the maximum of.".to_string(),
                     optional: false,
-                },
-                FunctionParameterInfo {
-                    name: "string2".to_string(),
+                }],
+                return_type: "Same as input".to_string(),
+            },
+        );
+        signatures.insert(
+            "UPPER".to_string(),
+            FunctionSignature {
+                name: "UPPER".to_string(),
+                description: "Converts a string to uppercase.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "string".to_string(),
                     type_name: "Utf8".to_string(),
-                    description: "Second string.".to_string(),
+                    description: "String expression to convert.".to_string(),
                     optional: false,
-                },
-                FunctionParameterInfo {
-                    name: "stringN".to_string(),
+                }],
+                return_type: "Utf8".to_string(),
+            },
+        );
+        signatures.insert(
+            "LOWER".to_string(),
+            FunctionSignature {
+                name: "LOWER".to_string(),
+                description: "Converts a string to lowercase.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "string".to_string(),
                     type_name: "Utf8".to_string(),
-                    description: "Additional strings to concatenate.".to_string(),
-                    optional: true,
-                },
-            ],
-            return_type: "Utf8".to_string(),
-        });
-        signatures.insert("TRIM".to_string(), FunctionSignature {
-            name: "TRIM".to_string(),
-            description: "Removes leading and trailing whitespace from a string.".to_string(),
-            parameters: vec![FunctionParameterInfo {
-                name: "string".to_string(),
-                type_name: "Utf8".to_string(),
-                description: "String expression to trim.".to_string(),
-                optional: false,
-            }],
-            return_type: "Utf8".to_string(),
-        });
+                    description: "String expression to convert.".to_string(),
+                    optional: false,
+                }],
+                return_type: "Utf8".to_string(),
+            },
+        );
+        signatures.insert(
+            "LENGTH".to_string(),
+            FunctionSignature {
+                name: "LENGTH".to_string(),
+                description: "Returns the length of a string.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "string".to_string(),
+                    type_name: "Utf8".to_string(),
+                    description: "String expression to measure.".to_string(),
+                    optional: false,
+                }],
+                return_type: "Int64".to_string(),
+            },
+        );
+        signatures.insert(
+            "COALESCE".to_string(),
+            FunctionSignature {
+                name: "COALESCE".to_string(),
+                description: "Returns the first non-null argument.".to_string(),
+                parameters: vec![
+                    FunctionParameterInfo {
+                        name: "expr1".to_string(),
+                        type_name: "Any".to_string(),
+                        description: "First expression to evaluate.".to_string(),
+                        optional: false,
+                    },
+                    FunctionParameterInfo {
+                        name: "expr2".to_string(),
+                        type_name: "Any".to_string(),
+                        description: "Second expression (fallback).".to_string(),
+                        optional: false,
+                    },
+                    FunctionParameterInfo {
+                        name: "exprN".to_string(),
+                        type_name: "Any".to_string(),
+                        description: "Additional fallback expressions.".to_string(),
+                        optional: true,
+                    },
+                ],
+                return_type: "Any".to_string(),
+            },
+        );
+        signatures.insert(
+            "ABS".to_string(),
+            FunctionSignature {
+                name: "ABS".to_string(),
+                description: "Returns the absolute value of a number.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "value".to_string(),
+                    type_name: "Numeric".to_string(),
+                    description: "Numeric expression to take the absolute value of.".to_string(),
+                    optional: false,
+                }],
+                return_type: "Numeric".to_string(),
+            },
+        );
+        signatures.insert(
+            "CONCAT".to_string(),
+            FunctionSignature {
+                name: "CONCAT".to_string(),
+                description: "Concatenates two or more strings.".to_string(),
+                parameters: vec![
+                    FunctionParameterInfo {
+                        name: "string1".to_string(),
+                        type_name: "Utf8".to_string(),
+                        description: "First string.".to_string(),
+                        optional: false,
+                    },
+                    FunctionParameterInfo {
+                        name: "string2".to_string(),
+                        type_name: "Utf8".to_string(),
+                        description: "Second string.".to_string(),
+                        optional: false,
+                    },
+                    FunctionParameterInfo {
+                        name: "stringN".to_string(),
+                        type_name: "Utf8".to_string(),
+                        description: "Additional strings to concatenate.".to_string(),
+                        optional: true,
+                    },
+                ],
+                return_type: "Utf8".to_string(),
+            },
+        );
+        signatures.insert(
+            "TRIM".to_string(),
+            FunctionSignature {
+                name: "TRIM".to_string(),
+                description: "Removes leading and trailing whitespace from a string.".to_string(),
+                parameters: vec![FunctionParameterInfo {
+                    name: "string".to_string(),
+                    type_name: "Utf8".to_string(),
+                    description: "String expression to trim.".to_string(),
+                    optional: false,
+                }],
+                return_type: "Utf8".to_string(),
+            },
+        );
 
         Self { signatures }
     }
@@ -877,7 +913,9 @@ impl CodeActionProvider {
             actions.push(NextGenCodeAction {
                 title: "Convert implicit cross join to explicit JOIN".to_string(),
                 kind: NextGenCodeActionKind::OptimizationHint,
-                edit: Some("Use explicit JOIN ... ON syntax instead of comma-separated tables".to_string()),
+                edit: Some(
+                    "Use explicit JOIN ... ON syntax instead of comma-separated tables".to_string(),
+                ),
             });
         }
 
@@ -913,7 +951,8 @@ impl CodeActionProvider {
     /// Finds the end of a FROM clause by looking for the next SQL keyword boundary.
     fn find_clause_end(s: &str) -> usize {
         let keywords = [" WHERE ", " GROUP ", " ORDER ", " LIMIT ", " HAVING "];
-        keywords.iter()
+        keywords
+            .iter()
             .filter_map(|kw| s.find(kw))
             .min()
             .unwrap_or(s.len())
@@ -965,7 +1004,9 @@ impl PerformanceAnalyzer {
             hints.push(PerformanceHint {
                 message: "Potential Cartesian product detected.".to_string(),
                 severity: HintSeverity::Critical,
-                suggestion: "Use explicit JOIN with ON conditions instead of comma-separated tables.".to_string(),
+                suggestion:
+                    "Use explicit JOIN with ON conditions instead of comma-separated tables."
+                        .to_string(),
             });
         }
 
@@ -989,7 +1030,9 @@ impl PerformanceAnalyzer {
             hints.push(PerformanceHint {
                 message: "LIKE with leading wildcard prevents index usage.".to_string(),
                 severity: HintSeverity::Warning,
-                suggestion: "Consider full-text search or restructure the query to avoid leading wildcards.".to_string(),
+                suggestion:
+                    "Consider full-text search or restructure the query to avoid leading wildcards."
+                        .to_string(),
             });
         }
 
@@ -1020,7 +1063,8 @@ impl PerformanceAnalyzer {
     /// Finds the end of a FROM clause by looking for the next SQL keyword boundary.
     fn find_clause_end(s: &str) -> usize {
         let keywords = [" WHERE ", " GROUP ", " ORDER ", " LIMIT ", " HAVING "];
-        keywords.iter()
+        keywords
+            .iter()
             .filter_map(|kw| s.find(kw))
             .min()
             .unwrap_or(s.len())
@@ -1077,9 +1121,8 @@ impl QueryExplainProvider {
 
     /// Produces a simplified explain output for the given SQL.
     pub fn explain(&self, sql: &str) -> crate::error::Result<ExplainOutput> {
-        let _stmt = Parser::parse(sql).map_err(|e| {
-            crate::error::BlazeError::analysis(format!("Parse error: {e}"))
-        })?;
+        let _stmt = Parser::parse(sql)
+            .map_err(|e| crate::error::BlazeError::analysis(format!("Parse error: {e}")))?;
 
         let upper = sql.to_uppercase();
 
@@ -1116,10 +1159,17 @@ impl QueryExplainProvider {
             plan_lines.push(format!("  Sort (est. cost: {:.1})", estimated_cost * 0.2));
         }
         if has_group_by {
-            plan_lines.push(format!("  HashAggregate (est. cost: {:.1})", estimated_cost * 0.3));
+            plan_lines.push(format!(
+                "  HashAggregate (est. cost: {:.1})",
+                estimated_cost * 0.3
+            ));
         }
         for i in 0..join_count {
-            plan_lines.push(format!("  HashJoin #{} (est. cost: {:.1})", i + 1, estimated_cost * 0.2));
+            plan_lines.push(format!(
+                "  HashJoin #{} (est. cost: {:.1})",
+                i + 1,
+                estimated_cost * 0.2
+            ));
         }
         if where_conditions > 0 {
             plan_lines.push(format!("  Filter ({} conditions)", where_conditions));
@@ -1149,7 +1199,8 @@ impl QueryExplainProvider {
         if let Some(where_pos) = upper_sql.find(" WHERE ") {
             let after_where = &upper_sql[where_pos + 7..];
             let keywords = [" GROUP ", " ORDER ", " LIMIT ", " HAVING "];
-            let end = keywords.iter()
+            let end = keywords
+                .iter()
                 .filter_map(|kw| after_where.find(kw))
                 .min()
                 .unwrap_or(after_where.len());
@@ -1189,13 +1240,57 @@ impl SqlFormatter {
     /// Format a SQL query string.
     pub fn format(&self, sql: &str) -> String {
         let keywords = [
-            "SELECT", "FROM", "WHERE", "AND", "OR", "JOIN", "INNER", "LEFT",
-            "RIGHT", "FULL", "OUTER", "ON", "GROUP", "BY", "ORDER", "HAVING",
-            "LIMIT", "OFFSET", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
-            "DELETE", "CREATE", "TABLE", "DROP", "ALTER", "AS", "CASE", "WHEN",
-            "THEN", "ELSE", "END", "UNION", "ALL", "DISTINCT", "EXISTS", "IN",
-            "NOT", "BETWEEN", "LIKE", "IS", "NULL", "WITH", "RECURSIVE", "ASC",
-            "DESC", "CROSS", "NATURAL", "USING",
+            "SELECT",
+            "FROM",
+            "WHERE",
+            "AND",
+            "OR",
+            "JOIN",
+            "INNER",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "OUTER",
+            "ON",
+            "GROUP",
+            "BY",
+            "ORDER",
+            "HAVING",
+            "LIMIT",
+            "OFFSET",
+            "INSERT",
+            "INTO",
+            "VALUES",
+            "UPDATE",
+            "SET",
+            "DELETE",
+            "CREATE",
+            "TABLE",
+            "DROP",
+            "ALTER",
+            "AS",
+            "CASE",
+            "WHEN",
+            "THEN",
+            "ELSE",
+            "END",
+            "UNION",
+            "ALL",
+            "DISTINCT",
+            "EXISTS",
+            "IN",
+            "NOT",
+            "BETWEEN",
+            "LIKE",
+            "IS",
+            "NULL",
+            "WITH",
+            "RECURSIVE",
+            "ASC",
+            "DESC",
+            "CROSS",
+            "NATURAL",
+            "USING",
         ];
 
         let mut result = String::new();
@@ -1210,8 +1305,18 @@ impl SqlFormatter {
             // Determine if this is a keyword that should start a new line
             let new_line_before = matches!(
                 upper.as_str(),
-                "SELECT" | "FROM" | "WHERE" | "GROUP" | "ORDER" | "HAVING"
-                | "LIMIT" | "UNION" | "INSERT" | "UPDATE" | "DELETE" | "WITH"
+                "SELECT"
+                    | "FROM"
+                    | "WHERE"
+                    | "GROUP"
+                    | "ORDER"
+                    | "HAVING"
+                    | "LIMIT"
+                    | "UNION"
+                    | "INSERT"
+                    | "UPDATE"
+                    | "DELETE"
+                    | "WITH"
             ) && i > 0;
 
             let indent_before = matches!(upper.as_str(), "AND" | "OR") && i > 0;
@@ -1360,8 +1465,8 @@ impl DefinitionFinder {
 
         // Check built-in functions
         let functions = [
-            "count", "sum", "avg", "min", "max", "upper", "lower", "length",
-            "trim", "concat", "coalesce", "abs", "round", "now", "cast",
+            "count", "sum", "avg", "min", "max", "upper", "lower", "length", "trim", "concat",
+            "coalesce", "abs", "round", "now", "cast",
         ];
         if functions.contains(&lower_symbol.as_str()) {
             return Some(DefinitionLocation {
@@ -1438,6 +1543,441 @@ impl ReferenceFinder {
             }
         }
         (line, col)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace analysis
+// ---------------------------------------------------------------------------
+
+/// Tracks SQL files in a workspace with their schema references.
+pub struct WorkspaceAnalyzer {
+    files: HashMap<String, WorkspaceFile>,
+}
+
+/// Metadata about a tracked SQL file.
+pub struct WorkspaceFile {
+    pub path: String,
+    pub tables_referenced: Vec<String>,
+    pub tables_created: Vec<String>,
+    pub last_analyzed: u64,
+}
+
+impl WorkspaceAnalyzer {
+    pub fn new() -> Self {
+        Self {
+            files: HashMap::new(),
+        }
+    }
+
+    /// Parse SQL content and track table references for the given file path.
+    pub fn add_file(&mut self, path: &str, content: &str) {
+        let upper = content.to_uppercase();
+        let mut tables_referenced = Vec::new();
+        let mut tables_created = Vec::new();
+
+        // Extract table names after FROM / JOIN keywords
+        let tokens: Vec<&str> = content.split_whitespace().collect();
+        for i in 0..tokens.len().saturating_sub(1) {
+            let kw = tokens[i].to_uppercase();
+            if kw == "FROM" || kw == "JOIN" {
+                let name = tokens[i + 1].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if !name.is_empty() {
+                    tables_referenced.push(name.to_string());
+                }
+            }
+        }
+
+        // Extract table names after CREATE TABLE
+        for i in 0..tokens.len().saturating_sub(2) {
+            if tokens[i].to_uppercase() == "CREATE" && tokens[i + 1].to_uppercase() == "TABLE" {
+                let name = tokens[i + 2].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if !name.is_empty() {
+                    tables_created.push(name.to_string());
+                }
+            }
+        }
+
+        let _ = upper; // suppress warning
+        self.files.insert(
+            path.to_string(),
+            WorkspaceFile {
+                path: path.to_string(),
+                tables_referenced,
+                tables_created,
+                last_analyzed: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            },
+        );
+    }
+
+    /// Remove a tracked file.
+    pub fn remove_file(&mut self, path: &str) {
+        self.files.remove(path);
+    }
+
+    /// Return paths of files that reference the given table name.
+    pub fn find_references(&self, table_name: &str) -> Vec<String> {
+        self.files
+            .values()
+            .filter(|f| f.tables_referenced.iter().any(|t| t == table_name))
+            .map(|f| f.path.clone())
+            .collect()
+    }
+
+    /// Return paths of files not analyzed within `max_age_secs` of now.
+    pub fn stale_files(&self, max_age_secs: u64) -> Vec<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.files
+            .values()
+            .filter(|f| now.saturating_sub(f.last_analyzed) > max_age_secs)
+            .map(|f| f.path.clone())
+            .collect()
+    }
+}
+
+impl Default for WorkspaceAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema change tracking
+// ---------------------------------------------------------------------------
+
+/// A versioned record of schema changes.
+pub struct SchemaVersion {
+    pub version: u64,
+    pub tables_added: Vec<String>,
+    pub tables_removed: Vec<String>,
+    pub columns_changed: Vec<(String, String)>,
+    pub timestamp: u64,
+}
+
+/// Tracks successive schema changes with version numbers.
+pub struct SchemaChangeTracker {
+    versions: Vec<SchemaVersion>,
+}
+
+impl SchemaChangeTracker {
+    pub fn new() -> Self {
+        Self {
+            versions: Vec::new(),
+        }
+    }
+
+    /// Record a new schema change, auto-assigning the next version number.
+    pub fn record_change(
+        &mut self,
+        tables_added: Vec<String>,
+        tables_removed: Vec<String>,
+        columns_changed: Vec<(String, String)>,
+    ) {
+        let version = self.versions.len() as u64 + 1;
+        self.versions.push(SchemaVersion {
+            version,
+            tables_added,
+            tables_removed,
+            columns_changed,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
+    }
+
+    /// Return all changes recorded since (exclusive) the given version.
+    pub fn changes_since(&self, version: u64) -> &[SchemaVersion] {
+        let idx = version as usize;
+        if idx >= self.versions.len() {
+            &[]
+        } else {
+            &self.versions[idx..]
+        }
+    }
+
+    /// The latest version number (0 if no changes recorded).
+    pub fn current_version(&self) -> u64 {
+        self.versions.last().map_or(0, |v| v.version)
+    }
+
+    /// Returns true if any version since `version` contains table removals.
+    pub fn has_breaking_changes_since(&self, version: u64) -> bool {
+        self.changes_since(version)
+            .iter()
+            .any(|v| !v.tables_removed.is_empty())
+    }
+}
+
+impl Default for SchemaChangeTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quick-fix suggestions
+// ---------------------------------------------------------------------------
+
+/// A suggested code fix for a diagnostic.
+pub struct QuickFixSuggestion {
+    pub message: String,
+    pub replacement: String,
+    pub range: Range,
+}
+
+/// Provides quick-fix suggestions for SQL diagnostics.
+pub struct QuickFixProvider;
+
+impl QuickFixProvider {
+    /// Suggest fixes for the given SQL based on diagnostic messages.
+    pub fn suggest_fixes(sql: &str, diagnostics: &[Diagnostic]) -> Vec<QuickFixSuggestion> {
+        let mut fixes = Vec::new();
+
+        for diag in diagnostics {
+            let msg_lower = diag.message.to_lowercase();
+
+            // Missing FROM keyword
+            if msg_lower.contains("missing") && msg_lower.contains("from") {
+                fixes.push(QuickFixSuggestion {
+                    message: "Add missing FROM clause".to_string(),
+                    replacement: " FROM ".to_string(),
+                    range: diag.range,
+                });
+            }
+
+            // Unclosed quote
+            if msg_lower.contains("unclosed") && msg_lower.contains("quote") {
+                fixes.push(QuickFixSuggestion {
+                    message: "Close the string literal".to_string(),
+                    replacement: "'".to_string(),
+                    range: Range {
+                        start: diag.range.end,
+                        end: diag.range.end,
+                    },
+                });
+            }
+
+            // Unknown column – suggest similar names
+            if msg_lower.contains("unknown column") || msg_lower.contains("column not found") {
+                // Try to extract the column name from the message
+                let col_name = diag
+                    .message
+                    .split('\'')
+                    .nth(1)
+                    .or_else(|| diag.message.split('"').nth(1))
+                    .unwrap_or("");
+                if !col_name.is_empty() {
+                    let known = Self::extract_identifiers(sql);
+                    if let Some(closest) = Self::closest_match(col_name, &known) {
+                        fixes.push(QuickFixSuggestion {
+                            message: format!("Did you mean '{}'?", closest),
+                            replacement: closest,
+                            range: diag.range,
+                        });
+                    }
+                }
+            }
+
+            // Missing GROUP BY
+            if msg_lower.contains("group by") || msg_lower.contains("must appear in the group by") {
+                let col_name = diag
+                    .message
+                    .split('\'')
+                    .nth(1)
+                    .or_else(|| diag.message.split('"').nth(1))
+                    .unwrap_or("column");
+                fixes.push(QuickFixSuggestion {
+                    message: format!("Add '{}' to GROUP BY clause", col_name),
+                    replacement: format!(" GROUP BY {}", col_name),
+                    range: Range {
+                        start: diag.range.end,
+                        end: diag.range.end,
+                    },
+                });
+            }
+        }
+
+        fixes
+    }
+
+    fn extract_identifiers(sql: &str) -> Vec<String> {
+        sql.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|s| !s.is_empty())
+            .filter(|s| {
+                !matches!(
+                    s.to_uppercase().as_str(),
+                    "SELECT" | "FROM" | "WHERE" | "AND" | "OR" | "GROUP" | "BY"
+                    | "ORDER" | "INSERT" | "UPDATE" | "DELETE" | "INTO" | "VALUES"
+                    | "SET" | "JOIN" | "ON" | "AS" | "IN" | "NOT" | "NULL"
+                    | "IS" | "LIKE" | "BETWEEN" | "HAVING" | "LIMIT" | "OFFSET"
+                )
+            })
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    fn closest_match(target: &str, candidates: &[String]) -> Option<String> {
+        candidates
+            .iter()
+            .filter(|c| c.as_str() != target)
+            .map(|c| (c.clone(), Self::edit_distance(target, c)))
+            .filter(|(_, d)| *d <= 3)
+            .min_by_key(|(_, d)| *d)
+            .map(|(c, _)| c)
+    }
+
+    fn edit_distance(a: &str, b: &str) -> usize {
+        let a = a.to_lowercase();
+        let b = b.to_lowercase();
+        let a_bytes = a.as_bytes();
+        let b_bytes = b.as_bytes();
+        let m = a_bytes.len();
+        let n = b_bytes.len();
+        let mut dp = vec![vec![0usize; n + 1]; m + 1];
+        for i in 0..=m {
+            dp[i][0] = i;
+        }
+        for j in 0..=n {
+            dp[0][j] = j;
+        }
+        for i in 1..=m {
+            for j in 1..=n {
+                let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
+                dp[i][j] = (dp[i - 1][j] + 1)
+                    .min(dp[i][j - 1] + 1)
+                    .min(dp[i - 1][j - 1] + cost);
+            }
+        }
+        dp[m][n]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inline Query Cost Estimation
+// ---------------------------------------------------------------------------
+
+/// Provides inline cost estimation hints for SQL queries without full execution.
+#[derive(Debug)]
+pub struct InlineCostEstimator {
+    /// Average row size assumption in bytes.
+    avg_row_bytes: usize,
+    /// Known table sizes (table_name -> row_count).
+    table_sizes: HashMap<String, usize>,
+}
+
+/// A cost estimate for a query or sub-expression.
+#[derive(Debug, Clone)]
+pub struct CostEstimate {
+    /// Estimated number of rows in the result.
+    pub estimated_rows: usize,
+    /// Estimated memory usage in bytes.
+    pub estimated_memory_bytes: usize,
+    /// Relative cost score (higher = more expensive).
+    pub cost_score: f64,
+    /// Human-readable hint.
+    pub hint: String,
+}
+
+impl InlineCostEstimator {
+    pub fn new() -> Self {
+        Self {
+            avg_row_bytes: 256,
+            table_sizes: HashMap::new(),
+        }
+    }
+
+    /// Register a known table size for more accurate estimates.
+    pub fn register_table_size(&mut self, table: impl Into<String>, rows: usize) {
+        self.table_sizes.insert(table.into(), rows);
+    }
+
+    /// Estimate cost of a SELECT query by analyzing its clauses.
+    pub fn estimate_query(&self, sql: &str) -> CostEstimate {
+        let upper = sql.to_uppercase();
+        let mut base_rows = 1000usize; // default if unknown
+
+        // Try to find table name and use known size
+        if let Some(from_pos) = upper.find("FROM ") {
+            let after_from = &sql[from_pos + 5..];
+            let table_name = after_from
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            if let Some(&size) = self.table_sizes.get(table_name) {
+                base_rows = size;
+            }
+        }
+
+        let mut selectivity = 1.0f64;
+        let mut cost_multiplier = 1.0f64;
+        let mut hints = Vec::new();
+
+        // WHERE clause reduces rows
+        if upper.contains("WHERE") {
+            selectivity *= 0.3;
+            hints.push("WHERE filter applied");
+        }
+
+        // JOIN multiplies cost
+        let join_count = upper.matches("JOIN").count();
+        if join_count > 0 {
+            cost_multiplier *= 1.5f64.powi(join_count as i32);
+            hints.push("JOIN detected");
+        }
+
+        // GROUP BY requires hash aggregation
+        if upper.contains("GROUP BY") {
+            cost_multiplier *= 1.3;
+            hints.push("GROUP BY requires aggregation");
+        }
+
+        // ORDER BY requires sorting
+        if upper.contains("ORDER BY") {
+            cost_multiplier *= 1.2;
+            hints.push("ORDER BY requires sort");
+        }
+
+        // DISTINCT requires deduplication
+        if upper.contains("DISTINCT") {
+            cost_multiplier *= 1.1;
+            hints.push("DISTINCT requires dedup");
+        }
+
+        let estimated_rows = (base_rows as f64 * selectivity) as usize;
+        let estimated_memory = estimated_rows * self.avg_row_bytes;
+        let cost_score = estimated_rows as f64 * cost_multiplier;
+
+        CostEstimate {
+            estimated_rows: estimated_rows.max(1),
+            estimated_memory_bytes: estimated_memory,
+            cost_score,
+            hint: hints.join("; "),
+        }
+    }
+
+    /// Provide a severity classification based on cost.
+    pub fn classify_cost(cost: &CostEstimate) -> &'static str {
+        if cost.cost_score < 1000.0 {
+            "Low"
+        } else if cost.cost_score < 100_000.0 {
+            "Medium"
+        } else {
+            "High"
+        }
+    }
+}
+
+impl Default for InlineCostEstimator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1676,11 +2216,14 @@ mod tests {
     fn test_signature_help_all_builtins() {
         let provider = SignatureHelpProvider::new();
         let expected = [
-            "COUNT", "SUM", "AVG", "MIN", "MAX",
-            "UPPER", "LOWER", "LENGTH", "COALESCE", "ABS", "CONCAT", "TRIM",
+            "COUNT", "SUM", "AVG", "MIN", "MAX", "UPPER", "LOWER", "LENGTH", "COALESCE", "ABS",
+            "CONCAT", "TRIM",
         ];
         for name in &expected {
-            assert!(provider.get_signature(name).is_some(), "missing signature for {name}");
+            assert!(
+                provider.get_signature(name).is_some(),
+                "missing signature for {name}"
+            );
         }
     }
 
@@ -1700,8 +2243,14 @@ mod tests {
     fn test_code_action_select_star() {
         let provider = CodeActionProvider::new();
         let range = Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 20 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 20,
+            },
         };
         let actions = provider.get_actions("SELECT * FROM users", range);
         assert!(actions.iter().any(|a| a.title.contains("SELECT *")));
@@ -1711,24 +2260,36 @@ mod tests {
     fn test_code_action_implicit_cross_join() {
         let provider = CodeActionProvider::new();
         let range = Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 40 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 40,
+            },
         };
         let actions = provider.get_actions("SELECT id FROM orders, products", range);
-        assert!(actions.iter().any(|a| a.kind == NextGenCodeActionKind::OptimizationHint));
+        assert!(actions
+            .iter()
+            .any(|a| a.kind == NextGenCodeActionKind::OptimizationHint));
     }
 
     #[test]
     fn test_code_action_missing_aliases() {
         let provider = CodeActionProvider::new();
         let range = Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 50 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 50,
+            },
         };
-        let actions = provider.get_actions(
-            "SELECT id FROM orders, products WHERE orders.id = 1",
-            range,
-        );
+        let actions =
+            provider.get_actions("SELECT id FROM orders, products WHERE orders.id = 1", range);
         assert!(actions.iter().any(|a| a.title.contains("aliases")));
     }
 
@@ -1736,8 +2297,14 @@ mod tests {
     fn test_code_action_clean_query() {
         let provider = CodeActionProvider::new();
         let range = Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 30 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 30,
+            },
         };
         let actions = provider.get_actions("SELECT id FROM users WHERE id = 1", range);
         assert!(actions.is_empty());
@@ -1751,32 +2318,38 @@ mod tests {
     fn test_perf_full_table_scan() {
         let analyzer = PerformanceAnalyzer::new();
         let hints = analyzer.analyze("SELECT id FROM users");
-        assert!(hints.iter().any(|h| h.severity == HintSeverity::Warning
-            && h.message.contains("full table scan")));
+        assert!(hints
+            .iter()
+            .any(|h| h.severity == HintSeverity::Warning && h.message.contains("full table scan")));
     }
 
     #[test]
     fn test_perf_cartesian_product() {
         let analyzer = PerformanceAnalyzer::new();
         let hints = analyzer.analyze("SELECT a.id FROM orders, products");
-        assert!(hints.iter().any(|h| h.severity == HintSeverity::Critical
-            && h.message.contains("Cartesian")));
+        assert!(hints
+            .iter()
+            .any(|h| h.severity == HintSeverity::Critical && h.message.contains("Cartesian")));
     }
 
     #[test]
     fn test_perf_delete_without_where() {
         let analyzer = PerformanceAnalyzer::new();
         let hints = analyzer.analyze("DELETE FROM users");
-        assert!(hints.iter().any(|h| h.severity == HintSeverity::Critical
-            && h.message.contains("DELETE without WHERE")));
+        assert!(hints
+            .iter()
+            .any(|h| h.severity == HintSeverity::Critical
+                && h.message.contains("DELETE without WHERE")));
     }
 
     #[test]
     fn test_perf_update_without_where() {
         let analyzer = PerformanceAnalyzer::new();
         let hints = analyzer.analyze("UPDATE users SET name = 'x'");
-        assert!(hints.iter().any(|h| h.severity == HintSeverity::Critical
-            && h.message.contains("UPDATE without WHERE")));
+        assert!(hints
+            .iter()
+            .any(|h| h.severity == HintSeverity::Critical
+                && h.message.contains("UPDATE without WHERE")));
     }
 
     #[test]
@@ -1789,11 +2362,11 @@ mod tests {
     #[test]
     fn test_perf_or_to_in() {
         let analyzer = PerformanceAnalyzer::new();
-        let hints = analyzer.analyze(
-            "SELECT id FROM users WHERE STATUS = 1 OR STATUS = 2 OR STATUS = 3",
-        );
-        assert!(hints.iter().any(|h| h.severity == HintSeverity::Info
-            && h.message.contains("OR")));
+        let hints =
+            analyzer.analyze("SELECT id FROM users WHERE STATUS = 1 OR STATUS = 2 OR STATUS = 3");
+        assert!(hints
+            .iter()
+            .any(|h| h.severity == HintSeverity::Info && h.message.contains("OR")));
     }
 
     // -----------------------------------------------------------------------
@@ -1822,10 +2395,12 @@ mod tests {
     #[test]
     fn test_explain_complex_query_warnings() {
         let provider = QueryExplainProvider::new();
-        let output = provider.explain(
-            "SELECT a.id FROM t1 a JOIN t2 b ON a.id = b.id \
+        let output = provider
+            .explain(
+                "SELECT a.id FROM t1 a JOIN t2 b ON a.id = b.id \
              JOIN t3 c ON b.id = c.id JOIN t4 d ON c.id = d.id",
-        ).unwrap();
+            )
+            .unwrap();
         assert!(output.warnings.iter().any(|w| w.contains("JOINs")));
     }
 
@@ -1876,9 +2451,7 @@ mod tests {
         let mut schemas = std::collections::HashMap::new();
         schemas.insert("users".to_string(), sample_schema());
 
-        let def = DefinitionFinder::find_definition(
-            "SELECT * FROM users", "users", &schemas
-        );
+        let def = DefinitionFinder::find_definition("SELECT * FROM users", "users", &schemas);
         assert!(def.is_some());
         assert_eq!(def.unwrap().kind, DefinitionKind::Table);
     }
@@ -1888,9 +2461,7 @@ mod tests {
         let mut schemas = std::collections::HashMap::new();
         schemas.insert("users".to_string(), sample_schema());
 
-        let def = DefinitionFinder::find_definition(
-            "SELECT name FROM users", "name", &schemas
-        );
+        let def = DefinitionFinder::find_definition("SELECT name FROM users", "name", &schemas);
         assert!(def.is_some());
         let d = def.unwrap();
         assert_eq!(d.kind, DefinitionKind::Column);
@@ -1900,9 +2471,7 @@ mod tests {
     #[test]
     fn test_find_definition_builtin_function() {
         let schemas = std::collections::HashMap::new();
-        let def = DefinitionFinder::find_definition(
-            "SELECT COUNT(*) FROM t", "count", &schemas
-        );
+        let def = DefinitionFinder::find_definition("SELECT COUNT(*) FROM t", "count", &schemas);
         assert!(def.is_some());
         assert_eq!(def.unwrap().kind, DefinitionKind::Function);
     }
@@ -1936,5 +2505,178 @@ mod tests {
         let refs = ReferenceFinder::find_references(sql, "id");
         // "id" should NOT match "user_id" (not a word boundary)
         assert_eq!(refs.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // WorkspaceAnalyzer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_workspace_analyzer_add_and_find() {
+        let mut wa = WorkspaceAnalyzer::new();
+        wa.add_file("a.sql", "SELECT * FROM users JOIN orders ON users.id = orders.uid");
+        wa.add_file("b.sql", "SELECT * FROM products");
+
+        let refs = wa.find_references("users");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0], "a.sql");
+
+        let refs2 = wa.find_references("products");
+        assert_eq!(refs2.len(), 1);
+        assert_eq!(refs2[0], "b.sql");
+    }
+
+    #[test]
+    fn test_workspace_analyzer_remove_file() {
+        let mut wa = WorkspaceAnalyzer::new();
+        wa.add_file("a.sql", "SELECT * FROM users");
+        assert_eq!(wa.find_references("users").len(), 1);
+        wa.remove_file("a.sql");
+        assert_eq!(wa.find_references("users").len(), 0);
+    }
+
+    #[test]
+    fn test_workspace_analyzer_stale_files() {
+        let mut wa = WorkspaceAnalyzer::new();
+        wa.add_file("a.sql", "SELECT 1");
+        // File just added – should not be stale with a large threshold
+        assert!(wa.stale_files(9999).is_empty());
+        // Force staleness by setting last_analyzed far in the past
+        wa.files.get_mut("a.sql").unwrap().last_analyzed = 0;
+        assert_eq!(wa.stale_files(10).len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // SchemaChangeTracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_schema_change_tracker_basic() {
+        let mut tracker = SchemaChangeTracker::new();
+        assert_eq!(tracker.current_version(), 0);
+
+        tracker.record_change(vec!["users".into()], vec![], vec![]);
+        assert_eq!(tracker.current_version(), 1);
+
+        tracker.record_change(vec![], vec!["old_table".into()], vec![]);
+        assert_eq!(tracker.current_version(), 2);
+
+        let since = tracker.changes_since(1);
+        assert_eq!(since.len(), 1);
+        assert_eq!(since[0].tables_removed, vec!["old_table".to_string()]);
+    }
+
+    #[test]
+    fn test_schema_change_tracker_breaking() {
+        let mut tracker = SchemaChangeTracker::new();
+        tracker.record_change(vec!["t1".into()], vec![], vec![]);
+        assert!(!tracker.has_breaking_changes_since(0));
+
+        tracker.record_change(vec![], vec!["t1".into()], vec![]);
+        assert!(tracker.has_breaking_changes_since(0));
+        assert!(tracker.has_breaking_changes_since(1));
+        assert!(!tracker.has_breaking_changes_since(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // QuickFixProvider tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_quick_fix_missing_from() {
+        let diags = vec![Diagnostic {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 10 },
+            },
+            severity: DiagnosticSeverity::Error,
+            message: "Missing FROM keyword".to_string(),
+            source: "blaze".to_string(),
+        }];
+        let fixes = QuickFixProvider::suggest_fixes("SELECT *", &diags);
+        assert!(!fixes.is_empty());
+        assert!(fixes[0].message.contains("FROM"));
+    }
+
+    #[test]
+    fn test_quick_fix_unknown_column() {
+        // SQL contains "name" so the provider can suggest it for "naem"
+        let sql = "SELECT naem, name FROM users";
+        let diags = vec![Diagnostic {
+            range: Range {
+                start: Position { line: 0, character: 7 },
+                end: Position { line: 0, character: 11 },
+            },
+            severity: DiagnosticSeverity::Error,
+            message: "Unknown column 'naem'".to_string(),
+            source: "blaze".to_string(),
+        }];
+        let fixes = QuickFixProvider::suggest_fixes(sql, &diags);
+        assert!(!fixes.is_empty());
+        assert!(fixes[0].message.contains("name"));
+    }
+
+    #[test]
+    fn test_quick_fix_group_by() {
+        let diags = vec![Diagnostic {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 30 },
+            },
+            severity: DiagnosticSeverity::Error,
+            message: "'name' must appear in the GROUP BY clause".to_string(),
+            source: "blaze".to_string(),
+        }];
+        let fixes = QuickFixProvider::suggest_fixes("SELECT name, COUNT(*) FROM users", &diags);
+        assert!(!fixes.is_empty());
+        assert!(fixes[0].replacement.contains("GROUP BY"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Inline Cost Estimator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cost_estimator_simple() {
+        let est = InlineCostEstimator::new();
+        let cost = est.estimate_query("SELECT * FROM users");
+        assert!(cost.estimated_rows > 0);
+        assert!(cost.cost_score > 0.0);
+    }
+
+    #[test]
+    fn test_cost_estimator_with_known_size() {
+        let mut est = InlineCostEstimator::new();
+        est.register_table_size("orders", 1_000_000);
+        let cost = est.estimate_query("SELECT * FROM orders WHERE status = 'active'");
+        assert!(cost.estimated_rows < 1_000_000);
+        assert!(cost.hint.contains("WHERE"));
+    }
+
+    #[test]
+    fn test_cost_estimator_join_increases_cost() {
+        let est = InlineCostEstimator::new();
+        let simple = est.estimate_query("SELECT * FROM users");
+        let joined = est.estimate_query("SELECT * FROM users JOIN orders ON users.id = orders.user_id");
+        assert!(joined.cost_score > simple.cost_score);
+    }
+
+    #[test]
+    fn test_cost_estimator_classification() {
+        let low = CostEstimate {
+            estimated_rows: 10,
+            estimated_memory_bytes: 2560,
+            cost_score: 100.0,
+            hint: String::new(),
+        };
+        assert_eq!(InlineCostEstimator::classify_cost(&low), "Low");
+
+        let high = CostEstimate {
+            estimated_rows: 1_000_000,
+            estimated_memory_bytes: 256_000_000,
+            cost_score: 500_000.0,
+            hint: String::new(),
+        };
+        assert_eq!(InlineCostEstimator::classify_cost(&high), "High");
     }
 }
