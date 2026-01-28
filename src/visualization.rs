@@ -545,12 +545,7 @@ impl ChartRenderer {
     /// Render a scatter plot from two numeric columns.
     ///
     /// `x_col` and `y_col` are zero-based column indices for numeric data.
-    pub fn render_scatter(
-        &self,
-        batch: &RecordBatch,
-        x_col: usize,
-        y_col: usize,
-    ) -> Result<Chart> {
+    pub fn render_scatter(&self, batch: &RecordBatch, x_col: usize, y_col: usize) -> Result<Chart> {
         if batch.num_rows() == 0 {
             return Ok(Chart {
                 chart_type: ChartType::Scatter,
@@ -566,8 +561,16 @@ impl ChartRenderer {
         let x_max = x_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
         let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let x_range = if (x_max - x_min).abs() < f64::EPSILON { 1.0 } else { x_max - x_min };
-        let y_range = if (y_max - y_min).abs() < f64::EPSILON { 1.0 } else { y_max - y_min };
+        let x_range = if (x_max - x_min).abs() < f64::EPSILON {
+            1.0
+        } else {
+            x_max - x_min
+        };
+        let y_range = if (y_max - y_min).abs() < f64::EPSILON {
+            1.0
+        } else {
+            y_max - y_min
+        };
 
         let height = self.config.height;
         let plot_width = self.config.width.saturating_sub(12);
@@ -643,18 +646,35 @@ impl ChartRenderer {
         let mut out = String::new();
         if let Some(ref title) = self.config.title {
             writeln!(out, "{}", title).unwrap();
-            writeln!(out, "{}", "─".repeat(self.config.width.min(title.len() + 20))).unwrap();
+            writeln!(
+                out,
+                "{}",
+                "─".repeat(self.config.width.min(title.len() + 20))
+            )
+            .unwrap();
         }
 
         // Summary with percentages
         let bar_width = self.config.width.saturating_sub(35);
         for (i, (label, &val)) in labels.iter().zip(values.iter()).enumerate() {
-            let pct = if val > 0.0 { (val / total) * 100.0 } else { 0.0 };
+            let pct = if val > 0.0 {
+                (val / total) * 100.0
+            } else {
+                0.0
+            };
             let fill = ((pct / 100.0) * bar_width as f64).round() as usize;
             let ch = pie_chars[i % pie_chars.len()];
             let bar: String = std::iter::repeat(ch).take(fill).collect();
             let padded = self.pad_label(label);
-            writeln!(out, "{}  {:<bw$} {:>5.1}%", padded, bar, pct, bw = bar_width).unwrap();
+            writeln!(
+                out,
+                "{}  {:<bw$} {:>5.1}%",
+                padded,
+                bar,
+                pct,
+                bw = bar_width
+            )
+            .unwrap();
         }
 
         Ok(Chart {
@@ -684,7 +704,11 @@ impl ChartRenderer {
         let values = Self::extract_f64(batch, value_col)?;
         let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let range = if (max - min).abs() < f64::EPSILON { 1.0 } else { max - min };
+        let range = if (max - min).abs() < f64::EPSILON {
+            1.0
+        } else {
+            max - min
+        };
 
         let heat_chars = [' ', '░', '▒', '▓', '█'];
         let cols = cols_per_row.max(1);
@@ -706,7 +730,12 @@ impl ChartRenderer {
         }
 
         // Legend
-        writeln!(out, "  Low {} {} {} {} High", heat_chars[0], heat_chars[1], heat_chars[2], heat_chars[3]).unwrap();
+        writeln!(
+            out,
+            "  Low {} {} {} {} High",
+            heat_chars[0], heat_chars[1], heat_chars[2], heat_chars[3]
+        )
+        .unwrap();
 
         Ok(Chart {
             chart_type: ChartType::Heatmap,
@@ -834,7 +863,9 @@ impl ChartRenderer {
             .unwrap();
         }
 
-        let colors = ["#4285f4", "#ea4335", "#fbbc04", "#34a853", "#ff6d01", "#46bdc6"];
+        let colors = [
+            "#4285f4", "#ea4335", "#fbbc04", "#34a853", "#ff6d01", "#46bdc6",
+        ];
 
         for (i, (label, &val)) in labels.iter().zip(values.iter()).enumerate() {
             let y = 40 + i * (bar_height + gap);
@@ -850,13 +881,18 @@ impl ChartRenderer {
             writeln!(
                 svg,
                 r#"  <rect x="140" y="{}" width="{}" height="{}" fill="{}" rx="3"/>"#,
-                y, width, bar_height - 2, color
+                y,
+                width,
+                bar_height - 2,
+                color
             )
             .unwrap();
             writeln!(
                 svg,
                 r#"  <text x="{}" y="{}" font-size="11" dominant-baseline="middle">{}</text>"#,
-                145 + width, y + bar_height / 2, Self::format_number(val)
+                145 + width,
+                y + bar_height / 2,
+                Self::format_number(val)
             )
             .unwrap();
         }
@@ -869,6 +905,249 @@ impl ChartRenderer {
 impl std::fmt::Display for Chart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.output)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vega-Lite Spec Generation (Feature 10)
+// ---------------------------------------------------------------------------
+
+/// Generates Vega-Lite JSON specifications from chart configurations.
+#[derive(Debug)]
+pub struct VegaLiteGenerator;
+
+impl VegaLiteGenerator {
+    /// Generate a Vega-Lite JSON specification from a chart type and data.
+    pub fn generate(chart_type: ChartType, title: &str, width: usize, height: usize, data: &[Vec<(String, f64)>]) -> Result<String> {
+        let mark = match chart_type {
+            ChartType::Bar | ChartType::Column | ChartType::Histogram => "bar",
+            ChartType::Line => "line",
+            ChartType::Scatter => "point",
+            ChartType::Pie => "arc",
+            ChartType::Heatmap => "rect",
+            ChartType::Table => "text",
+        };
+
+        // Build data values
+        let mut values = Vec::new();
+        for series in data {
+            for (label, value) in series {
+                values.push(format!(
+                    r#"{{"category": "{}", "value": {}}}"#,
+                    label.replace('"', "\\\""),
+                    value
+                ));
+            }
+        }
+        let values_str = values.join(", ");
+
+        let spec = format!(
+            r#"{{
+  "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+  "title": "{}",
+  "width": {},
+  "height": {},
+  "mark": "{}",
+  "data": {{
+    "values": [{}]
+  }},
+  "encoding": {{
+    "x": {{"field": "category", "type": "nominal"}},
+    "y": {{"field": "value", "type": "quantitative"}}
+  }}
+}}"#,
+            title,
+            width,
+            height,
+            mark,
+            values_str
+        );
+
+        Ok(spec)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard Layout (Feature 10)
+// ---------------------------------------------------------------------------
+
+/// A dashboard containing multiple charts arranged in a layout.
+#[derive(Debug)]
+pub struct Dashboard {
+    /// Dashboard title.
+    pub title: String,
+    /// Charts with their position (row, col).
+    pub panels: Vec<DashboardPanel>,
+    /// Number of columns in the grid.
+    pub columns: usize,
+}
+
+/// A single panel in a dashboard.
+#[derive(Debug)]
+pub struct DashboardPanel {
+    pub chart: Chart,
+    pub row: usize,
+    pub col: usize,
+    pub width_span: usize,
+    pub height_span: usize,
+}
+
+impl Dashboard {
+    pub fn new(title: impl Into<String>, columns: usize) -> Self {
+        Self {
+            title: title.into(),
+            panels: Vec::new(),
+            columns: columns.max(1),
+        }
+    }
+
+    /// Add a chart panel at the specified grid position.
+    pub fn add_panel(&mut self, chart: Chart, row: usize, col: usize) {
+        self.panels.push(DashboardPanel {
+            chart,
+            row,
+            col,
+            width_span: 1,
+            height_span: 1,
+        });
+    }
+
+    /// Add a chart panel that spans multiple grid cells.
+    pub fn add_wide_panel(
+        &mut self,
+        chart: Chart,
+        row: usize,
+        col: usize,
+        width_span: usize,
+        height_span: usize,
+    ) {
+        self.panels.push(DashboardPanel {
+            chart,
+            row,
+            col,
+            width_span,
+            height_span,
+        });
+    }
+
+    pub fn panel_count(&self) -> usize {
+        self.panels.len()
+    }
+
+    /// Generate an HTML page with all charts embedded.
+    pub fn to_html(&self) -> String {
+        let mut html = String::new();
+        let _ = write!(html, r#"<!DOCTYPE html>
+<html>
+<head><title>{}</title>
+<style>
+  .dashboard {{ display: grid; grid-template-columns: repeat({}, 1fr); gap: 16px; padding: 16px; }}
+  .panel {{ border: 1px solid #ddd; border-radius: 8px; padding: 12px; background: #fff; }}
+  h1 {{ text-align: center; font-family: sans-serif; }}
+  pre {{ font-family: monospace; font-size: 12px; overflow-x: auto; }}
+</style>
+</head>
+<body>
+<h1>{}</h1>
+<div class="dashboard">
+"#, self.title, self.columns, self.title);
+
+        for panel in &self.panels {
+            let span_style = if panel.width_span > 1 || panel.height_span > 1 {
+                format!(
+                    " style=\"grid-column: span {}; grid-row: span {};\"",
+                    panel.width_span, panel.height_span
+                )
+            } else {
+                String::new()
+            };
+            let _ = write!(
+                html,
+                "<div class=\"panel\"{}><pre>{}</pre></div>\n",
+                span_style, panel.chart.output
+            );
+        }
+
+        let _ = write!(html, "</div>\n</body>\n</html>");
+        html
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive Filter Builder (Feature 10)
+// ---------------------------------------------------------------------------
+
+/// Generates SQL WHERE clauses from interactive filter specifications.
+#[derive(Debug, Clone)]
+pub enum FilterOp {
+    Equals(String, String),
+    NotEquals(String, String),
+    GreaterThan(String, String),
+    LessThan(String, String),
+    Between(String, String, String),
+    In(String, Vec<String>),
+    Like(String, String),
+    IsNull(String),
+    IsNotNull(String),
+}
+
+/// Builds SQL WHERE clauses from filter operations.
+#[derive(Debug)]
+pub struct InteractiveFilterBuilder {
+    filters: Vec<FilterOp>,
+}
+
+impl InteractiveFilterBuilder {
+    pub fn new() -> Self {
+        Self {
+            filters: Vec::new(),
+        }
+    }
+
+    pub fn add_filter(&mut self, filter: FilterOp) {
+        self.filters.push(filter);
+    }
+
+    /// Generate a SQL WHERE clause from all filters.
+    pub fn to_sql(&self) -> String {
+        if self.filters.is_empty() {
+            return String::new();
+        }
+
+        let clauses: Vec<String> = self
+            .filters
+            .iter()
+            .map(|f| match f {
+                FilterOp::Equals(col, val) => format!("{col} = '{val}'"),
+                FilterOp::NotEquals(col, val) => format!("{col} != '{val}'"),
+                FilterOp::GreaterThan(col, val) => format!("{col} > {val}"),
+                FilterOp::LessThan(col, val) => format!("{col} < {val}"),
+                FilterOp::Between(col, lo, hi) => format!("{col} BETWEEN {lo} AND {hi}"),
+                FilterOp::In(col, vals) => {
+                    let list = vals.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(", ");
+                    format!("{col} IN ({list})")
+                }
+                FilterOp::Like(col, pat) => format!("{col} LIKE '{pat}'"),
+                FilterOp::IsNull(col) => format!("{col} IS NULL"),
+                FilterOp::IsNotNull(col) => format!("{col} IS NOT NULL"),
+            })
+            .collect();
+
+        format!("WHERE {}", clauses.join(" AND "))
+    }
+
+    pub fn filter_count(&self) -> usize {
+        self.filters.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.filters.clear();
+    }
+}
+
+impl Default for InteractiveFilterBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1081,15 +1360,24 @@ mod tests {
     fn test_auto_detect_chart_type() {
         // 1 string + 1 numeric → Bar
         let batch = make_test_batch();
-        assert_eq!(ChartRenderer::auto_detect_chart_type(&batch), ChartType::Bar);
+        assert_eq!(
+            ChartRenderer::auto_detect_chart_type(&batch),
+            ChartType::Bar
+        );
 
         // 2 numeric → Scatter
         let batch = make_two_numeric_batch();
-        assert_eq!(ChartRenderer::auto_detect_chart_type(&batch), ChartType::Scatter);
+        assert_eq!(
+            ChartRenderer::auto_detect_chart_type(&batch),
+            ChartType::Scatter
+        );
 
         // 1 numeric → Histogram
         let batch = make_numeric_batch();
-        assert_eq!(ChartRenderer::auto_detect_chart_type(&batch), ChartType::Histogram);
+        assert_eq!(
+            ChartRenderer::auto_detect_chart_type(&batch),
+            ChartType::Histogram
+        );
     }
 
     #[test]
@@ -1130,5 +1418,120 @@ mod tests {
         let renderer = ChartRenderer::new(ChartConfig::default());
         let chart = renderer.render_pie(&batch, 0, 1).unwrap();
         assert!(chart.output.contains("empty"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Vega-Lite Generation tests (Feature 10)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_vega_lite_bar() {
+        let data = vec![vec![
+            ("Q1".into(), 100.0),
+            ("Q2".into(), 200.0),
+            ("Q3".into(), 150.0),
+        ]];
+        let spec = VegaLiteGenerator::generate(ChartType::Bar, "Sales", 400, 300, &data).unwrap();
+        assert!(spec.contains("\"$schema\""));
+        assert!(spec.contains("\"mark\": \"bar\""));
+        assert!(spec.contains("\"title\": \"Sales\""));
+        assert!(spec.contains("Q1"));
+    }
+
+    #[test]
+    fn test_vega_lite_line() {
+        let data = vec![vec![("Jan".into(), 10.0), ("Feb".into(), 20.0)]];
+        let spec = VegaLiteGenerator::generate(ChartType::Line, "Trend", 400, 300, &data).unwrap();
+        assert!(spec.contains("\"mark\": \"line\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Dashboard tests (Feature 10)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dashboard_layout() {
+        let mut dash = Dashboard::new("Test Dashboard", 2);
+        let chart1 = Chart {
+            chart_type: ChartType::Bar,
+            config: ChartConfig::default(),
+            output: "Chart 1".into(),
+        };
+        let chart2 = Chart {
+            chart_type: ChartType::Line,
+            config: ChartConfig::default(),
+            output: "Chart 2".into(),
+        };
+        dash.add_panel(chart1, 0, 0);
+        dash.add_panel(chart2, 0, 1);
+        assert_eq!(dash.panel_count(), 2);
+    }
+
+    #[test]
+    fn test_dashboard_html_export() {
+        let mut dash = Dashboard::new("Revenue Dashboard", 2);
+        dash.add_panel(
+            Chart {
+                chart_type: ChartType::Bar,
+                config: ChartConfig::default(),
+                output: "Bar chart output".into(),
+            },
+            0, 0,
+        );
+        dash.add_wide_panel(
+            Chart {
+                chart_type: ChartType::Line,
+                config: ChartConfig::default(),
+                output: "Wide line chart".into(),
+            },
+            1, 0, 2, 1,
+        );
+
+        let html = dash.to_html();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Revenue Dashboard"));
+        assert!(html.contains("Bar chart output"));
+        assert!(html.contains("grid-column: span 2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Interactive Filter tests (Feature 10)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_filter_builder_basic() {
+        let mut builder = InteractiveFilterBuilder::new();
+        builder.add_filter(FilterOp::Equals("status".into(), "active".into()));
+        builder.add_filter(FilterOp::GreaterThan("age".into(), "18".into()));
+
+        let sql = builder.to_sql();
+        assert_eq!(sql, "WHERE status = 'active' AND age > 18");
+    }
+
+    #[test]
+    fn test_filter_builder_complex() {
+        let mut builder = InteractiveFilterBuilder::new();
+        builder.add_filter(FilterOp::In("color".into(), vec!["red".into(), "blue".into()]));
+        builder.add_filter(FilterOp::Between("price".into(), "10".into(), "100".into()));
+        builder.add_filter(FilterOp::IsNotNull("email".into()));
+
+        let sql = builder.to_sql();
+        assert!(sql.contains("color IN ('red', 'blue')"));
+        assert!(sql.contains("price BETWEEN 10 AND 100"));
+        assert!(sql.contains("email IS NOT NULL"));
+    }
+
+    #[test]
+    fn test_filter_builder_empty() {
+        let builder = InteractiveFilterBuilder::new();
+        assert_eq!(builder.to_sql(), "");
+    }
+
+    #[test]
+    fn test_filter_builder_like() {
+        let mut builder = InteractiveFilterBuilder::new();
+        builder.add_filter(FilterOp::Like("name".into(), "%Smith%".into()));
+        let sql = builder.to_sql();
+        assert_eq!(sql, "WHERE name LIKE '%Smith%'");
     }
 }
