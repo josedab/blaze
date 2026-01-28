@@ -46,6 +46,123 @@ impl ProfileReport {
         }
     }
 
+    /// Render as HTML with visual execution plan tree.
+    pub fn to_html(&self) -> String {
+        let mut html = String::new();
+
+        // HTML header
+        html.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
+        html.push_str("<meta charset=\"utf-8\">\n");
+        html.push_str("<title>Query Profile Report</title>\n");
+        html.push_str("<style>\n");
+        html.push_str(
+            "body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }\n",
+        );
+        html.push_str("h1 { color: #333; }\n");
+        html.push_str(".operator { margin: 5px 0; padding: 10px; background: white; border-left: 4px solid #4CAF50; border-radius: 3px; }\n");
+        html.push_str(".operator-name { font-weight: bold; color: #2196F3; }\n");
+        html.push_str(".timing-bar { height: 20px; background: #4CAF50; margin: 5px 0; border-radius: 3px; display: inline-block; }\n");
+        html.push_str(".stats { color: #666; font-size: 0.9em; }\n");
+        html.push_str(".indent-1 { margin-left: 20px; }\n");
+        html.push_str(".indent-2 { margin-left: 40px; }\n");
+        html.push_str(".indent-3 { margin-left: 60px; }\n");
+        html.push_str(".indent-4 { margin-left: 80px; }\n");
+        html.push_str(".summary { background: white; padding: 15px; border-radius: 5px; margin-bottom: 20px; }\n");
+        html.push_str(".summary table { width: 100%; border-collapse: collapse; }\n");
+        html.push_str(".summary th { text-align: left; padding: 8px; background: #eee; }\n");
+        html.push_str(".summary td { padding: 8px; border-bottom: 1px solid #eee; }\n");
+        html.push_str("</style>\n");
+        html.push_str("</head>\n<body>\n");
+
+        // Title
+        html.push_str("<h1>Query Execution Profile</h1>\n");
+
+        // Summary statistics
+        html.push_str("<div class=\"summary\">\n");
+        html.push_str("<h2>Summary Statistics</h2>\n");
+        html.push_str("<table>\n");
+        html.push_str("<tr><th>Metric</th><th>Value</th></tr>\n");
+
+        let total_ms = self.stats.elapsed_nanos as f64 / 1_000_000.0;
+        html.push_str(&format!(
+            "<tr><td>Total Time</td><td>{:.3} ms</td></tr>\n",
+            total_ms
+        ));
+        html.push_str(&format!(
+            "<tr><td>Rows Processed</td><td>{}</td></tr>\n",
+            self.stats.rows_processed
+        ));
+        html.push_str(&format!(
+            "<tr><td>Rows Output</td><td>{}</td></tr>\n",
+            self.stats.rows_output
+        ));
+        html.push_str(&format!(
+            "<tr><td>Batches</td><td>{}</td></tr>\n",
+            self.stats.batches_processed
+        ));
+        html.push_str(&format!(
+            "<tr><td>Peak Memory</td><td>{} bytes ({:.2} MB)</td></tr>\n",
+            self.stats.peak_memory_bytes,
+            self.stats.peak_memory_bytes as f64 / 1024.0 / 1024.0
+        ));
+        html.push_str("</table>\n");
+        html.push_str("</div>\n");
+
+        // Execution plan tree
+        html.push_str("<h2>Execution Plan</h2>\n");
+        let max_time = self.stats.total_elapsed_nanos() as f64;
+        Self::render_operator_html(&self.stats, &mut html, 0, max_time);
+
+        html.push_str("</body>\n</html>\n");
+        html
+    }
+
+    fn render_operator_html(stats: &ExecutionStats, out: &mut String, depth: usize, max_time: f64) {
+        let elapsed_ms = stats.elapsed_nanos as f64 / 1_000_000.0;
+        let indent_class = format!("indent-{}", depth.min(4));
+
+        out.push_str(&format!("<div class=\"operator {}\">\n", indent_class));
+        out.push_str(&format!(
+            "<div class=\"operator-name\">{}</div>\n",
+            stats.operator_name
+        ));
+
+        // Timing bar (proportional to execution time)
+        let bar_width = if max_time > 0.0 {
+            ((stats.elapsed_nanos as f64 / max_time) * 300.0).max(10.0) as usize
+        } else {
+            10
+        };
+        out.push_str(&format!(
+            "<div class=\"timing-bar\" style=\"width: {}px;\"></div> {:.3} ms\n",
+            bar_width, elapsed_ms
+        ));
+
+        // Stats
+        out.push_str("<div class=\"stats\">");
+        out.push_str(&format!(
+            "Rows: {} → {} | ",
+            stats.rows_processed, stats.rows_output
+        ));
+        out.push_str(&format!("Batches: {} | ", stats.batches_processed));
+        out.push_str(&format!("Memory: {} bytes", stats.peak_memory_bytes));
+
+        if !stats.extra_metrics.is_empty() {
+            out.push_str(" | ");
+            for (name, value) in &stats.extra_metrics {
+                out.push_str(&format!("{}: {} ", name, value));
+            }
+        }
+        out.push_str("</div>\n");
+
+        out.push_str("</div>\n");
+
+        // Render children
+        for child in &stats.children {
+            Self::render_operator_html(child, out, depth + 1, max_time);
+        }
+    }
+
     /// Render as JSON.
     pub fn to_json(&self) -> String {
         let mut output = String::new();
@@ -315,6 +432,143 @@ impl QueryProfiler {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Optimization suggestions
+// ---------------------------------------------------------------------------
+
+/// An optimization suggestion based on query profile analysis.
+#[derive(Debug, Clone)]
+pub struct OptimizationSuggestion {
+    /// Description of the optimization
+    pub description: String,
+    /// Estimated impact (High, Medium, Low)
+    pub impact: String,
+    /// Condition that triggered this suggestion
+    pub condition: String,
+}
+
+impl OptimizationSuggestion {
+    pub fn new(
+        description: impl Into<String>,
+        impact: impl Into<String>,
+        condition: impl Into<String>,
+    ) -> Self {
+        Self {
+            description: description.into(),
+            impact: impact.into(),
+            condition: condition.into(),
+        }
+    }
+}
+
+/// Analyze a profile report and generate optimization suggestions.
+pub fn suggest_optimizations(profile: &ProfileReport) -> Vec<OptimizationSuggestion> {
+    let mut suggestions = Vec::new();
+
+    // Analyze the stats tree
+    analyze_operator_for_suggestions(&profile.stats, &mut suggestions);
+
+    suggestions
+}
+
+fn analyze_operator_for_suggestions(
+    stats: &ExecutionStats,
+    suggestions: &mut Vec<OptimizationSuggestion>,
+) {
+    let elapsed_ms = stats.elapsed_nanos as f64 / 1_000_000.0;
+
+    // Full table scan without filters
+    if stats.operator_name.contains("TableScan") || stats.operator_name.contains("Scan") {
+        if stats.rows_processed > 100_000 && stats.rows_output == stats.rows_processed {
+            suggestions.push(OptimizationSuggestion::new(
+                "Add WHERE clause to filter rows earlier in the query plan",
+                "High",
+                format!("Full table scan processing {} rows", stats.rows_processed),
+            ));
+        }
+
+        // High memory usage for scan
+        if stats.peak_memory_bytes > 100 * 1024 * 1024 {
+            suggestions.push(OptimizationSuggestion::new(
+                "Consider using column pruning (SELECT specific columns instead of *)",
+                "Medium",
+                format!(
+                    "Table scan using {} MB of memory",
+                    stats.peak_memory_bytes / 1024 / 1024
+                ),
+            ));
+        }
+    }
+
+    // Sort on large datasets without LIMIT
+    if stats.operator_name.contains("Sort") {
+        if stats.rows_processed > 100_000 {
+            suggestions.push(OptimizationSuggestion::new(
+                "Add LIMIT clause if you only need top N results - avoids sorting entire dataset",
+                "High",
+                format!("Sorting {} rows", stats.rows_processed),
+            ));
+        }
+
+        // Slow sort
+        if elapsed_ms > 1000.0 {
+            suggestions.push(OptimizationSuggestion::new(
+                "Consider creating an index on the sort column",
+                "High",
+                format!("Sort taking {:.0} ms", elapsed_ms),
+            ));
+        }
+    }
+
+    // Nested loop joins
+    if stats.operator_name.contains("NestedLoop") || stats.operator_name.contains("CrossJoin") {
+        suggestions.push(OptimizationSuggestion::new(
+            "Nested loop join detected - add JOIN conditions or use hash join with indexes",
+            "High",
+            "Nested loop joins are inefficient for large datasets".to_string(),
+        ));
+    }
+
+    // Hash join with high memory
+    if stats.operator_name.contains("HashJoin") {
+        if stats.peak_memory_bytes > 500 * 1024 * 1024 {
+            suggestions.push(OptimizationSuggestion::new(
+                "Hash join using high memory - consider reducing input size or using sort-merge join",
+                "Medium",
+                format!("Hash join using {} MB", stats.peak_memory_bytes / 1024 / 1024),
+            ));
+        }
+    }
+
+    // High memory operators in general
+    if stats.peak_memory_bytes > 1024 * 1024 * 1024 {
+        suggestions.push(OptimizationSuggestion::new(
+            "Reduce batch size to lower memory consumption",
+            "Medium",
+            format!(
+                "Operator using {} MB of memory",
+                stats.peak_memory_bytes / 1024 / 1024
+            ),
+        ));
+    }
+
+    // Aggregate on many groups
+    if stats.operator_name.contains("Aggregate") || stats.operator_name.contains("GroupBy") {
+        if stats.rows_output > 100_000 {
+            suggestions.push(OptimizationSuggestion::new(
+                "Aggregation producing many groups - consider filtering or reducing cardinality",
+                "Low",
+                format!("Producing {} groups", stats.rows_output),
+            ));
+        }
+    }
+
+    // Recursively analyze children
+    for child in &stats.children {
+        analyze_operator_for_suggestions(child, suggestions);
+    }
+}
+
 /// Analyzes query profiles to identify performance bottlenecks.
 pub struct BottleneckAnalyzer;
 
@@ -494,10 +748,7 @@ impl PrometheusMetrics {
         ));
         out.push_str("# HELP blaze_query_errors_total Total query errors\n");
         out.push_str("# TYPE blaze_query_errors_total counter\n");
-        out.push_str(&format!(
-            "blaze_query_errors_total {}\n",
-            self.query_errors
-        ));
+        out.push_str(&format!("blaze_query_errors_total {}\n", self.query_errors));
         out.push_str("# HELP blaze_active_queries Currently active queries\n");
         out.push_str("# TYPE blaze_active_queries gauge\n");
         out.push_str(&format!("blaze_active_queries {}\n", self.active_queries));
@@ -602,11 +853,14 @@ pub struct CardinalityAnnotator {
 
 impl CardinalityAnnotator {
     pub fn new() -> Self {
-        Self { annotations: Vec::new() }
+        Self {
+            annotations: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, operator: &str, estimated: usize, actual: usize) {
-        self.annotations.push(CardinalityAnnotation::new(operator, estimated, actual));
+        self.annotations
+            .push(CardinalityAnnotation::new(operator, estimated, actual));
     }
 
     /// Get all annotations.
@@ -616,16 +870,25 @@ impl CardinalityAnnotator {
 
     /// Get annotations where the estimate was significantly wrong.
     pub fn misestimates(&self, threshold: f64) -> Vec<&CardinalityAnnotation> {
-        self.annotations.iter().filter(|a| a.is_misestimate(threshold)).collect()
+        self.annotations
+            .iter()
+            .filter(|a| a.is_misestimate(threshold))
+            .collect()
     }
 
     /// Average Q-error across all operators.
     pub fn avg_q_error(&self) -> f64 {
-        let finite: Vec<f64> = self.annotations.iter()
+        let finite: Vec<f64> = self
+            .annotations
+            .iter()
             .map(|a| a.q_error())
             .filter(|q| q.is_finite())
             .collect();
-        if finite.is_empty() { 0.0 } else { finite.iter().sum::<f64>() / finite.len() as f64 }
+        if finite.is_empty() {
+            0.0
+        } else {
+            finite.iter().sum::<f64>() / finite.len() as f64
+        }
     }
 }
 
@@ -683,8 +946,12 @@ impl SlowQueryAnalyzer {
         if upper.contains("SELECT *") {
             recs.push("Consider specifying columns instead of SELECT *".to_string());
         }
-        if upper.contains("CROSS JOIN") || (upper.contains("FROM") && upper.contains(",") && !upper.contains("JOIN")) {
-            recs.push("Possible cross join detected - ensure join conditions are specified".to_string());
+        if upper.contains("CROSS JOIN")
+            || (upper.contains("FROM") && upper.contains(",") && !upper.contains("JOIN"))
+        {
+            recs.push(
+                "Possible cross join detected - ensure join conditions are specified".to_string(),
+            );
         }
         if !upper.contains("LIMIT") && !upper.contains("GROUP BY") {
             recs.push("Consider adding LIMIT to reduce result set size".to_string());
@@ -693,7 +960,9 @@ impl SlowQueryAnalyzer {
             recs.push("Leading wildcard in LIKE prevents index usage".to_string());
         }
         if upper.contains("OR") && upper.contains("WHERE") {
-            recs.push("OR conditions in WHERE may prevent index usage - consider UNION".to_string());
+            recs.push(
+                "OR conditions in WHERE may prevent index usage - consider UNION".to_string(),
+            );
         }
 
         recs
@@ -709,7 +978,9 @@ impl SlowQueryAnalyzer {
         self.slow_queries.iter().max_by_key(|q| q.execution_time_ms)
     }
 
-    pub fn count(&self) -> usize { self.slow_queries.len() }
+    pub fn count(&self) -> usize {
+        self.slow_queries.len()
+    }
 }
 
 /// Sampling-based profiler for low-overhead continuous profiling.
@@ -738,13 +1009,21 @@ impl SamplingProfiler {
         }
     }
 
-    pub fn start(&mut self) { self.is_active = true; }
-    pub fn stop(&mut self) { self.is_active = false; }
-    pub fn is_active(&self) -> bool { self.is_active }
+    pub fn start(&mut self) {
+        self.is_active = true;
+    }
+    pub fn stop(&mut self) {
+        self.is_active = false;
+    }
+    pub fn is_active(&self) -> bool {
+        self.is_active
+    }
 
     /// Record a sample.
     pub fn record(&mut self, operator: &str, timestamp_us: u64, memory_bytes: usize) {
-        if !self.is_active { return; }
+        if !self.is_active {
+            return;
+        }
         if self.samples.len() >= self.max_samples {
             self.samples.remove(0);
         }
@@ -762,15 +1041,23 @@ impl SamplingProfiler {
             *times.entry(sample.operator.clone()).or_insert(0) += 1;
         }
         // Convert sample counts to estimated microseconds
-        let interval_us = if self.sample_rate_hz > 0 { 1_000_000 / self.sample_rate_hz as u64 } else { 0 };
+        let interval_us = if self.sample_rate_hz > 0 {
+            1_000_000 / self.sample_rate_hz as u64
+        } else {
+            0
+        };
         for v in times.values_mut() {
             *v *= interval_us;
         }
         times
     }
 
-    pub fn sample_count(&self) -> usize { self.samples.len() }
-    pub fn sample_rate(&self) -> u32 { self.sample_rate_hz }
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate_hz
+    }
 }
 
 #[cfg(test)]
@@ -876,7 +1163,7 @@ mod tests {
     #[test]
     fn test_query_profiler_slow_queries() {
         let profiler = QueryProfiler::new(100, 0.1); // 0.1ms threshold
-        // sample_stats total = 0.8ms → should be slow
+                                                     // sample_stats total = 0.8ms → should be slow
         profiler.record("SELECT * FROM users", &sample_stats());
 
         let mut fast = ExecutionStats::new("Projection");
@@ -989,10 +1276,7 @@ mod tests {
 
     #[test]
     fn test_flamegraph_text_chart() {
-        let ops = vec![
-            ("Scan".to_string(), 1000u64),
-            ("Filter".to_string(), 500),
-        ];
+        let ops = vec![("Scan".to_string(), 1000u64), ("Filter".to_string(), 500)];
         let chart = FlamegraphGenerator::generate_text_chart(&ops, 40);
         assert!(chart.contains("█"));
         assert!(chart.contains("Scan"));
@@ -1040,7 +1324,7 @@ mod tests {
         profiler.record("Scan", 2000, 2048);
         profiler.record("Filter", 3000, 512);
         assert_eq!(profiler.sample_count(), 3);
-        
+
         let times = profiler.operator_time();
         assert!(times.contains_key("Scan"));
         assert!(times.contains_key("Filter"));
@@ -1052,5 +1336,71 @@ mod tests {
         // Not started
         profiler.record("Scan", 1000, 1024);
         assert_eq!(profiler.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_html_generation() {
+        use crate::planner::ExecutionStats;
+        let stats = ExecutionStats {
+            operator_name: "Scan".to_string(),
+            elapsed_nanos: 1000000,
+            rows_processed: 100,
+            rows_output: 100,
+            batches_processed: 1,
+            peak_memory_bytes: 1024,
+            bytes_spilled: 0,
+            extra_metrics: vec![],
+            children: vec![],
+        };
+
+        let report = ProfileReport::new(stats);
+        let html = report.to_html();
+        assert!(html.contains("<html>"));
+        assert!(html.contains("Scan"));
+        assert!(html.contains("1.000 ms"));
+    }
+
+    #[test]
+    fn test_optimization_suggestions() {
+        use crate::planner::ExecutionStats;
+
+        // Full table scan
+        let stats = ExecutionStats {
+            operator_name: "TableScan".to_string(),
+            elapsed_nanos: 10000000,
+            rows_processed: 1000000,
+            rows_output: 1000000,
+            batches_processed: 10,
+            peak_memory_bytes: 1024 * 1024 * 100,
+            bytes_spilled: 0,
+            extra_metrics: vec![],
+            children: vec![],
+        };
+
+        let report = ProfileReport::new(stats);
+        let suggestions = suggest_optimizations(&report);
+        assert!(suggestions.len() > 0);
+        assert!(suggestions.iter().any(|s| s.description.contains("WHERE")));
+    }
+
+    #[test]
+    fn test_optimization_suggestion_sort() {
+        use crate::planner::ExecutionStats;
+
+        let stats = ExecutionStats {
+            operator_name: "Sort".to_string(),
+            elapsed_nanos: 5000000,
+            rows_processed: 1000000,
+            rows_output: 1000000,
+            batches_processed: 10,
+            peak_memory_bytes: 1024,
+            bytes_spilled: 0,
+            extra_metrics: vec![],
+            children: vec![],
+        };
+
+        let report = ProfileReport::new(stats);
+        let suggestions = suggest_optimizations(&report);
+        assert!(suggestions.iter().any(|s| s.description.contains("LIMIT")));
     }
 }
