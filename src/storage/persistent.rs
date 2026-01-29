@@ -419,7 +419,7 @@ impl PersistentTable {
             let mut parquet_files: Vec<_> = fs::read_dir(&data_dir)?
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| p.extension().map_or(false, |ext| ext == "parquet"))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "parquet"))
                 .collect();
             parquet_files.sort();
 

@@ -24,11 +24,12 @@ use crate::error::{BlazeError, Result};
 // ---------------------------------------------------------------------------
 
 /// Priority levels for fair scheduling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Priority {
     /// Weight 1
     Low,
     /// Weight 4
+    #[default]
     Normal,
     /// Weight 8
     High,
@@ -45,12 +46,6 @@ impl Priority {
             Priority::High => 8,
             Priority::Critical => 16,
         }
-    }
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Normal
     }
 }
 

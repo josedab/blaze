@@ -155,6 +155,7 @@ impl JoinOrderOptimizer {
     }
 
     /// Extract base relations and join conditions from a join tree.
+    #[allow(clippy::too_many_arguments)]
     fn extract_join_relations(
         &self,
         left: &LogicalPlan,

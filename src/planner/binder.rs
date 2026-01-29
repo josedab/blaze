@@ -231,8 +231,10 @@ impl Binder {
         };
 
         // Parse options
-        let mut options = CopyOptions::default();
-        options.header = true; // Default to include header for CSV
+        let mut options = CopyOptions {
+            header: true, // Default to include header for CSV
+            ..CopyOptions::default()
+        };
 
         for (key, value) in &copy.options {
             match key.to_lowercase().as_str() {
@@ -517,6 +519,7 @@ impl Binder {
             .collect()
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn replace_window_with_column(
         &self,
         expr: &LogicalExpr,

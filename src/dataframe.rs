@@ -477,24 +477,28 @@ impl Expr {
 
     // --- Arithmetic ---
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, other: Expr) -> Self {
         Self {
             sql: format!("({} + {})", self.sql, other.sql),
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, other: Expr) -> Self {
         Self {
             sql: format!("({} - {})", self.sql, other.sql),
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, other: Expr) -> Self {
         Self {
             sql: format!("({} * {})", self.sql, other.sql),
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn div(self, other: Expr) -> Self {
         Self {
             sql: format!("({} / {})", self.sql, other.sql),
@@ -515,6 +519,7 @@ impl Expr {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Self {
         Self {
             sql: format!("NOT ({})", self.sql),

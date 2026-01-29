@@ -559,6 +559,7 @@ impl HashJoinOperator {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_result_batch(
         left_batch: &RecordBatch,
         hash_table: &JoinHashTable,
@@ -1121,10 +1122,10 @@ impl SortMergeJoinOperator {
                     }
 
                     // Output cartesian product of matching ranges
-                    for li in i..left_end {
-                        let l_row = left_sorted[li];
-                        for rj in j..right_end {
-                            let r_row = right_sorted[rj];
+                    for left_sorted_item in left_sorted.iter().take(left_end).skip(i) {
+                        let l_row = *left_sorted_item;
+                        for right_sorted_item in right_sorted.iter().take(right_end).skip(j) {
+                            let r_row = *right_sorted_item;
                             match join_type {
                                 JoinType::Inner
                                 | JoinType::Left
@@ -3183,8 +3184,8 @@ impl WindowOperator {
 
         if order_by.is_empty() {
             // Without ORDER BY, all rows have rank 1
-            for idx in 0..num_rows {
-                result[idx] = 1;
+            for item in result.iter_mut().take(num_rows) {
+                *item = 1;
             }
             return Ok(Arc::new(Int64Array::from(result)));
         }
@@ -3237,8 +3238,8 @@ impl WindowOperator {
         let mut result = vec![0i64; num_rows];
 
         if order_by.is_empty() {
-            for idx in 0..num_rows {
-                result[idx] = 1;
+            for item in result.iter_mut().take(num_rows) {
+                *item = 1;
             }
             return Ok(Arc::new(Int64Array::from(result)));
         }
