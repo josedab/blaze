@@ -59,7 +59,7 @@ impl DuckDbDialectConverter {
 
                 if !type_name.is_empty() && !buffer.is_empty() {
                     // Find the expression to cast (simple heuristic: take last token)
-                    let expr = buffer.trim().split_whitespace().last().unwrap_or("");
+                    let expr = buffer.split_whitespace().last().unwrap_or("");
                     let prefix_len = buffer.len() - expr.len();
                     result.push_str(&buffer[..prefix_len]);
                     result.push_str(&format!("CAST({} AS {})", expr, type_name.to_uppercase()));
@@ -85,7 +85,7 @@ impl DuckDbDialectConverter {
         if let Some(pos) = lower.find("create or replace table") {
             // Extract table name
             let after = &sql[pos + 23..];
-            if let Some(table_name) = after.trim().split_whitespace().next() {
+            if let Some(table_name) = after.split_whitespace().next() {
                 let create_clause = &sql[pos..];
                 let drop = format!("DROP TABLE IF EXISTS {};\n", table_name);
                 let create = create_clause.replace("CREATE OR REPLACE TABLE", "CREATE TABLE");

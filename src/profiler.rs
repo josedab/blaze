@@ -530,14 +530,15 @@ fn analyze_operator_for_suggestions(
     }
 
     // Hash join with high memory
-    if stats.operator_name.contains("HashJoin") {
-        if stats.peak_memory_bytes > 500 * 1024 * 1024 {
-            suggestions.push(OptimizationSuggestion::new(
-                "Hash join using high memory - consider reducing input size or using sort-merge join",
-                "Medium",
-                format!("Hash join using {} MB", stats.peak_memory_bytes / 1024 / 1024),
-            ));
-        }
+    if stats.operator_name.contains("HashJoin") && stats.peak_memory_bytes > 500 * 1024 * 1024 {
+        suggestions.push(OptimizationSuggestion::new(
+            "Hash join using high memory - consider reducing input size or using sort-merge join",
+            "Medium",
+            format!(
+                "Hash join using {} MB",
+                stats.peak_memory_bytes / 1024 / 1024
+            ),
+        ));
     }
 
     // High memory operators in general
@@ -553,14 +554,14 @@ fn analyze_operator_for_suggestions(
     }
 
     // Aggregate on many groups
-    if stats.operator_name.contains("Aggregate") || stats.operator_name.contains("GroupBy") {
-        if stats.rows_output > 100_000 {
-            suggestions.push(OptimizationSuggestion::new(
-                "Aggregation producing many groups - consider filtering or reducing cardinality",
-                "Low",
-                format!("Producing {} groups", stats.rows_output),
-            ));
-        }
+    if (stats.operator_name.contains("Aggregate") || stats.operator_name.contains("GroupBy"))
+        && stats.rows_output > 100_000
+    {
+        suggestions.push(OptimizationSuggestion::new(
+            "Aggregation producing many groups - consider filtering or reducing cardinality",
+            "Low",
+            format!("Producing {} groups", stats.rows_output),
+        ));
     }
 
     // Recursively analyze children
@@ -849,6 +850,12 @@ impl CardinalityAnnotation {
 /// Collects cardinality annotations across a query plan.
 pub struct CardinalityAnnotator {
     annotations: Vec<CardinalityAnnotation>,
+}
+
+impl Default for CardinalityAnnotator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CardinalityAnnotator {

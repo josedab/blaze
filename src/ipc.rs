@@ -242,13 +242,7 @@ pub fn handle_request(conn: &Connection, request: &IpcRequest) -> (IpcResponseMe
 /// Process a single connection stream (e.g., from a Unix domain socket).
 /// Reads requests, handles them, and writes responses until the stream closes.
 pub fn serve_connection(conn: &Connection, mut stream: impl Read + Write) -> Result<()> {
-    loop {
-        // Read request
-        let request_data = match read_message(&mut stream) {
-            Ok(data) => data,
-            Err(_) => break, // Connection closed
-        };
-
+    while let Ok(request_data) = read_message(&mut stream) {
         let request: IpcRequest = serde_json::from_slice(&request_data)
             .map_err(|e| BlazeError::invalid_argument(format!("Invalid IPC request: {}", e)))?;
 

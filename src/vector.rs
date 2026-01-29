@@ -961,6 +961,7 @@ impl VectorIndex for IvfIndex {
 pub struct ProductQuantizer {
     dimensions: usize,
     num_subspaces: usize,
+    #[allow(dead_code)] // TODO: use for encoding validation
     bits_per_code: usize,
     sub_dim: usize,
     num_codes: usize,
@@ -1212,11 +1213,11 @@ impl HybridSearchEngine {
             None => return false,
         };
         match filter {
-            MetadataFilter::Eq(key, value) => meta.get(key).map_or(false, |v| v == value),
+            MetadataFilter::Eq(key, value) => meta.get(key) == Some(value),
             MetadataFilter::Range(key, min, max) => meta
                 .get(key)
                 .and_then(|v| v.parse::<f64>().ok())
-                .map_or(false, |v| v >= *min && v <= *max),
+                .is_some_and(|v| v >= *min && v <= *max),
             MetadataFilter::And(filters) => {
                 filters.iter().all(|f| Self::matches_filter(Some(meta), f))
             }
@@ -1443,6 +1444,12 @@ struct VectorIndexEntry {
 impl std::fmt::Debug for dyn VectorIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "VectorIndex")
+    }
+}
+
+impl Default for VectorIndexManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

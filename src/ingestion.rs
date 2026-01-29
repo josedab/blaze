@@ -109,7 +109,7 @@ pub struct FlushResult {
 // ---------------------------------------------------------------------------
 
 /// Statistics for the ingestion pipeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IngestionStats {
     /// Total rows ingested since pipeline creation.
     pub total_rows_ingested: u64,
@@ -127,21 +127,6 @@ pub struct IngestionStats {
     pub last_flush_time: Option<Instant>,
     /// Average flush duration in microseconds.
     pub avg_flush_duration_us: u64,
-}
-
-impl Default for IngestionStats {
-    fn default() -> Self {
-        Self {
-            total_rows_ingested: 0,
-            total_bytes_ingested: 0,
-            total_flushes: 0,
-            total_compactions: 0,
-            buffer_rows: 0,
-            buffer_bytes: 0,
-            last_flush_time: None,
-            avg_flush_duration_us: 0,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +623,7 @@ pub trait SourceConnector: Send + Sync {
 pub struct CsvSourceConnector {
     path: String,
     schema: Schema,
+    #[allow(dead_code)] // TODO: use config for batch_size, delimiter settings
     config: SourceConnectorConfig,
     exhausted: bool,
 }
@@ -742,6 +728,12 @@ impl ConnectorRegistry {
     /// List all registered connector names.
     pub fn list(&self) -> Vec<&str> {
         self.connectors.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+impl Default for ConnectorRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1136,6 +1128,12 @@ impl TransformPipeline {
                 )))
             }
         }
+    }
+}
+
+impl Default for TransformPipeline {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -2863,7 +2863,9 @@ impl ObjectStore for LocalFileStore {
                 .map_err(|e| BlazeError::execution(format!("Cannot list {}: {e}", dir.display())))?
             {
                 let entry = entry.map_err(|e| BlazeError::execution(e.to_string()))?;
-                let meta = entry.metadata().map_err(|e| BlazeError::execution(e.to_string()))?;
+                let meta = entry
+                    .metadata()
+                    .map_err(|e| BlazeError::execution(e.to_string()))?;
                 if meta.is_file() {
                     results.push(ObjectMeta {
                         path: entry.path().to_string_lossy().to_string(),
@@ -2894,8 +2896,7 @@ impl ObjectStore for LocalFileStore {
     }
 
     fn read(&self, path: &str) -> Result<Vec<u8>> {
-        std::fs::read(path)
-            .map_err(|e| BlazeError::execution(format!("Cannot read {path}: {e}")))
+        std::fs::read(path).map_err(|e| BlazeError::execution(format!("Cannot read {path}: {e}")))
     }
 
     fn store_type(&self) -> &str {
@@ -2954,10 +2955,7 @@ impl HivePartitionDiscovery {
                     .or_default()
                     .push(path.clone());
             } else {
-                partitions
-                    .entry(vec![])
-                    .or_default()
-                    .push(path.clone());
+                partitions.entry(vec![]).or_default().push(path.clone());
             }
         }
 
@@ -2968,11 +2966,7 @@ impl HivePartitionDiscovery {
     }
 
     /// Prune partitions based on predicate: `column = value`.
-    pub fn prune(
-        partitions: &[HivePartition],
-        column: &str,
-        value: &str,
-    ) -> Vec<HivePartition> {
+    pub fn prune(partitions: &[HivePartition], column: &str, value: &str) -> Vec<HivePartition> {
         partitions
             .iter()
             .filter(|p| {
@@ -3064,7 +3058,12 @@ mod federation_new_tests {
         std::fs::write(tmp.path().join("b.parquet"), b"data22").unwrap();
 
         let store = LocalFileStore::new(tmp.path().parent().unwrap().to_string_lossy().to_string());
-        let dir_name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let dir_name = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let objects = store.list(&dir_name).unwrap();
         assert_eq!(objects.len(), 2);
     }
@@ -3159,8 +3158,18 @@ mod federation_new_tests {
     #[test]
     fn test_scan_task_single_worker() {
         let mut tasks = vec![
-            ScanTask { id: 0, path: "a".into(), size_bytes: 1000, worker_id: None },
-            ScanTask { id: 1, path: "b".into(), size_bytes: 2000, worker_id: None },
+            ScanTask {
+                id: 0,
+                path: "a".into(),
+                size_bytes: 1000,
+                worker_id: None,
+            },
+            ScanTask {
+                id: 1,
+                path: "b".into(),
+                size_bytes: 2000,
+                worker_id: None,
+            },
         ];
         let scheduler = ParallelScanScheduler::new(1);
         scheduler.schedule(&mut tasks);
