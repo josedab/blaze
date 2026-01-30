@@ -274,6 +274,176 @@ impl fmt::Debug for AggregateUdf {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Table-Valued Functions (TVFs)
+// ---------------------------------------------------------------------------
+
+/// A table-valued function that returns a set of rows.
+pub struct TableFunction {
+    /// Function name
+    pub name: String,
+    /// Description for the UDF catalog
+    pub description: String,
+    /// Input argument types
+    pub arg_types: Vec<DataType>,
+    /// Output schema (columns produced)
+    pub output_schema: crate::types::Schema,
+    /// The function implementation: args → Vec<RecordBatch>
+    pub func: Arc<dyn Fn(&[crate::types::ScalarValue]) -> Result<Vec<RecordBatch>> + Send + Sync>,
+}
+
+impl TableFunction {
+    /// Create a new table-valued function.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        arg_types: Vec<DataType>,
+        output_schema: crate::types::Schema,
+        func: impl Fn(&[crate::types::ScalarValue]) -> Result<Vec<RecordBatch>> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            arg_types,
+            output_schema,
+            func: Arc::new(func),
+        }
+    }
+
+    /// Execute the TVF with the given arguments.
+    pub fn execute(&self, args: &[crate::types::ScalarValue]) -> Result<Vec<RecordBatch>> {
+        (self.func)(args)
+    }
+}
+
+impl fmt::Debug for TableFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TableFunction")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("arg_types", &self.arg_types)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UDF Catalog (discovery and documentation)
+// ---------------------------------------------------------------------------
+
+/// Entry in the UDF catalog for documentation purposes.
+#[derive(Debug, Clone)]
+pub struct UdfCatalogEntry {
+    pub name: String,
+    pub kind: UdfKind,
+    pub description: String,
+    pub arg_types: Vec<DataType>,
+    pub return_type: Option<DataType>,
+    pub example: Option<String>,
+}
+
+/// Kind of UDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdfKind {
+    Scalar,
+    Aggregate,
+    Table,
+}
+
+impl fmt::Display for UdfKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UdfKind::Scalar => write!(f, "SCALAR"),
+            UdfKind::Aggregate => write!(f, "AGGREGATE"),
+            UdfKind::Table => write!(f, "TABLE"),
+        }
+    }
+}
+
+/// Catalog of all registered UDFs for discovery and documentation.
+pub struct UdfCatalog {
+    entries: RwLock<Vec<UdfCatalogEntry>>,
+    table_functions: RwLock<HashMap<String, Arc<TableFunction>>>,
+}
+
+impl UdfCatalog {
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(Vec::new()),
+            table_functions: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a catalog entry.
+    pub fn register(&self, entry: UdfCatalogEntry) {
+        self.entries.write().unwrap().push(entry);
+    }
+
+    /// Register a table function.
+    pub fn register_table_function(&self, tvf: TableFunction) {
+        let name = tvf.name.to_uppercase();
+        self.register(UdfCatalogEntry {
+            name: name.clone(),
+            kind: UdfKind::Table,
+            description: tvf.description.clone(),
+            arg_types: tvf.arg_types.clone(),
+            return_type: None,
+            example: None,
+        });
+        self.table_functions
+            .write()
+            .unwrap()
+            .insert(name, Arc::new(tvf));
+    }
+
+    /// Get a table function by name.
+    pub fn get_table_function(&self, name: &str) -> Option<Arc<TableFunction>> {
+        self.table_functions
+            .read()
+            .unwrap()
+            .get(&name.to_uppercase())
+            .cloned()
+    }
+
+    /// List all catalog entries.
+    pub fn list(&self) -> Vec<UdfCatalogEntry> {
+        self.entries.read().unwrap().clone()
+    }
+
+    /// Search catalog by name pattern (case-insensitive substring).
+    pub fn search(&self, pattern: &str) -> Vec<UdfCatalogEntry> {
+        let pattern = pattern.to_uppercase();
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|e| e.name.contains(&pattern))
+            .cloned()
+            .collect()
+    }
+
+    /// List entries by kind.
+    pub fn list_by_kind(&self, kind: UdfKind) -> Vec<UdfCatalogEntry> {
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == kind)
+            .cloned()
+            .collect()
+    }
+
+    /// Total number of registered functions.
+    pub fn count(&self) -> usize {
+        self.entries.read().unwrap().len()
+    }
+}
+
+impl Default for UdfCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +656,84 @@ mod tests {
         registry.deregister_aggregate("agg_a").unwrap();
         assert!(!registry.has_aggregate("agg_a"));
         assert_eq!(registry.list_aggregate_udfs().len(), 1);
+    }
+
+    // -- Table-Valued Function tests ------------------------------------------
+
+    #[test]
+    fn test_table_function() {
+        let schema =
+            crate::types::Schema::new(vec![crate::types::Field::new("n", DataType::Int64, false)]);
+        let tvf = TableFunction::new(
+            "generate_series",
+            "Generate a series of integers",
+            vec![DataType::Int64],
+            schema,
+            |args| {
+                let count = match &args[0] {
+                    crate::types::ScalarValue::Int64(Some(n)) => *n,
+                    _ => 10,
+                };
+                let arr = Arc::new(Int64Array::from((0..count).collect::<Vec<_>>()));
+                let arrow_schema = Arc::new(arrow::datatypes::Schema::new(vec![
+                    arrow::datatypes::Field::new("n", arrow::datatypes::DataType::Int64, false),
+                ]));
+                Ok(vec![RecordBatch::try_new(arrow_schema, vec![arr])?])
+            },
+        );
+
+        let result = tvf
+            .execute(&[crate::types::ScalarValue::Int64(Some(5))])
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_rows(), 5);
+    }
+
+    // -- UDF Catalog tests ----------------------------------------------------
+
+    #[test]
+    fn test_udf_catalog_register_and_search() {
+        let catalog = UdfCatalog::new();
+        catalog.register(UdfCatalogEntry {
+            name: "MY_FUNC".into(),
+            kind: UdfKind::Scalar,
+            description: "A test function".into(),
+            arg_types: vec![DataType::Int64],
+            return_type: Some(DataType::Int64),
+            example: Some("SELECT MY_FUNC(42)".into()),
+        });
+        catalog.register(UdfCatalogEntry {
+            name: "OTHER_FUNC".into(),
+            kind: UdfKind::Aggregate,
+            description: "Another function".into(),
+            arg_types: vec![],
+            return_type: Some(DataType::Float64),
+            example: None,
+        });
+
+        assert_eq!(catalog.count(), 2);
+        assert_eq!(catalog.search("MY").len(), 1);
+        assert_eq!(catalog.list_by_kind(UdfKind::Scalar).len(), 1);
+        assert_eq!(catalog.list_by_kind(UdfKind::Aggregate).len(), 1);
+    }
+
+    #[test]
+    fn test_udf_catalog_table_function() {
+        let catalog = UdfCatalog::new();
+        let schema =
+            crate::types::Schema::new(vec![crate::types::Field::new("x", DataType::Int64, false)]);
+        let tvf = TableFunction::new("gen", "Generate values", vec![], schema, |_| Ok(Vec::new()));
+        catalog.register_table_function(tvf);
+
+        assert_eq!(catalog.count(), 1);
+        assert!(catalog.get_table_function("gen").is_some());
+        assert!(catalog.get_table_function("GEN").is_some());
+    }
+
+    #[test]
+    fn test_udf_kind_display() {
+        assert_eq!(format!("{}", UdfKind::Scalar), "SCALAR");
+        assert_eq!(format!("{}", UdfKind::Aggregate), "AGGREGATE");
+        assert_eq!(format!("{}", UdfKind::Table), "TABLE");
     }
 }
