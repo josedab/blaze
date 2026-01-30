@@ -437,7 +437,9 @@ impl PhysicalPlanner {
                     .iter()
                     .position(|f| f.name() == &col.name)
                     .ok_or_else(|| {
-                        BlazeError::analysis(format!("Column '{}' not found in schema", col.name))
+                        let available: Vec<String> =
+                            schema.fields().iter().map(|f| f.name().clone()).collect();
+                        BlazeError::schema_with_suggestions(&col.name, &available, "Column")
                     })?;
 
                 Ok(Arc::new(ColumnExpr::new(col.name.clone(), idx)))
@@ -715,7 +717,12 @@ impl PhysicalPlanner {
                     .iter()
                     .position(|f| f.name() == &col.name)
                     .ok_or_else(|| {
-                        BlazeError::analysis(format!("Column '{}' not found in schema", col.name))
+                        let available: Vec<String> = projected_schema
+                            .fields()
+                            .iter()
+                            .map(|f| f.name().clone())
+                            .collect();
+                        BlazeError::schema_with_suggestions(&col.name, &available, "Column")
                     })?;
 
                 // Map to original index using projection array
