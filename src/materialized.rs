@@ -1869,16 +1869,10 @@ impl JoinDeltaComputer {
         match self.join_type {
             JoinDeltaType::Inner => {
                 // Each left insert could match all right rows (worst case)
-                (
-                    left_inserts * right_row_count / 10_usize.max(1),
-                    left_deletes,
-                )
+                (left_inserts * right_row_count / 10_usize, left_deletes)
             }
             JoinDeltaType::LeftOuter => (left_inserts, left_deletes),
-            JoinDeltaType::RightOuter => (
-                left_inserts * right_row_count / 10_usize.max(1),
-                left_deletes,
-            ),
+            JoinDeltaType::RightOuter => (left_inserts * right_row_count / 10_usize, left_deletes),
             JoinDeltaType::FullOuter => (left_inserts, left_deletes),
         }
     }
@@ -1918,6 +1912,12 @@ pub enum DeltaStageType {
     Project,
     Aggregate,
     Join,
+}
+
+impl Default for StreamingDeltaPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StreamingDeltaPipeline {
@@ -1997,6 +1997,12 @@ pub enum TriggerType {
 pub struct TriggerManager {
     rules: Vec<RefreshTriggerRule>,
     pending_deltas: std::collections::HashMap<String, usize>,
+}
+
+impl Default for TriggerManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TriggerManager {
@@ -2188,6 +2194,12 @@ pub struct RewriteResult {
     pub original_tables: Vec<String>,
     pub rewrite_target: Option<String>,
     pub estimated_speedup: f64,
+}
+
+impl Default for MaterializedViewRewriter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MaterializedViewRewriter {
@@ -2439,10 +2451,9 @@ impl MultiTableJoinDelta {
         } else {
             1.0 / self.join_columns.len() as f64
         };
-        let rows_to_add =
-            ((left_changes as f64 * right_table_size as f64 * selectivity)
-                + (right_changes as f64 * left_table_size as f64 * selectivity))
-                as usize;
+        let rows_to_add = ((left_changes as f64 * right_table_size as f64 * selectivity)
+            + (right_changes as f64 * left_table_size as f64 * selectivity))
+            as usize;
         let rows_to_remove = (rows_to_add as f64 * 0.1) as usize; // estimate 10% removals
         let estimated_cost = (left_changes + right_changes) as f64
             * (left_table_size + right_table_size) as f64
@@ -2484,14 +2495,15 @@ impl StalenessMonitor {
 
     /// Mark a view as freshly refreshed.
     pub fn record_refresh(&mut self, view_name: &str) {
-        let entry = self.views.entry(view_name.to_string()).or_insert_with(|| {
-            ViewStaleness {
+        let entry = self
+            .views
+            .entry(view_name.to_string())
+            .or_insert_with(|| ViewStaleness {
                 view_name: view_name.to_string(),
                 last_refresh: 0,
                 changes_since_refresh: 0,
                 is_stale: false,
-            }
-        });
+            });
         entry.last_refresh = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2502,14 +2514,15 @@ impl StalenessMonitor {
 
     /// Increment the change counter for a view.
     pub fn record_change(&mut self, view_name: &str) {
-        let entry = self.views.entry(view_name.to_string()).or_insert_with(|| {
-            ViewStaleness {
+        let entry = self
+            .views
+            .entry(view_name.to_string())
+            .or_insert_with(|| ViewStaleness {
                 view_name: view_name.to_string(),
                 last_refresh: 0,
                 changes_since_refresh: 0,
                 is_stale: false,
-            }
-        });
+            });
         entry.changes_since_refresh += 1;
     }
 
@@ -2554,7 +2567,8 @@ impl RefreshCostPredictor {
 
     /// Record an observation of refresh performance.
     pub fn record(&mut self, change_count: usize, full_ms: f64, incremental_ms: f64) {
-        self.observations.push((change_count, full_ms, incremental_ms));
+        self.observations
+            .push((change_count, full_ms, incremental_ms));
         self.recompute_threshold();
     }
 
@@ -2693,6 +2707,152 @@ impl CascadeRefreshCoordinator {
 impl Default for CascadeRefreshCoordinator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// View Staleness Report
+// ---------------------------------------------------------------------------
+
+/// Summary information about a single materialized view's staleness.
+#[derive(Debug, Clone)]
+pub struct ViewStalenessReport {
+    pub view_name: String,
+    pub source_tables: Vec<String>,
+    pub refresh_count: u64,
+    pub pending_changes: u64,
+    pub staleness_secs: Option<f64>,
+    pub is_stale: bool,
+    pub recommended_action: RefreshRecommendation,
+}
+
+/// Recommendation for how to refresh a view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshRecommendation {
+    NoAction,
+    IncrementalRefresh,
+    FullRefresh,
+}
+
+/// Generates staleness reports for all materialized views.
+pub struct StalenessReporter;
+
+impl StalenessReporter {
+    /// Generate reports for all views managed by a `MaterializedViewManager`.
+    pub fn report(
+        manager: &MaterializedViewManager,
+        staleness_tracker: &StalenessTracker,
+    ) -> Vec<ViewStalenessReport> {
+        let views = manager.list_views();
+        let trackers = manager.trackers.read();
+
+        views
+            .into_iter()
+            .filter_map(|name| {
+                let view = manager.get_view(&name)?;
+                let pending: u64 = view
+                    .source_tables()
+                    .iter()
+                    .map(|t| {
+                        trackers
+                            .get(t)
+                            .map(|tr| {
+                                if tr.has_pending_changes() {
+                                    tr.version()
+                                } else {
+                                    0
+                                }
+                            })
+                            .unwrap_or(0)
+                    })
+                    .sum();
+
+                let staleness_secs = staleness_tracker.staleness_secs(&name);
+                let is_stale = pending > 0;
+
+                let insert_only = view.source_tables().iter().all(|t| {
+                    trackers
+                        .get(t)
+                        .map(|tr| tr.is_insert_only())
+                        .unwrap_or(true)
+                });
+
+                let recommended_action = if !is_stale {
+                    RefreshRecommendation::NoAction
+                } else if insert_only {
+                    RefreshRecommendation::IncrementalRefresh
+                } else {
+                    RefreshRecommendation::FullRefresh
+                };
+
+                Some(ViewStalenessReport {
+                    view_name: name,
+                    source_tables: view.source_tables().to_vec(),
+                    refresh_count: view.refresh_count(),
+                    pending_changes: pending,
+                    staleness_secs,
+                    is_stale,
+                    recommended_action,
+                })
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Refresh Policy Enforcer
+// ---------------------------------------------------------------------------
+
+/// Enforces refresh policies by tracking view schedules and triggering refreshes.
+pub struct RefreshPolicyEnforcer {
+    policies: parking_lot::RwLock<HashMap<String, RefreshSchedule>>,
+    staleness: Arc<StalenessTracker>,
+}
+
+impl RefreshPolicyEnforcer {
+    pub fn new(staleness: Arc<StalenessTracker>) -> Self {
+        Self {
+            policies: parking_lot::RwLock::new(HashMap::new()),
+            staleness,
+        }
+    }
+
+    /// Set the refresh policy for a view.
+    pub fn set_policy(&self, view_name: impl Into<String>, schedule: RefreshSchedule) {
+        self.policies.write().insert(view_name.into(), schedule);
+    }
+
+    /// Remove the refresh policy for a view.
+    pub fn remove_policy(&self, view_name: &str) {
+        self.policies.write().remove(view_name);
+    }
+
+    /// Get the refresh policy for a view.
+    pub fn get_policy(&self, view_name: &str) -> Option<RefreshSchedule> {
+        self.policies.read().get(view_name).cloned()
+    }
+
+    /// Return view names that need refresh based on their policies.
+    pub fn views_needing_refresh(&self) -> Vec<String> {
+        let policies = self.policies.read();
+        policies
+            .iter()
+            .filter(|(name, schedule)| self.staleness.needs_refresh(name, schedule))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Enforce policies: return names of views refreshed.
+    pub fn enforce(&self, manager: &MaterializedViewManager) -> Result<Vec<String>> {
+        let to_refresh = self.views_needing_refresh();
+        let mut refreshed = Vec::new();
+        for name in to_refresh {
+            let start = std::time::Instant::now();
+            manager.refresh_view(&name)?;
+            self.staleness.record_refresh(&name, start.elapsed());
+            refreshed.push(name);
+        }
+        Ok(refreshed)
     }
 }
 
@@ -4031,6 +4191,69 @@ mod tests {
         assert!(coord.would_create_cycle("a", "c"));
         assert!(!coord.would_create_cycle("d", "a"));
     }
+
+    #[test]
+    fn test_staleness_reporter() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE events (id BIGINT, value BIGINT)")
+            .unwrap();
+        conn.execute("INSERT INTO events VALUES (1, 100)").unwrap();
+
+        let manager = MaterializedViewManager::new(
+            conn.catalog_list(),
+            crate::executor::ExecutionContext::new().with_catalog_list(conn.catalog_list()),
+        );
+
+        manager
+            .create_view(
+                "event_summary",
+                "SELECT id, value FROM events",
+                vec!["events".to_string()],
+            )
+            .unwrap();
+
+        let staleness = StalenessTracker::new();
+        let reports = StalenessReporter::report(&manager, &staleness);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].view_name, "event_summary");
+        assert_eq!(reports[0].refresh_count, 1);
+    }
+
+    #[test]
+    fn test_refresh_recommendation_no_action() {
+        let report = ViewStalenessReport {
+            view_name: "v".into(),
+            source_tables: vec!["t".into()],
+            refresh_count: 1,
+            pending_changes: 0,
+            staleness_secs: Some(0.0),
+            is_stale: false,
+            recommended_action: RefreshRecommendation::NoAction,
+        };
+        assert_eq!(report.recommended_action, RefreshRecommendation::NoAction);
+    }
+
+    #[test]
+    fn test_refresh_policy_enforcer_set_and_get() {
+        let staleness = Arc::new(StalenessTracker::new());
+        let enforcer = RefreshPolicyEnforcer::new(staleness);
+        enforcer.set_policy("v1", RefreshSchedule::OnCommit);
+        assert_eq!(enforcer.get_policy("v1"), Some(RefreshSchedule::OnCommit));
+        enforcer.remove_policy("v1");
+        assert!(enforcer.get_policy("v1").is_none());
+    }
+
+    #[test]
+    fn test_refresh_policy_enforcer_views_needing_refresh() {
+        let staleness = Arc::new(StalenessTracker::new());
+        let enforcer = RefreshPolicyEnforcer::new(staleness.clone());
+
+        enforcer.set_policy("v1", RefreshSchedule::OnCommit);
+        staleness.record_source_change("v1");
+
+        let needing = enforcer.views_needing_refresh();
+        assert!(needing.contains(&"v1".to_string()));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4045,6 +4268,7 @@ pub struct AutoRefreshManager {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // TODO: implement auto-refresh scheduling
 struct ViewRefreshConfig {
     name: String,
     query: String,
@@ -4200,7 +4424,7 @@ impl QueryRewriter {
             }
 
             // Check if query is a subset (same tables with extra WHERE clause)
-            if normalized_sql.contains(&normalized_view_query.split("where").next().unwrap_or("")) {
+            if normalized_sql.contains(normalized_view_query.split("where").next().unwrap_or("")) {
                 // This is a simplification - a full implementation would parse the SQL
                 // and check if the query can be answered from the materialized view
                 if normalized_sql.contains("where") && !normalized_view_query.contains("where") {
