@@ -1,0 +1,61 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug CLI",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--bin=blaze", "--package=blaze"],
+                "filter": {
+                    "name": "blaze",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug CLI (with SQL)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--bin=blaze", "--package=blaze"],
+                "filter": {
+                    "name": "blaze",
+                    "kind": "bin"
+                }
+            },
+            "args": ["-c", "SELECT 1 + 1 AS result"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug Unit Tests",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["test", "--no-run", "--lib", "--package=blaze"],
+                "filter": {
+                    "name": "blaze",
+                    "kind": "lib"
+                }
+            },
+            "args": ["--nocapture"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug Basic Queries Example",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--example=basic_queries", "--package=blaze"],
+                "filter": {
+                    "name": "basic_queries",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

@@ -1,0 +1,21 @@
+id,product,category,amount,quantity,region,sale_date
+1,Laptop,Electronics,999.99,2,North,2024-01-15
+2,Headphones,Electronics,79.99,5,South,2024-01-16
+3,Desk Chair,Furniture,249.99,1,East,2024-01-17
+4,Monitor,Electronics,349.99,3,West,2024-01-18
+5,Keyboard,Electronics,129.99,4,North,2024-01-20
+6,Bookshelf,Furniture,189.99,2,South,2024-01-22
+7,Mouse,Electronics,49.99,10,East,2024-01-25
+8,Standing Desk,Furniture,599.99,1,West,2024-02-01
+9,Webcam,Electronics,89.99,3,North,2024-02-05
+10,Office Lamp,Furniture,39.99,6,South,2024-02-10
+11,Tablet,Electronics,449.99,2,East,2024-02-14
+12,Filing Cabinet,Furniture,159.99,1,West,2024-02-18
+13,USB Hub,Electronics,29.99,8,North,2024-02-20
+14,Ergonomic Chair,Furniture,799.99,1,South,2024-03-01
+15,Laptop Stand,Electronics,59.99,4,East,2024-03-05
+16,Whiteboard,Furniture,89.99,2,West,2024-03-10
+17,Charger,Electronics,24.99,12,North,2024-03-15
+18,Desk Organizer,Furniture,34.99,5,South,2024-03-20
+19,External SSD,Electronics,119.99,3,East,2024-03-25
+20,Monitor Arm,Furniture,69.99,2,West,2024-03-30

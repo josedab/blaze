@@ -1302,6 +1302,78 @@ ORDER BY revenue DESC`
         // Hook into table registration to update schema explorer
         const _originalRegister = typeof registerSampleData === 'function' ? registerSampleData : null;
 
+        // -------------------------------------------------------------------
+        // Query History
+        // -------------------------------------------------------------------
+        const queryHistory = [];
+        let historyIndex = -1;
+
+        function addToHistory(sql, duration, rowCount) {
+            queryHistory.unshift({
+                sql: sql.trim(),
+                timestamp: new Date().toLocaleTimeString(),
+                duration,
+                rowCount,
+            });
+            if (queryHistory.length > 50) queryHistory.pop();
+            historyIndex = -1;
+        }
+
+        function navigateHistory(direction) {
+            const editor = document.getElementById('sql-editor');
+            if (direction === 'up' && historyIndex < queryHistory.length - 1) {
+                historyIndex++;
+                editor.value = queryHistory[historyIndex].sql;
+            } else if (direction === 'down' && historyIndex > 0) {
+                historyIndex--;
+                editor.value = queryHistory[historyIndex].sql;
+            } else if (direction === 'down' && historyIndex === 0) {
+                historyIndex = -1;
+                editor.value = '';
+            }
+        }
+
+        // -------------------------------------------------------------------
+        // Keyboard Shortcuts
+        // -------------------------------------------------------------------
+        document.addEventListener('keydown', function(e) {
+            // Ctrl/Cmd + Enter: Run query
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                const runBtn = document.querySelector('.btn-primary');
+                if (runBtn) runBtn.click();
+            }
+            // Ctrl/Cmd + L: Clear results
+            if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+                e.preventDefault();
+                const resultsDiv = document.getElementById('results');
+                if (resultsDiv) resultsDiv.innerHTML = '';
+                document.getElementById('status-message').textContent = 'Cleared';
+            }
+            // Alt + Up/Down: Navigate query history
+            if (e.altKey && e.key === 'ArrowUp') {
+                e.preventDefault();
+                navigateHistory('up');
+            }
+            if (e.altKey && e.key === 'ArrowDown') {
+                e.preventDefault();
+                navigateHistory('down');
+            }
+        });
+
+        // Patch runQuery to record history
+        const _origRunQuery = typeof runQuery === 'function' ? runQuery : null;
+        if (_origRunQuery) {
+            window.runQuery = function() {
+                const editor = document.getElementById('sql-editor');
+                const sql = editor ? editor.value : '';
+                const start = performance.now();
+                _origRunQuery();
+                const duration = Math.round(performance.now() - start);
+                addToHistory(sql, duration, 0);
+            };
+        }
+
         // Initialize on load
         enhancedInit();
     </script>
