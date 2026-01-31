@@ -1,4 +1,4 @@
-.PHONY: build check test lint fmt doc bench bench-tpch clean release all setup fix quick watch bump-patch bump-minor bump-major examples
+.PHONY: build check test lint fmt doc bench bench-tpch clean release all setup fix quick watch bump-patch bump-minor bump-major examples ci
 
 # Default: format + test (always works for new contributors)
 all: fmt test
@@ -76,6 +76,13 @@ clean:
 examples:
 	cargo run --example basic_queries
 	cargo run --example advanced_queries
+
+# Run the same checks as CI (use before submitting a PR)
+ci: fmt-check lint-strict test test-all
+	@cargo clippy --features all-extensions -- -D warnings
+	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --quiet
+	@echo ""
+	@echo "✅ All CI checks passed locally!"
 
 # Run the CLI
 run:
