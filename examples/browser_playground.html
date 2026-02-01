@@ -378,6 +378,92 @@
             }
         }
     </style>
+    <!-- Monaco Editor CDN -->
+    <link rel="stylesheet" data-name="vs/editor/editor.main"
+          href="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/editor/editor.main.css">
+    <style>
+        /* Schema Explorer Sidebar */
+        .schema-sidebar {
+            width: 250px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+            padding: 0.5rem;
+            flex-shrink: 0;
+        }
+        .schema-sidebar h3 {
+            font-size: 0.85rem;
+            color: var(--accent-light);
+            padding: 0.5rem;
+            margin-bottom: 0.25rem;
+        }
+        .schema-table-item {
+            padding: 0.4rem 0.5rem;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+        .schema-table-item:hover { background: var(--bg-tertiary); }
+        .schema-table-item.expanded { background: var(--bg-tertiary); }
+        .schema-columns { padding-left: 1rem; }
+        .schema-column {
+            font-size: 0.8rem;
+            padding: 0.2rem 0.5rem;
+            color: var(--text-secondary);
+        }
+        .schema-column .col-type {
+            color: var(--accent-light);
+            font-size: 0.75rem;
+            margin-left: 0.25rem;
+        }
+
+        /* Share button */
+        .share-btn {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .share-btn:hover { background: var(--accent); }
+        .share-toast {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            background: var(--success);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            display: none;
+            z-index: 1000;
+            animation: fadeIn 0.3s;
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Layout with sidebar */
+        .main-with-sidebar {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        .main-content-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Monaco container */
+        #monaco-container {
+            width: 100%;
+            height: 200px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+    </style>
 </head>
 <body>
     <header>
@@ -392,6 +478,7 @@
                 <span class="kbd">Ctrl</span> + <span class="kbd">Enter</span> to run
             </span>
             <button class="btn btn-secondary" onclick="clearEditor()">Clear</button>
+            <button class="share-btn" onclick="shareQuery()">📋 Share</button>
             <button class="btn btn-primary" onclick="runQuery()">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M8 5v14l11-7z"/>
@@ -401,6 +488,21 @@
         </div>
     </header>
 
+    <!-- Share toast notification -->
+    <div class="share-toast" id="share-toast">✅ Query URL copied to clipboard!</div>
+
+    <div class="main-with-sidebar">
+        <!-- Schema Explorer Sidebar -->
+        <div class="schema-sidebar" id="schema-sidebar">
+            <h3>📊 Schema Explorer</h3>
+            <div id="schema-tree">
+                <p style="color: var(--text-secondary); font-size: 0.8rem; padding: 0.5rem;">
+                    Load data to see schemas
+                </p>
+            </div>
+        </div>
+
+        <div class="main-content-area">
     <main>
         <aside class="sidebar">
             <h2>Tables</h2>
@@ -433,6 +535,7 @@ ORDER BY salary DESC"></textarea>
             <div class="panel-header">
                 <span class="panel-title">Results</span>
                 <span id="result-count"></span>
+                <button class="btn btn-secondary" onclick="toggleChart()" style="font-size:0.75rem;padding:0.25rem 0.5rem;margin-left:auto;">📊 Chart</button>
             </div>
             <div class="results-container" id="results-container">
                 <div class="loading" id="loading" style="display: none;">
@@ -444,6 +547,14 @@ ORDER BY salary DESC"></textarea>
                         Run a query to see results here
                     </p>
                 </div>
+                <div id="chart-container" style="display:none;padding:1rem;background:var(--bg-secondary);border-radius:0.5rem;margin-top:0.5rem;">
+                    <canvas id="bar-chart" style="width:100%;height:200px;"></canvas>
+                </div>
+            </div>
+            <!-- Drag-drop zone -->
+            <div id="drop-zone" style="border:2px dashed var(--border);border-radius:0.5rem;padding:1rem;margin-top:0.5rem;text-align:center;color:var(--text-secondary);font-size:0.85rem;cursor:pointer;transition:all 0.2s;" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleFileDrop(event)" onclick="document.getElementById('file-input').click()">
+                📁 Drag & drop CSV or JSON files here to load as tables
+                <input type="file" id="file-input" accept=".csv,.json,.tsv" style="display:none" onchange="handleFileSelect(event)">
             </div>
             <div class="status-bar">
                 <span id="status-message">Ready</span>
@@ -896,8 +1007,305 @@ ORDER BY revenue DESC`
             return html;
         }
 
+        // Share query via URL (enhanced: includes data hash for small datasets)
+        function shareQuery() {
+            const sql = document.getElementById('sql-editor').value.trim();
+            if (!sql) return;
+
+            // Compress SQL for URL
+            const encoded = btoa(unescape(encodeURIComponent(sql)));
+            const url = window.location.origin + window.location.pathname + '#q=' + encoded;
+
+            // Include small table data if total < 2KB
+            let dataParam = '';
+            if (typeof tables !== 'undefined' && Object.keys(tables).length > 0) {
+                try {
+                    const dataJson = JSON.stringify(tables);
+                    if (dataJson.length < 2000) {
+                        const dataEncoded = btoa(unescape(encodeURIComponent(dataJson)));
+                        dataParam = '&d=' + dataEncoded;
+                    }
+                } catch (e) { /* skip data encoding on error */ }
+            }
+
+            const fullUrl = url + dataParam;
+
+            navigator.clipboard.writeText(fullUrl).then(() => {
+                const toast = document.getElementById('share-toast');
+                toast.style.display = 'block';
+                setTimeout(() => { toast.style.display = 'none'; }, 2000);
+            }).catch(() => {
+                prompt('Copy this URL to share:', fullUrl);
+            });
+
+            window.history.replaceState({}, '', '#q=' + encoded + dataParam);
+        }
+
+        // Load query and data from URL hash on startup
+        function loadFromUrl() {
+            // Support both ?q= (legacy) and #q= (new compressed) formats
+            const params = new URLSearchParams(window.location.search);
+            const legacyQuery = params.get('q');
+            if (legacyQuery) {
+                document.getElementById('sql-editor').value = decodeURIComponent(legacyQuery);
+                return;
+            }
+
+            const hash = window.location.hash.substring(1);
+            if (!hash) return;
+
+            const hashParams = new URLSearchParams(hash);
+            const encodedQuery = hashParams.get('q');
+            if (encodedQuery) {
+                try {
+                    const sql = decodeURIComponent(escape(atob(encodedQuery)));
+                    document.getElementById('sql-editor').value = sql;
+                } catch (e) { /* invalid base64 */ }
+            }
+
+            const encodedData = hashParams.get('d');
+            if (encodedData) {
+                try {
+                    const dataJson = decodeURIComponent(escape(atob(encodedData)));
+                    const data = JSON.parse(dataJson);
+                    if (typeof tables !== 'undefined') {
+                        Object.assign(tables, data);
+                    }
+                } catch (e) { /* invalid data */ }
+            }
+        }
+
+        // --- Drag-and-drop file loading ---
+
+        function handleDragOver(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.style.borderColor = 'var(--accent)';
+            event.currentTarget.style.background = 'rgba(124, 58, 237, 0.1)';
+        }
+
+        function handleDragLeave(event) {
+            event.preventDefault();
+            event.currentTarget.style.borderColor = 'var(--border)';
+            event.currentTarget.style.background = 'transparent';
+        }
+
+        function handleFileDrop(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.currentTarget.style.borderColor = 'var(--border)';
+            event.currentTarget.style.background = 'transparent';
+
+            const files = event.dataTransfer.files;
+            for (const file of files) {
+                loadFile(file);
+            }
+        }
+
+        function handleFileSelect(event) {
+            const files = event.target.files;
+            for (const file of files) {
+                loadFile(file);
+            }
+        }
+
+        function loadFile(file) {
+            const reader = new FileReader();
+            const tableName = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_]/g, '_');
+
+            reader.onload = function(e) {
+                const content = e.target.result;
+                try {
+                    if (file.name.endsWith('.json')) {
+                        const data = JSON.parse(content);
+                        if (Array.isArray(data)) {
+                            if (typeof tables !== 'undefined') {
+                                tables[tableName] = data;
+                            }
+                            document.getElementById('status-message').textContent =
+                                `Loaded ${tableName} (${data.length} rows) from ${file.name}`;
+                        }
+                    } else if (file.name.endsWith('.csv') || file.name.endsWith('.tsv')) {
+                        const delimiter = file.name.endsWith('.tsv') ? '\t' : ',';
+                        const rows = parseCSV(content, delimiter);
+                        if (typeof tables !== 'undefined') {
+                            tables[tableName] = rows;
+                        }
+                        document.getElementById('status-message').textContent =
+                            `Loaded ${tableName} (${rows.length} rows) from ${file.name}`;
+                    }
+                    if (typeof updateSchemaExplorer === 'function') {
+                        updateSchemaExplorer();
+                    }
+                } catch (err) {
+                    document.getElementById('status-message').textContent =
+                        `Error loading ${file.name}: ${err.message}`;
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function parseCSV(text, delimiter) {
+            const lines = text.trim().split('\n');
+            if (lines.length < 2) return [];
+
+            const headers = lines[0].split(delimiter).map(h => h.trim().replace(/"/g, ''));
+            const rows = [];
+
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(delimiter).map(v => v.trim().replace(/"/g, ''));
+                const row = {};
+                headers.forEach((h, idx) => {
+                    const val = values[idx] || '';
+                    const num = Number(val);
+                    row[h] = val !== '' && !isNaN(num) ? num : val;
+                });
+                rows.push(row);
+            }
+            return rows;
+        }
+
+        // --- Simple inline bar chart ---
+
+        let lastResults = null;
+
+        function toggleChart() {
+            const container = document.getElementById('chart-container');
+            if (container.style.display === 'none') {
+                container.style.display = 'block';
+                renderChart();
+            } else {
+                container.style.display = 'none';
+            }
+        }
+
+        function renderChart() {
+            const canvas = document.getElementById('bar-chart');
+            if (!canvas || !lastResults || lastResults.length === 0) return;
+
+            const ctx = canvas.getContext('2d');
+            const width = canvas.parentElement.clientWidth - 32;
+            const height = 200;
+            canvas.width = width;
+            canvas.height = height;
+
+            ctx.clearRect(0, 0, width, height);
+
+            // Find first string column (labels) and first numeric column (values)
+            const keys = Object.keys(lastResults[0]);
+            let labelKey = null;
+            let valueKey = null;
+
+            for (const key of keys) {
+                if (labelKey === null && typeof lastResults[0][key] === 'string') {
+                    labelKey = key;
+                }
+                if (valueKey === null && typeof lastResults[0][key] === 'number') {
+                    valueKey = key;
+                }
+            }
+
+            if (!valueKey) {
+                ctx.fillStyle = '#a0a0a0';
+                ctx.font = '14px sans-serif';
+                ctx.fillText('No numeric data to chart', width / 2 - 80, height / 2);
+                return;
+            }
+
+            const labels = lastResults.map((r, i) => labelKey ? String(r[labelKey]) : String(i));
+            const values = lastResults.map(r => Number(r[valueKey]) || 0);
+            const maxVal = Math.max(...values, 1);
+            const barWidth = Math.max(10, Math.min(50, (width - 60) / values.length - 4));
+            const chartHeight = height - 40;
+
+            // Draw bars
+            ctx.fillStyle = '#7c3aed';
+            values.forEach((val, i) => {
+                const barHeight = (val / maxVal) * chartHeight;
+                const x = 40 + i * (barWidth + 4);
+                const y = chartHeight - barHeight + 10;
+                ctx.fillRect(x, y, barWidth, barHeight);
+            });
+
+            // Draw labels
+            ctx.fillStyle = '#a0a0a0';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            labels.forEach((label, i) => {
+                const x = 40 + i * (barWidth + 4) + barWidth / 2;
+                const truncated = label.length > 8 ? label.substring(0, 7) + '…' : label;
+                ctx.fillText(truncated, x, height - 4);
+            });
+
+            // Y-axis label
+            ctx.textAlign = 'right';
+            ctx.fillText(String(maxVal), 35, 20);
+            ctx.fillText('0', 35, chartHeight + 10);
+            ctx.fillText(valueKey, 35, 8);
+        }
+
+        // Update schema explorer sidebar
+        function updateSchemaExplorer() {
+            const tree = document.getElementById('schema-tree');
+            if (!tables || Object.keys(tables).length === 0) {
+                tree.innerHTML = '<p style="color: var(--text-secondary); font-size: 0.8rem; padding: 0.5rem;">Load data to see schemas</p>';
+                return;
+            }
+
+            let html = '';
+            for (const [name, data] of Object.entries(tables)) {
+                const columns = data.length > 0 ? Object.keys(data[0]) : [];
+                html += `<div class="schema-table-item" onclick="toggleTable(this, '${name}')">
+                    <span>📁 ${name}</span>
+                    <span style="color: var(--text-secondary); font-size: 0.75rem;"> (${data.length} rows)</span>
+                </div>`;
+                html += `<div class="schema-columns" style="display:none" data-table="${name}">`;
+                for (const col of columns) {
+                    const sampleVal = data[0][col];
+                    const type = typeof sampleVal === 'number'
+                        ? (Number.isInteger(sampleVal) ? 'INT' : 'FLOAT')
+                        : typeof sampleVal === 'boolean' ? 'BOOL' : 'TEXT';
+                    html += `<div class="schema-column" onclick="insertColumnRef('${name}', '${col}')">
+                        ├ ${col}<span class="col-type">${type}</span>
+                    </div>`;
+                }
+                html += '</div>';
+            }
+            tree.innerHTML = html;
+        }
+
+        function toggleTable(el, name) {
+            const cols = document.querySelector(`.schema-columns[data-table="${name}"]`);
+            if (cols) {
+                cols.style.display = cols.style.display === 'none' ? 'block' : 'none';
+                el.classList.toggle('expanded');
+            }
+        }
+
+        function insertColumnRef(table, column) {
+            const editor = document.getElementById('sql-editor');
+            const pos = editor.selectionStart;
+            const text = editor.value;
+            const ref = table + '.' + column;
+            editor.value = text.substring(0, pos) + ref + text.substring(pos);
+            editor.focus();
+        }
+
+        // Override the original init to also load from URL and build schema
+        const _originalInit = init;
+        function enhancedInit() {
+            _originalInit();
+            loadFromUrl();
+            updateSchemaExplorer();
+        }
+
+        // Hook into table registration to update schema explorer
+        const _originalRegister = typeof registerSampleData === 'function' ? registerSampleData : null;
+
         // Initialize on load
-        init();
+        enhancedInit();
     </script>
+    </div><!-- main-content-area -->
+    </div><!-- main-with-sidebar -->
 </body>
 </html>

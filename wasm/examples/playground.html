@@ -561,6 +561,68 @@ ORDER BY diff_from_avg DESC`
       }
     });
 
+    // --- Shareable URLs ---
+    window.shareQuery = function() {
+      const sql = document.getElementById('editor').value.trim();
+      if (!sql) return;
+      const encoded = btoa(unescape(encodeURIComponent(sql)));
+      const url = window.location.origin + window.location.pathname + '#q=' + encoded;
+      navigator.clipboard.writeText(url).then(() => {
+        document.getElementById('status').textContent = '✅ URL copied to clipboard!';
+        setTimeout(() => { document.getElementById('status').textContent = 'Ready'; }, 2000);
+      }).catch(() => {
+        prompt('Copy this URL:', url);
+      });
+    };
+
+    // Load from URL hash on startup
+    (function loadFromHash() {
+      const hash = window.location.hash.substring(1);
+      if (!hash) return;
+      const params = new URLSearchParams(hash);
+      const q = params.get('q');
+      if (q) {
+        try {
+          const sql = decodeURIComponent(escape(atob(q)));
+          document.getElementById('editor').value = sql;
+        } catch(e) { /* invalid */ }
+      }
+    })();
+
+    // --- Drag-and-drop file loading ---
+    const dropTarget = document.querySelector('.container');
+    if (dropTarget) {
+      dropTarget.addEventListener('dragover', (e) => { e.preventDefault(); });
+      dropTarget.addEventListener('drop', (e) => {
+        e.preventDefault();
+        for (const file of e.dataTransfer.files) {
+          const reader = new FileReader();
+          const name = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_]/g, '_');
+          reader.onload = (ev) => {
+            try {
+              if (file.name.endsWith('.json')) {
+                const data = JSON.parse(ev.target.result);
+                if (Array.isArray(data) && typeof db !== 'undefined' && db.registerJson) {
+                  db.registerJson(name, data);
+                  document.getElementById('status').textContent = `Loaded ${name} (${data.length} rows)`;
+                  updateTablesList();
+                }
+              } else if (file.name.endsWith('.csv')) {
+                if (typeof db !== 'undefined' && db.registerCsv) {
+                  db.registerCsv(name, ev.target.result);
+                  document.getElementById('status').textContent = `Loaded ${name} from CSV`;
+                  updateTablesList();
+                }
+              }
+            } catch (err) {
+              document.getElementById('status').textContent = `Error: ${err.message}`;
+            }
+          };
+          reader.readAsText(file);
+        }
+      });
+    }
+
     // Initialize on load
     init();
   </script>
