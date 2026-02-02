@@ -1,4 +1,4 @@
-.PHONY: build check test lint fmt doc bench bench-tpch clean release all setup fix quick watch bump-patch bump-minor bump-major examples ci
+.PHONY: build check test lint fmt doc bench bench-tpch clean clean-deep release all setup fix quick watch bump-patch bump-minor bump-major examples example deps deps-why ci
 
 # Default: format + test (always works for new contributors)
 all: fmt test
@@ -72,10 +72,22 @@ bench-tpch:
 clean:
 	cargo clean
 
+# Deep clean: remove all generated artifacts and report reclaimed space
+clean-deep:
+	@echo "Removing build and generated artifacts..."
+	@du -sh target/ wasm/pkg/ node/dist/ 2>/dev/null || true
+	rm -rf target/ wasm/pkg/ node/dist/
+	@echo "✅ Deep clean complete."
+
 # Run examples
 examples:
 	cargo run --example basic_queries
 	cargo run --example advanced_queries
+
+# Run a specific example: make example NAME=basic_queries
+example:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make example NAME=<example_name>"; echo "Available: basic_queries, advanced_queries"; exit 1; fi
+	cargo run --example $(NAME)
 
 # Run the same checks as CI (use before submitting a PR)
 ci: fmt-check lint-strict test test-all
@@ -108,6 +120,15 @@ setup:
 
 # Quick iteration: build + test
 dev: build test
+
+# Show top-level dependency tree
+deps:
+	cargo tree --depth 1 --edges normal
+
+# Show why a specific package is included: make deps-why PKG=datafusion
+deps-why:
+	@if [ -z "$(PKG)" ]; then echo "Usage: make deps-why PKG=<package_name>"; exit 1; fi
+	cargo tree -i $(PKG)
 
 # Version bumping
 bump-patch:
