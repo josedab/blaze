@@ -13,7 +13,7 @@ cd blaze
 make setup
 
 # Or manually:
-cargo build        # ~10s debug build
+cargo build        # ~4-5min first build, ~10s incremental
 cargo test         # Run 900+ tests (~0.2s)
 cargo fmt          # Format code
 ```
@@ -50,7 +50,7 @@ Optional:
 
 ### Pre-commit Hook
 
-A pre-commit hook is installed by `make setup` that runs `cargo fmt --check` before each commit.
+A pre-commit hook is installed by `make setup` that runs `cargo fmt --check` and `cargo clippy -- -D warnings` before each commit.
 To install manually:
 
 ```bash
@@ -121,6 +121,16 @@ Blaze uses feature flags for optional extensions. Core tests run without flags; 
 ```bash
 cargo test                          # Core tests only
 cargo test --features all-extensions # All tests
+```
+
+## Debugging
+
+Blaze uses `tracing` with `env-filter`. Enable debug logging with:
+
+```bash
+RUST_LOG=blaze=debug cargo run
+RUST_LOG=blaze::executor=debug,blaze::planner=info cargo run
+RUST_LOG=blaze=trace cargo run   # very verbose
 ```
 
 ## Need Help?

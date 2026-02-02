@@ -50,7 +50,7 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 ### Prerequisites
 
 - **Rust 1.92.0+** — Install via [rustup](https://rustup.rs/)
-- Build takes ~10s (debug) or ~4-6min (release)
+- First build takes ~4-5 minutes (debug), ~10s incremental rebuilds; ~4-6min (release)
 - Tests run in ~0.3s (900+ tests)
 
 ```bash
@@ -221,7 +221,7 @@ cargo run -- -c "SELECT * FROM users" --format csv --output results.csv
 ## Building
 
 ```bash
-cargo build            # Debug build (~10s)
+cargo build            # Debug build (~4-5min first, ~10s incremental)
 cargo build --release  # Release build (~4-6min)
 cargo test             # Run tests (~0.2s, 900+ tests)
 cargo clippy           # Linting
@@ -336,6 +336,24 @@ cargo run --example advanced_queries
 | `target/` is very large (>10GB) | Run `cargo clean` to reclaim disk space. The target directory can grow to 15-20GB with all features, benchmarks, and examples. Use `cargo clean --release` to only remove release artifacts. |
 | Tests fail after checkout | Run `make setup` to ensure correct toolchain |
 | Type mismatch errors in queries | Use float literals (`80000.0`) when comparing to `FLOAT`/`DOUBLE` columns |
+
+## Debugging
+
+Blaze uses the [`tracing`](https://docs.rs/tracing) framework with `env-filter` support. Control log output via the `RUST_LOG` environment variable:
+
+```bash
+# Enable debug logging for all Blaze modules
+RUST_LOG=blaze=debug cargo run
+
+# Enable trace-level logging (very verbose)
+RUST_LOG=blaze=trace cargo run
+
+# Filter to specific modules
+RUST_LOG=blaze::executor=debug,blaze::planner=info cargo run
+
+# Combine with a query
+RUST_LOG=blaze=debug cargo run -- -c "SELECT * FROM users"
+```
 
 ## Supported SQL Features
 
