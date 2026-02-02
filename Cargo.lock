@@ -510,6 +510,7 @@ dependencies = [
  "sha2",
  "sqlparser 0.53.0",
  "strsim",
+ "subtle",
  "tempfile",
  "thiserror",
  "tokio",
