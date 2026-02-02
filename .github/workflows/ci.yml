@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo fmt --check
+      - run: time cargo fmt --check
 
   lint:
     name: Clippy
@@ -29,7 +29,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo clippy -- -D warnings
+      - run: time cargo clippy -- -D warnings
 
   lint-all:
     name: Clippy (all features)
@@ -43,7 +43,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-lint-all-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo clippy --features all-extensions -- -D warnings
+      - run: time cargo clippy --features all-extensions -- -D warnings
 
   test:
     name: Tests
@@ -57,7 +57,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo test
+      - run: time cargo test
 
   test-all:
     name: Tests (all features)
@@ -71,7 +71,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-test-all-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo test --features all-extensions
+      - run: time cargo test --features all-extensions
 
   doc:
     name: Documentation
@@ -85,6 +85,6 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo doc --no-deps
+      - run: time cargo doc --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
