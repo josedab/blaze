@@ -1,4 +1,5 @@
 //! Catalog management for Blaze.
+#![deny(clippy::unwrap_used)]
 //!
 //! The catalog maintains metadata about databases, schemas, tables, and functions.
 

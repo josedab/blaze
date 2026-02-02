@@ -1,4 +1,5 @@
 //! Error types for the Blaze query engine.
+#![deny(clippy::unwrap_used)]
 //!
 //! This module provides a comprehensive error type hierarchy for all
 //! operations in the query engine, from SQL parsing to execution.

@@ -1,4 +1,5 @@
 //! Logical plan representation for Blaze.
+#![deny(clippy::unwrap_used)]
 
 use std::fmt;
 use std::sync::{Arc, LazyLock};

@@ -1,4 +1,5 @@
 //! Schema definitions for Blaze.
+#![deny(clippy::unwrap_used)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
