@@ -2,6 +2,7 @@
 name = "blaze"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.92.0"
 description = "Next-generation embedded OLAP query engine with memory safety"
 license = "MIT"
 repository = "https://github.com/blaze-db/blaze"
