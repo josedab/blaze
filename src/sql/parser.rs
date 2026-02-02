@@ -1,4 +1,5 @@
 //! SQL parser implementation using sqlparser-rs.
+#![deny(clippy::unwrap_used)]
 
 use sqlparser::ast::{self as sql_ast, ObjectName};
 use sqlparser::dialect::GenericDialect;
@@ -1051,7 +1052,9 @@ impl Parser {
                 } else {
                     Ok(Expr::Column(ColumnRef {
                         relation: Some(parts[..parts.len() - 1].join(".")),
-                        name: parts.last().unwrap().clone(),
+                        name: parts.last().ok_or_else(|| {
+                            crate::error::BlazeError::analysis("Empty compound identifier")
+                        })?.clone(),
                     }))
                 }
             }
