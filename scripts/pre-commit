@@ -12,4 +12,11 @@ if ! cargo fmt --check 2>/dev/null; then
     exit 1
 fi
 
-echo "✅ Formatting check passed."
+echo "Running cargo clippy -- -D warnings..."
+if ! cargo clippy -- -D warnings 2>/dev/null; then
+    echo ""
+    echo "❌ Clippy found warnings. Run 'make fix' to auto-fix, or address manually."
+    exit 1
+fi
+
+echo "✅ Pre-commit checks passed."
