@@ -50,6 +50,8 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::Mutex;
 
+use serde_json::json;
+
 use crate::error::BlazeError;
 use crate::Connection;
 
@@ -250,20 +252,19 @@ pub unsafe extern "C" fn blaze_query(
 
             // Get schema
             let schema = batches.first().map(|b| {
-                let fields: Vec<String> = b
+                let fields: Vec<serde_json::Value> = b
                     .schema()
                     .fields()
                     .iter()
                     .map(|f| {
-                        format!(
-                            "{{\"name\":\"{}\",\"type\":\"{:?}\",\"nullable\":{}}}",
-                            f.name(),
-                            f.data_type(),
-                            f.is_nullable()
-                        )
+                        json!({
+                            "name": f.name(),
+                            "type": format!("{:?}", f.data_type()),
+                            "nullable": f.is_nullable()
+                        })
                     })
                     .collect();
-                format!("[{}]", fields.join(","))
+                serde_json::to_string(&fields).unwrap_or_else(|_| "[]".to_string())
             });
 
             let result = Box::new(BlazeResult {
