@@ -71,25 +71,22 @@ impl VirtualFileSystem {
         }
     }
 
-    /// Write a file to the virtual filesystem.
-    pub fn write_file(&self, path: &str, data: Vec<u8>) -> Result<()> {
-        let data_len = data.len();
-
-        // Check if we're replacing an existing file
-        let existing_size = {
-            let files = self.files.read();
-            files.get(path).map(|e| e.data.len()).unwrap_or(0)
-        };
-
-        let new_total = self.total_bytes.load(Ordering::Relaxed) - existing_size + data_len;
-        if new_total > self.max_bytes {
-            return Err(BlazeError::resource_exhausted(format!(
-                "VFS storage limit exceeded: {} bytes required, {} bytes available",
-                data_len,
-                self.available_space() + existing_size
+    /// Validate that a path contains no traversal components.
+    fn validate_path(path: &str) -> Result<()> {
+        if path.split('/').any(|seg| seg == ".." || seg == ".") || path.starts_with('/') {
+            return Err(BlazeError::invalid_argument(format!(
+                "Invalid VFS path '{}': must be relative with no '..' or '.' components",
+                path
             )));
         }
+        Ok(())
+    }
 
+    /// Write a file to the virtual filesystem.
+    pub fn write_file(&self, path: &str, data: Vec<u8>) -> Result<()> {
+        Self::validate_path(path)?;
+
+        let data_len = data.len();
         let ext = path.rsplit('.').next().unwrap_or("");
         let content_type = VfsContentType::from_extension(ext);
 
@@ -110,14 +107,27 @@ impl VirtualFileSystem {
             },
         };
 
+        // Hold the write lock for both size check and insert to prevent TOCTOU
         let mut files = self.files.write();
+        let existing_size = files.get(path).map(|e| e.data.len()).unwrap_or(0);
+        let current_total = self.total_bytes.load(Ordering::SeqCst);
+        let new_total = current_total - existing_size + data_len;
+        if new_total > self.max_bytes {
+            return Err(BlazeError::resource_exhausted(format!(
+                "VFS storage limit exceeded: {} bytes required, {} bytes available",
+                data_len,
+                self.max_bytes.saturating_sub(current_total) + existing_size
+            )));
+        }
+
         files.insert(path.to_string(), entry);
-        self.total_bytes.store(new_total, Ordering::Relaxed);
+        self.total_bytes.store(new_total, Ordering::SeqCst);
         Ok(())
     }
 
     /// Read a file from the virtual filesystem.
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        Self::validate_path(path)?;
         let files = self.files.read();
         files
             .get(path)
@@ -132,6 +142,7 @@ impl VirtualFileSystem {
 
     /// Delete a file from the virtual filesystem.
     pub fn delete_file(&self, path: &str) -> Result<()> {
+        Self::validate_path(path)?;
         let mut files = self.files.write();
         let entry = files
             .remove(path)
@@ -153,6 +164,7 @@ impl VirtualFileSystem {
 
     /// Get metadata for a file.
     pub fn file_metadata(&self, path: &str) -> Result<VfsMetadata> {
+        Self::validate_path(path)?;
         let files = self.files.read();
         files
             .get(path)
@@ -206,42 +218,42 @@ mod tests {
     fn test_write_and_read_file() {
         let vfs = VirtualFileSystem::new(1024 * 1024);
         let data = b"hello,world\n1,2\n".to_vec();
-        vfs.write_file("/data/test.csv", data.clone()).unwrap();
+        vfs.write_file("data/test.csv", data.clone()).unwrap();
 
-        let read = vfs.read_file("/data/test.csv").unwrap();
+        let read = vfs.read_file("data/test.csv").unwrap();
         assert_eq!(read, data);
     }
 
     #[test]
     fn test_exists_and_delete() {
         let vfs = VirtualFileSystem::new(1024 * 1024);
-        assert!(!vfs.exists("/foo.csv"));
+        assert!(!vfs.exists("foo.csv"));
 
-        vfs.write_file("/foo.csv", vec![1, 2, 3]).unwrap();
-        assert!(vfs.exists("/foo.csv"));
+        vfs.write_file("foo.csv", vec![1, 2, 3]).unwrap();
+        assert!(vfs.exists("foo.csv"));
 
-        vfs.delete_file("/foo.csv").unwrap();
-        assert!(!vfs.exists("/foo.csv"));
+        vfs.delete_file("foo.csv").unwrap();
+        assert!(!vfs.exists("foo.csv"));
     }
 
     #[test]
     fn test_storage_limit() {
         let vfs = VirtualFileSystem::new(10);
-        vfs.write_file("/a.csv", vec![0; 8]).unwrap();
-        let result = vfs.write_file("/b.csv", vec![0; 8]);
+        vfs.write_file("a.csv", vec![0; 8]).unwrap();
+        let result = vfs.write_file("b.csv", vec![0; 8]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_list_files_with_prefix() {
         let vfs = VirtualFileSystem::new(1024 * 1024);
-        vfs.write_file("/data/a.csv", vec![1]).unwrap();
-        vfs.write_file("/data/b.csv", vec![2]).unwrap();
-        vfs.write_file("/other/c.csv", vec![3]).unwrap();
+        vfs.write_file("data/a.csv", vec![1]).unwrap();
+        vfs.write_file("data/b.csv", vec![2]).unwrap();
+        vfs.write_file("other/c.csv", vec![3]).unwrap();
 
-        let mut listed = vfs.list_files("/data/");
+        let mut listed = vfs.list_files("data/");
         listed.sort();
-        assert_eq!(listed, vec!["/data/a.csv", "/data/b.csv"]);
+        assert_eq!(listed, vec!["data/a.csv", "data/b.csv"]);
     }
 
     #[test]
@@ -250,11 +262,11 @@ mod tests {
         assert_eq!(vfs.total_size(), 0);
         assert_eq!(vfs.available_space(), 100);
 
-        vfs.write_file("/a.bin", vec![0; 30]).unwrap();
+        vfs.write_file("a.bin", vec![0; 30]).unwrap();
         assert_eq!(vfs.total_size(), 30);
         assert_eq!(vfs.available_space(), 70);
 
-        vfs.delete_file("/a.bin").unwrap();
+        vfs.delete_file("a.bin").unwrap();
         assert_eq!(vfs.total_size(), 0);
         assert_eq!(vfs.available_space(), 100);
     }
@@ -262,9 +274,9 @@ mod tests {
     #[test]
     fn test_file_metadata() {
         let vfs = VirtualFileSystem::new(1024 * 1024);
-        vfs.write_file("/report.parquet", vec![0; 50]).unwrap();
+        vfs.write_file("report.parquet", vec![0; 50]).unwrap();
 
-        let meta = vfs.file_metadata("/report.parquet").unwrap();
+        let meta = vfs.file_metadata("report.parquet").unwrap();
         assert_eq!(meta.size, 50);
         assert_eq!(meta.content_type, VfsContentType::Parquet);
         assert!(!meta.is_directory);
@@ -273,22 +285,31 @@ mod tests {
     #[test]
     fn test_clear() {
         let vfs = VirtualFileSystem::new(1024 * 1024);
-        vfs.write_file("/a.csv", vec![1, 2, 3]).unwrap();
-        vfs.write_file("/b.csv", vec![4, 5, 6]).unwrap();
+        vfs.write_file("a.csv", vec![1, 2, 3]).unwrap();
+        vfs.write_file("b.csv", vec![4, 5, 6]).unwrap();
         assert_eq!(vfs.total_size(), 6);
 
         vfs.clear();
         assert_eq!(vfs.total_size(), 0);
-        assert!(!vfs.exists("/a.csv"));
+        assert!(!vfs.exists("a.csv"));
     }
 
     #[test]
     fn test_overwrite_existing_file() {
         let vfs = VirtualFileSystem::new(100);
-        vfs.write_file("/data.csv", vec![0; 50]).unwrap();
+        vfs.write_file("data.csv", vec![0; 50]).unwrap();
         assert_eq!(vfs.total_size(), 50);
 
-        vfs.write_file("/data.csv", vec![0; 30]).unwrap();
+        vfs.write_file("data.csv", vec![0; 30]).unwrap();
         assert_eq!(vfs.total_size(), 30);
+    }
+
+    #[test]
+    fn test_path_traversal_rejected() {
+        let vfs = VirtualFileSystem::new(1024 * 1024);
+        assert!(vfs.write_file("../secret.csv", vec![1]).is_err());
+        assert!(vfs.write_file("/absolute.csv", vec![1]).is_err());
+        assert!(vfs.write_file("foo/../bar.csv", vec![1]).is_err());
+        assert!(vfs.write_file("./test.csv", vec![1]).is_err());
     }
 }
