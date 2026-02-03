@@ -654,19 +654,43 @@ pub enum ShippablePredicate {
 
 impl ShippablePredicate {
     /// Convert to a SQL WHERE clause fragment.
+    ///
+    /// Identifiers are quoted and values are escaped to prevent SQL injection.
     pub fn to_sql(&self) -> String {
         match self {
-            Self::Eq { column, value } => format!("{} = {}", column, value),
-            Self::NotEq { column, value } => format!("{} <> {}", column, value),
-            Self::Lt { column, value } => format!("{} < {}", column, value),
-            Self::LtEq { column, value } => format!("{} <= {}", column, value),
-            Self::Gt { column, value } => format!("{} > {}", column, value),
-            Self::GtEq { column, value } => format!("{} >= {}", column, value),
-            Self::IsNull { column } => format!("{} IS NULL", column),
-            Self::IsNotNull { column } => format!("{} IS NOT NULL", column),
+            Self::Eq { column, value } => {
+                format!("\"{}\" = '{}'", Self::quote_ident(column), Self::escape_value(value))
+            }
+            Self::NotEq { column, value } => {
+                format!("\"{}\" <> '{}'", Self::quote_ident(column), Self::escape_value(value))
+            }
+            Self::Lt { column, value } => {
+                format!("\"{}\" < '{}'", Self::quote_ident(column), Self::escape_value(value))
+            }
+            Self::LtEq { column, value } => {
+                format!("\"{}\" <= '{}'", Self::quote_ident(column), Self::escape_value(value))
+            }
+            Self::Gt { column, value } => {
+                format!("\"{}\" > '{}'", Self::quote_ident(column), Self::escape_value(value))
+            }
+            Self::GtEq { column, value } => {
+                format!("\"{}\" >= '{}'", Self::quote_ident(column), Self::escape_value(value))
+            }
+            Self::IsNull { column } => format!("\"{}\" IS NULL", Self::quote_ident(column)),
+            Self::IsNotNull { column } => format!("\"{}\" IS NOT NULL", Self::quote_ident(column)),
             Self::And(left, right) => format!("({} AND {})", left.to_sql(), right.to_sql()),
             Self::Or(left, right) => format!("({} OR {})", left.to_sql(), right.to_sql()),
         }
+    }
+
+    /// Escape double quotes in identifiers to prevent identifier injection.
+    fn quote_ident(ident: &str) -> String {
+        ident.replace('"', "\"\"")
+    }
+
+    /// Escape single quotes in values to prevent value injection.
+    fn escape_value(value: &str) -> String {
+        value.replace('\'', "''")
     }
 }
 
