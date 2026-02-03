@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use subtle::ConstantTimeEq;
+
 use arrow::datatypes::Schema as ArrowSchema;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -756,7 +758,9 @@ impl FlightAuthHandler {
                 }
                 let (username, password) = (parts[0], parts[1]);
                 match credentials.get(username) {
-                    Some(stored_pw) if stored_pw == password => {
+                    Some(stored_pw)
+                        if stored_pw.as_bytes().ct_eq(password.as_bytes()).into() =>
+                    {
                         let session_token = uuid::Uuid::new_v4().to_string();
                         let now = std::time::Instant::now();
                         let session = AuthSession {
