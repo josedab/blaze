@@ -26,6 +26,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use subtle::ConstantTimeEq;
+
 // ---------------------------------------------------------------------------
 // HTTP primitives
 // ---------------------------------------------------------------------------
@@ -100,6 +102,10 @@ impl ApiResponse {
     pub fn rate_limited() -> Self {
         Self::error(429, "Rate limit exceeded")
     }
+
+    pub fn payload_too_large() -> Self {
+        Self::error(413, "Request body too large")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -114,8 +120,12 @@ pub struct ApiConfig {
     pub rate_limit_per_minute: u32,
     /// Whether to include CORS headers.
     pub enable_cors: bool,
+    /// Allowed CORS origin (e.g. "https://example.com"). Defaults to None (no origin header).
+    pub cors_allowed_origin: Option<String>,
     /// Maximum query result rows returned.
     pub max_result_rows: usize,
+    /// Maximum request body size in bytes (0 = unlimited).
+    pub max_body_size: usize,
 }
 
 impl Default for ApiConfig {
@@ -124,7 +134,9 @@ impl Default for ApiConfig {
             api_keys: Vec::new(),
             rate_limit_per_minute: 0,
             enable_cors: true,
+            cors_allowed_origin: None,
             max_result_rows: 10_000,
+            max_body_size: 0,
         }
     }
 }
@@ -159,7 +171,7 @@ impl RateLimiter {
         }
         let now = Instant::now();
         let window = Duration::from_secs(60);
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         let entry = entries
             .entry(key.to_string())
             .or_insert_with(|| RateLimitEntry {
@@ -180,7 +192,7 @@ impl RateLimiter {
     pub fn current_count(&self, key: &str) -> usize {
         let now = Instant::now();
         let window = Duration::from_secs(60);
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries
             .get(key)
             .map(|e| {
@@ -250,7 +262,16 @@ impl ApiServer {
 
     /// Handle an incoming request through the API pipeline.
     pub fn handle(&self, request: ApiRequest) -> ApiResponse {
-        self.stats.write().unwrap().total_requests += 1;
+        self.stats.write().unwrap_or_else(|e| e.into_inner()).total_requests += 1;
+
+        // Body size limit
+        if self.config.max_body_size > 0 {
+            if let Some(ref body) = request.body {
+                if body.len() > self.config.max_body_size {
+                    return ApiResponse::payload_too_large();
+                }
+            }
+        }
 
         // Authentication
         if !self.config.api_keys.is_empty() {
@@ -260,9 +281,14 @@ impl ApiServer {
                 .or_else(|| request.headers.get("X-Api-Key"))
                 .or_else(|| request.headers.get("authorization"));
             match api_key {
-                Some(key) if self.config.api_keys.contains(key) => {}
+                Some(key)
+                    if self
+                        .config
+                        .api_keys
+                        .iter()
+                        .any(|k| k.as_bytes().ct_eq(key.as_bytes()).into()) => {}
                 _ => {
-                    self.stats.write().unwrap().unauthorized_requests += 1;
+                    self.stats.write().unwrap_or_else(|e| e.into_inner()).unauthorized_requests += 1;
                     return ApiResponse::unauthorized();
                 }
             }
@@ -275,7 +301,7 @@ impl ApiServer {
             .cloned()
             .unwrap_or_else(|| "anonymous".into());
         if !self.rate_limiter.check(&rate_key) {
-            self.stats.write().unwrap().rate_limited_requests += 1;
+            self.stats.write().unwrap_or_else(|e| e.into_inner()).rate_limited_requests += 1;
             return ApiResponse::rate_limited();
         }
 
@@ -284,9 +310,14 @@ impl ApiServer {
 
         // CORS headers
         if self.config.enable_cors {
+            let origin = self
+                .config
+                .cors_allowed_origin
+                .as_deref()
+                .unwrap_or("*");
             response
                 .headers
-                .insert("Access-Control-Allow-Origin".into(), "*".into());
+                .insert("Access-Control-Allow-Origin".into(), origin.into());
             response.headers.insert(
                 "Access-Control-Allow-Methods".into(),
                 "GET, POST, PUT, DELETE, OPTIONS".into(),
@@ -298,9 +329,9 @@ impl ApiServer {
         }
 
         if response.status < 400 {
-            self.stats.write().unwrap().successful_requests += 1;
+            self.stats.write().unwrap_or_else(|e| e.into_inner()).successful_requests += 1;
         } else {
-            self.stats.write().unwrap().failed_requests += 1;
+            self.stats.write().unwrap_or_else(|e| e.into_inner()).failed_requests += 1;
         }
         response
     }
@@ -363,7 +394,7 @@ impl ApiServer {
             method: HttpMethod::Get,
             path: "/api/v1/stats".into(),
             handler: Arc::new(|_req, server| {
-                let stats = server.stats.read().unwrap().clone();
+                let stats = server.stats.read().unwrap_or_else(|e| e.into_inner()).clone();
                 ApiResponse::ok(format!(
                     r#"{{"total_requests": {}, "successful": {}, "failed": {}, "unauthorized": {}, "rate_limited": {}}}"#,
                     stats.total_requests,
@@ -404,7 +435,7 @@ impl ApiServer {
 
     /// Get current server statistics.
     pub fn stats(&self) -> ApiStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// List all registered routes.
