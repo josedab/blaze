@@ -282,10 +282,17 @@ impl ConnectionPool {
         .map_err(|_| BlazeError::resource_exhausted("Async pool acquire timeout"))?
         .map_err(|_| BlazeError::internal("Pool semaphore closed"))?;
 
-        let conn = self.acquire()?;
-        // Drop the permit when the connection is released
-        std::mem::forget(permit);
-        Ok(conn)
+        match self.acquire() {
+            Ok(conn) => {
+                // Only forget the permit after successful acquire
+                std::mem::forget(permit);
+                Ok(conn)
+            }
+            Err(e) => {
+                // permit is dropped here, returning it to the semaphore
+                Err(e)
+            }
+        }
     }
 
     /// Get pool statistics.
