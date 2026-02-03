@@ -132,6 +132,18 @@ impl GitDataSource {
 
     /// Read file content at a specific ref.
     pub fn read_file_at_ref(&self, path: &str, git_ref: &GitRef) -> Result<Vec<u8>> {
+        // Reject path traversal: no `..` components or leading `/`
+        if path.starts_with('/')
+            || path
+                .split('/')
+                .any(|segment| segment == ".." || segment == ".")
+        {
+            return Err(BlazeError::invalid_argument(format!(
+                "Invalid path '{}': must be a relative path without '..' or '.' components",
+                path
+            )));
+        }
+
         let ref_str = git_ref.to_git_ref_string();
         let object_spec = format!("{}:{}", ref_str, path);
 
