@@ -968,7 +968,8 @@ impl PreparedStatementCache {
         Self {
             capacity,
             cache: Mutex::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(capacity.max(1)).unwrap(),
+                std::num::NonZeroUsize::new(capacity.max(1))
+                    .unwrap_or(std::num::NonZeroUsize::MIN),
             )),
         }
     }
@@ -983,7 +984,9 @@ impl PreparedStatementCache {
         F: FnOnce() -> Result<(LogicalPlan, Vec<ParameterInfo>)>,
     {
         let sql_key = sql.to_string();
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().map_err(|e| {
+            crate::error::BlazeError::execution(format!("Failed to acquire cache lock: {e}"))
+        })?;
 
         if let Some(cached) = cache.get(&sql_key) {
             return Ok((cached.logical_plan.clone(), cached.parameters.clone()));
@@ -993,7 +996,9 @@ impl PreparedStatementCache {
 
         let (plan, params) = create_fn()?;
 
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().map_err(|e| {
+            crate::error::BlazeError::execution(format!("Failed to acquire cache lock: {e}"))
+        })?;
         cache.put(
             sql_key,
             CachedPlan {
@@ -1007,12 +1012,14 @@ impl PreparedStatementCache {
 
     /// Clear the cache.
     pub fn clear(&self) {
-        self.cache.lock().unwrap().clear();
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
+        }
     }
 
     /// Get the current number of cached entries.
     pub fn len(&self) -> usize {
-        self.cache.lock().unwrap().len()
+        self.cache.lock().map(|c| c.len()).unwrap_or(0)
     }
 
     /// Check if the cache is empty.
