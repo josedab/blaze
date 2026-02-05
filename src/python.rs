@@ -1140,6 +1140,7 @@ fn read_parquet(path: &str) -> PyResult<PyQueryResult> {
 ///
 /// Returns:
 ///     A QueryResult containing the table contents.
+#[cfg(feature = "lakehouse")]
 #[pyfunction]
 #[pyo3(signature = (path, *, version=None))]
 fn read_delta(path: &str, version: Option<i64>) -> PyResult<PyQueryResult> {
@@ -1166,6 +1167,7 @@ fn pyblaze(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(connect, m)?)?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
+    #[cfg(feature = "lakehouse")]
     m.add_function(wrap_pyfunction!(read_delta, m)?)?;
 
     // Add version info

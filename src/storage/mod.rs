@@ -4,6 +4,7 @@
 //! including CSV, Parquet, JSON, Arrow IPC, and Delta Lake.
 
 mod csv;
+#[cfg(feature = "lakehouse")]
 mod delta;
 mod memory;
 mod object_store;
@@ -12,6 +13,7 @@ mod persistent;
 pub mod type_inference;
 
 pub use self::csv::{write_csv, CsvOptions, CsvTable};
+#[cfg(feature = "lakehouse")]
 pub use self::delta::{
     DeltaTable, DeltaTableOptions, DeltaVersionInfo, DeltaWriteMode, DeltaWriteResult,
 };
@@ -43,6 +45,7 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvider>> {
     let path = path.as_ref();
 
     // Check if it's a Delta table (directory with _delta_log)
+    #[cfg(feature = "lakehouse")]
     if path.is_dir() && path.join("_delta_log").exists() {
         return Ok(Arc::new(DeltaTable::open(path)?));
     }
@@ -121,16 +124,19 @@ pub fn memory_table(batches: Vec<RecordBatch>) -> Result<Arc<dyn TableProvider>>
 }
 
 /// Read a Delta Lake table.
+#[cfg(feature = "lakehouse")]
 pub fn read_delta(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvider>> {
     Ok(Arc::new(DeltaTable::open(path)?))
 }
 
 /// Read a Delta Lake table at a specific version (time travel).
+#[cfg(feature = "lakehouse")]
 pub fn read_delta_version(path: impl AsRef<Path>, version: i64) -> Result<Arc<dyn TableProvider>> {
     Ok(Arc::new(DeltaTable::open_at_version(path, version)?))
 }
 
 /// Read a Delta Lake table as of a specific timestamp (time travel).
+#[cfg(feature = "lakehouse")]
 pub fn read_delta_timestamp(
     path: impl AsRef<Path>,
     timestamp: chrono::DateTime<chrono::Utc>,
