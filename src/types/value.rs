@@ -395,63 +395,63 @@ impl ScalarValue {
 
         match array.data_type() {
             ArrowDataType::Boolean => {
-                let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+                let arr = array.as_any().downcast_ref::<BooleanArray>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Boolean")))?;
                 Ok(ScalarValue::Boolean(Some(arr.value(index))))
             }
             ArrowDataType::Int8 => {
-                let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int8Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Int8")))?;
                 Ok(ScalarValue::Int8(Some(arr.value(index))))
             }
             ArrowDataType::Int16 => {
-                let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int16Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Int16")))?;
                 Ok(ScalarValue::Int16(Some(arr.value(index))))
             }
             ArrowDataType::Int32 => {
-                let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int32Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Int32")))?;
                 Ok(ScalarValue::Int32(Some(arr.value(index))))
             }
             ArrowDataType::Int64 => {
-                let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Int64")))?;
                 Ok(ScalarValue::Int64(Some(arr.value(index))))
             }
             ArrowDataType::UInt8 => {
-                let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt8Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "UInt8")))?;
                 Ok(ScalarValue::UInt8(Some(arr.value(index))))
             }
             ArrowDataType::UInt16 => {
-                let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt16Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "UInt16")))?;
                 Ok(ScalarValue::UInt16(Some(arr.value(index))))
             }
             ArrowDataType::UInt32 => {
-                let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt32Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "UInt32")))?;
                 Ok(ScalarValue::UInt32(Some(arr.value(index))))
             }
             ArrowDataType::UInt64 => {
-                let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "UInt64")))?;
                 Ok(ScalarValue::UInt64(Some(arr.value(index))))
             }
             ArrowDataType::Float32 => {
-                let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Float32Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Float32")))?;
                 Ok(ScalarValue::Float32(Some(arr.value(index))))
             }
             ArrowDataType::Float64 => {
-                let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Float64")))?;
                 Ok(ScalarValue::Float64(Some(arr.value(index))))
             }
             ArrowDataType::Utf8 => {
-                let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+                let arr = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Utf8")))?;
                 Ok(ScalarValue::Utf8(Some(arr.value(index).to_string())))
             }
             ArrowDataType::LargeUtf8 => {
-                let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
+                let arr = array.as_any().downcast_ref::<LargeStringArray>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "LargeUtf8")))?;
                 Ok(ScalarValue::LargeUtf8(Some(arr.value(index).to_string())))
             }
             ArrowDataType::Date32 => {
-                let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Date32Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Date32")))?;
                 Ok(ScalarValue::Date32(Some(arr.value(index))))
             }
             ArrowDataType::Date64 => {
-                let arr = array.as_any().downcast_ref::<Date64Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Date64Array>().ok_or_else(|| BlazeError::type_error(format!("Failed to downcast array to {}", "Date64")))?;
                 Ok(ScalarValue::Date64(Some(arr.value(index))))
             }
             _ => Err(BlazeError::not_implemented(format!(
