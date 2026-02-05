@@ -227,7 +227,8 @@ impl FlightHandler {
         if let Some(ref sql) = ticket.query {
             self.connection.query(sql)
         } else if let Some(ref table) = ticket.table {
-            self.connection.query(&format!("SELECT * FROM {}", table))
+            crate::validate_identifier(table)?;
+            self.connection.query(&format!("SELECT * FROM \"{}\"", table))
         } else {
             Err(BlazeError::invalid_argument(
                 "Ticket must contain a query or table name",
@@ -725,7 +726,15 @@ impl FlightAuthHandler {
                 Ok(session)
             }
             AuthType::Token { valid_tokens } => {
-                if valid_tokens.contains(&token_or_credentials.to_string()) {
+                let input_bytes = token_or_credentials.as_bytes();
+                let token_matched = valid_tokens.iter().any(|valid| {
+                    let valid_bytes = valid.as_bytes();
+                    if valid_bytes.len() != input_bytes.len() {
+                        return false;
+                    }
+                    valid_bytes.ct_eq(input_bytes).into()
+                });
+                if token_matched {
                     let session_token = uuid::Uuid::new_v4().to_string();
                     let now = std::time::Instant::now();
                     let session = AuthSession {
