@@ -66,43 +66,43 @@ impl JsonSerializer {
         match array.data_type() {
             DataType::Null => Ok("null".to_string()),
             DataType::Boolean => {
-                let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+                let arr = array.as_any().downcast_ref::<BooleanArray>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to BooleanArray"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::Int8 => {
-                let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int8Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to Int8Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::Int16 => {
-                let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int16Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to Int16Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::Int32 => {
-                let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int32Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to Int32Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::Int64 => {
-                let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to Int64Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::UInt8 => {
-                let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt8Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to UInt8Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::UInt16 => {
-                let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt16Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to UInt16Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::UInt32 => {
-                let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt32Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to UInt32Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::UInt64 => {
-                let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to UInt64Array"))?;
                 Ok(arr.value(idx).to_string())
             }
             DataType::Float32 => {
-                let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Float32Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to Float32Array"))?;
                 let val = arr.value(idx);
                 if val.is_finite() {
                     Ok(val.to_string())
@@ -111,7 +111,7 @@ impl JsonSerializer {
                 }
             }
             DataType::Float64 => {
-                let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                let arr = array.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to Float64Array"))?;
                 let val = arr.value(idx);
                 if val.is_finite() {
                     Ok(val.to_string())
@@ -120,14 +120,14 @@ impl JsonSerializer {
                 }
             }
             DataType::Utf8 => {
-                let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+                let arr = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| BlazeError::type_error("Failed to downcast array to StringArray"))?;
                 Ok(format!("\"{}\"", escape_json_string(arr.value(idx))))
             }
             DataType::LargeUtf8 => {
                 let arr = array
                     .as_any()
                     .downcast_ref::<arrow::array::LargeStringArray>()
-                    .unwrap();
+                    .ok_or_else(|| BlazeError::type_error("Failed to downcast array to LargeStringArray"))?;
                 Ok(format!("\"{}\"", escape_json_string(arr.value(idx))))
             }
             _ => Ok(format!("\"<unsupported type: {:?}>\"", array.data_type())),
