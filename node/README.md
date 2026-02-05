@@ -204,4 +204,4 @@ const schema: TableSchema | null = db.getTableSchema('users');
 
 ## License
 
-Apache-2.0
+MIT
