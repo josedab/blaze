@@ -228,6 +228,42 @@ use planner::{Binder, Optimizer, PhysicalPlanner};
 use sql::parser::Parser;
 use storage::{CsvTable, MemoryTable, ParquetTable};
 
+/// Validate that a string is a safe SQL identifier (alphanumeric + underscores).
+fn validate_identifier(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(BlazeError::invalid_argument("Identifier cannot be empty"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Err(BlazeError::invalid_argument(format!(
+            "Invalid identifier '{}': only alphanumeric characters and underscores are allowed",
+            name
+        )));
+    }
+    Ok(())
+}
+
+/// Validate that a file path does not contain directory traversal components.
+fn validate_path(path: &Path) -> Result<std::path::PathBuf> {
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(BlazeError::invalid_argument(format!(
+                "Path '{}' contains '..' traversal which is not allowed",
+                path.display()
+            )));
+        }
+    }
+    path.canonicalize().map_err(|e| {
+        BlazeError::invalid_argument(format!(
+            "Failed to canonicalize path '{}': {}",
+            path.display(),
+            e
+        ))
+    })
+}
+
 /// Database connection for executing queries.
 ///
 /// The `Connection` is the main entry point for interacting with Blaze.
@@ -941,7 +977,8 @@ impl Connection {
     /// conn.register_csv("sales", "data/sales.csv").unwrap();
     /// ```
     pub fn register_csv(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
-        let table = CsvTable::open(path)?;
+        let safe_path = validate_path(path.as_ref())?;
+        let table = CsvTable::open(safe_path)?;
         self.register_table(name, Arc::new(table))
     }
 
@@ -952,7 +989,8 @@ impl Connection {
         path: impl AsRef<Path>,
         options: storage::CsvOptions,
     ) -> Result<()> {
-        let table = CsvTable::open_with_options(path, options)?;
+        let safe_path = validate_path(path.as_ref())?;
+        let table = CsvTable::open_with_options(safe_path, options)?;
         self.register_table(name, Arc::new(table))
     }
 
@@ -967,7 +1005,8 @@ impl Connection {
     /// conn.register_parquet("customers", "data/customers.parquet").unwrap();
     /// ```
     pub fn register_parquet(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
-        let table = ParquetTable::open(path)?;
+        let safe_path = validate_path(path.as_ref())?;
+        let table = ParquetTable::open(safe_path)?;
         self.register_table(name, Arc::new(table))
     }
 
@@ -978,7 +1017,8 @@ impl Connection {
         path: impl AsRef<Path>,
         options: storage::ParquetOptions,
     ) -> Result<()> {
-        let table = ParquetTable::open_with_options(path, options)?;
+        let safe_path = validate_path(path.as_ref())?;
+        let table = ParquetTable::open_with_options(safe_path, options)?;
         self.register_table(name, Arc::new(table))
     }
 
@@ -1291,7 +1331,8 @@ impl Connection {
         })?;
 
         // Query all data from the table
-        let batches = self.query(&format!("SELECT * FROM {}", table_name))?;
+        validate_identifier(table_name)?;
+        let batches = self.query(&format!("SELECT * FROM \"{}\"", table_name))?;
 
         let mut total_rows = 0usize;
         let schema = table.schema();
