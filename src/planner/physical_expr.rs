@@ -1165,7 +1165,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 let today = chrono::Local::now().date_naive();
                 let days_since_epoch = today.num_days_from_ce()
                     - chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                        .unwrap()
+                        .ok_or_else(|| BlazeError::internal("Invalid epoch date"))?
                         .num_days_from_ce();
                 let result: arrow::array::Date32Array = (0..batch.num_rows())
                     .map(|_| Some(days_since_epoch))
@@ -1203,7 +1203,8 @@ impl PhysicalExpr for ScalarFunctionExpr {
                             .as_any()
                             .downcast_ref::<arrow::array::Date32Array>()
                             .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
-                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                            .ok_or_else(|| BlazeError::internal("Invalid epoch date"))?;
                         let result: Int64Array = date_arr
                             .iter()
                             .map(|opt| {
@@ -1301,24 +1302,24 @@ impl PhysicalExpr for ScalarFunctionExpr {
                                 .unwrap_or_else(NaiveDateTime::default);
                             let truncated = match part.as_str() {
                                 "YEAR" => NaiveDateTime::new(
-                                    NaiveDate::from_ymd_opt(dt.year(), 1, 1).unwrap(),
-                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                    NaiveDate::from_ymd_opt(dt.year(), 1, 1).unwrap_or_default(),
+                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap_or_default(),
                                 ),
                                 "MONTH" => NaiveDateTime::new(
-                                    NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap(),
-                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                    NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap_or_default(),
+                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap_or_default(),
                                 ),
                                 "DAY" => NaiveDateTime::new(
                                     dt.date(),
-                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                    NaiveTime::from_hms_opt(0, 0, 0).unwrap_or_default(),
                                 ),
                                 "HOUR" => NaiveDateTime::new(
                                     dt.date(),
-                                    NaiveTime::from_hms_opt(dt.hour(), 0, 0).unwrap(),
+                                    NaiveTime::from_hms_opt(dt.hour(), 0, 0).unwrap_or_default(),
                                 ),
                                 "MINUTE" => NaiveDateTime::new(
                                     dt.date(),
-                                    NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 0).unwrap(),
+                                    NaiveTime::from_hms_opt(dt.hour(), dt.minute(), 0).unwrap_or_default(),
                                 ),
                                 _ => dt,
                             };
@@ -2056,7 +2057,8 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 };
 
                 use chrono::{Datelike, NaiveDate};
-                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .ok_or_else(|| BlazeError::internal("Invalid epoch date"))?;
 
                 let mut builder = arrow::array::Date32Builder::new();
                 for i in 0..batch.num_rows() {
@@ -2761,7 +2763,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 let exp_arr = self.args[1].evaluate(batch)?;
                 match base_arr.data_type() {
                     ArrowDataType::Float64 => {
-                        let base = base_arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let base = base_arr.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Expected Float64Array for POWER base"))?;
                         let exp =
                             exp_arr
                                 .as_any()
@@ -2780,7 +2782,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                         Ok(Arc::new(result) as ArrayRef)
                     }
                     ArrowDataType::Int64 => {
-                        let base = base_arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        let base = base_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Expected Int64Array for POWER base"))?;
                         let exp =
                             exp_arr
                                 .as_any()
@@ -2809,13 +2811,13 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 let arr = self.args[0].evaluate(batch)?;
                 match arr.data_type() {
                     ArrowDataType::Float64 => {
-                        let vals = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Expected Float64Array for SQRT"))?;
                         let result: Float64Array =
                             vals.iter().map(|v| v.map(|v| v.sqrt())).collect();
                         Ok(Arc::new(result) as ArrayRef)
                     }
                     ArrowDataType::Int64 => {
-                        let vals = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Expected Int64Array for SQRT"))?;
                         let result: Float64Array =
                             vals.iter().map(|v| v.map(|v| (v as f64).sqrt())).collect();
                         Ok(Arc::new(result) as ArrayRef)
@@ -2831,12 +2833,12 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 let arr = self.args[0].evaluate(batch)?;
                 match arr.data_type() {
                     ArrowDataType::Float64 => {
-                        let vals = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Expected Float64Array for LN"))?;
                         let result: Float64Array = vals.iter().map(|v| v.map(|v| v.ln())).collect();
                         Ok(Arc::new(result) as ArrayRef)
                     }
                     ArrowDataType::Int64 => {
-                        let vals = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Expected Int64Array for LN"))?;
                         let result: Float64Array =
                             vals.iter().map(|v| v.map(|v| (v as f64).ln())).collect();
                         Ok(Arc::new(result) as ArrayRef)
@@ -2861,13 +2863,13 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 };
                 match arr.data_type() {
                     ArrowDataType::Float64 => {
-                        let vals = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Expected Float64Array for LOG"))?;
                         let result: Float64Array =
                             vals.iter().map(|v| v.map(|v| v.log(base))).collect();
                         Ok(Arc::new(result) as ArrayRef)
                     }
                     ArrowDataType::Int64 => {
-                        let vals = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Expected Int64Array for LOG"))?;
                         let result: Float64Array = vals
                             .iter()
                             .map(|v| v.map(|v| (v as f64).log(base)))
@@ -2885,13 +2887,13 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 let arr = self.args[0].evaluate(batch)?;
                 match arr.data_type() {
                     ArrowDataType::Float64 => {
-                        let vals = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Expected Float64Array for EXP"))?;
                         let result: Float64Array =
                             vals.iter().map(|v| v.map(|v| v.exp())).collect();
                         Ok(Arc::new(result) as ArrayRef)
                     }
                     ArrowDataType::Int64 => {
-                        let vals = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Expected Int64Array for EXP"))?;
                         let result: Float64Array =
                             vals.iter().map(|v| v.map(|v| (v as f64).exp())).collect();
                         Ok(Arc::new(result) as ArrayRef)
@@ -2907,7 +2909,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 let arr = self.args[0].evaluate(batch)?;
                 match arr.data_type() {
                     ArrowDataType::Float64 => {
-                        let vals = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Expected Float64Array for SIGN"))?;
                         let result: Float64Array = vals
                             .iter()
                             .map(|v| {
@@ -2925,7 +2927,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                         Ok(Arc::new(result) as ArrayRef)
                     }
                     ArrowDataType::Int64 => {
-                        let vals = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        let vals = arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Expected Int64Array for SIGN"))?;
                         let result: Int64Array =
                             vals.iter().map(|v| v.map(|v| v.signum())).collect();
                         Ok(Arc::new(result) as ArrayRef)
@@ -2942,7 +2944,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 let right_arr = self.args[1].evaluate(batch)?;
                 match left_arr.data_type() {
                     ArrowDataType::Int64 => {
-                        let left = left_arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        let left = left_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| BlazeError::type_error("Expected Int64Array for MOD"))?;
                         let right = right_arr
                             .as_any()
                             .downcast_ref::<Int64Array>()
@@ -2958,7 +2960,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
                         Ok(Arc::new(result) as ArrayRef)
                     }
                     ArrowDataType::Float64 => {
-                        let left = left_arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        let left = left_arr.as_any().downcast_ref::<Float64Array>().ok_or_else(|| BlazeError::type_error("Expected Float64Array for MOD"))?;
                         let right = right_arr
                             .as_any()
                             .downcast_ref::<Float64Array>()
@@ -3000,7 +3002,8 @@ impl ScalarFunctionExpr {
                     .as_any()
                     .downcast_ref::<arrow::array::Date32Array>()
                     .ok_or_else(|| BlazeError::type_error("Expected Date32"))?;
-                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .ok_or_else(|| BlazeError::internal("Invalid epoch date"))?;
 
                 let result: Int64Array = date_arr
                     .iter()
