@@ -375,7 +375,9 @@ impl UdfCatalog {
 
     /// Register a catalog entry.
     pub fn register(&self, entry: UdfCatalogEntry) {
-        self.entries.write().unwrap().push(entry);
+        if let Ok(mut entries) = self.entries.write() {
+            entries.push(entry);
+        }
     }
 
     /// Register a table function.
@@ -389,24 +391,23 @@ impl UdfCatalog {
             return_type: None,
             example: None,
         });
-        self.table_functions
-            .write()
-            .unwrap()
-            .insert(name, Arc::new(tvf));
+        if let Ok(mut table_fns) = self.table_functions.write() {
+            table_fns.insert(name, Arc::new(tvf));
+        }
     }
 
     /// Get a table function by name.
     pub fn get_table_function(&self, name: &str) -> Option<Arc<TableFunction>> {
         self.table_functions
             .read()
-            .unwrap()
+            .ok()?
             .get(&name.to_uppercase())
             .cloned()
     }
 
     /// List all catalog entries.
     pub fn list(&self) -> Vec<UdfCatalogEntry> {
-        self.entries.read().unwrap().clone()
+        self.entries.read().map(|e| e.clone()).unwrap_or_default()
     }
 
     /// Search catalog by name pattern (case-insensitive substring).
@@ -414,27 +415,33 @@ impl UdfCatalog {
         let pattern = pattern.to_uppercase();
         self.entries
             .read()
-            .unwrap()
-            .iter()
-            .filter(|e| e.name.contains(&pattern))
-            .cloned()
-            .collect()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|e| e.name.contains(&pattern))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// List entries by kind.
     pub fn list_by_kind(&self, kind: UdfKind) -> Vec<UdfCatalogEntry> {
         self.entries
             .read()
-            .unwrap()
-            .iter()
-            .filter(|e| e.kind == kind)
-            .cloned()
-            .collect()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|e| e.kind == kind)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Total number of registered functions.
     pub fn count(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries.read().map(|e| e.len()).unwrap_or(0)
     }
 }
 
