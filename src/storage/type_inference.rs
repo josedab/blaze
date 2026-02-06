@@ -378,7 +378,7 @@ pub fn infer_json_schema(
                     column_order.push(key.clone());
                     columns.insert(key.clone(), ColumnInference::new(key.clone()));
                 }
-                let col = columns.get_mut(&key).unwrap();
+                let col = columns.get_mut(&key).expect("key was just inserted");
 
                 match &value {
                     serde_json::Value::Null => col.record_null(),

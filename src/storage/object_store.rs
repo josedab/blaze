@@ -284,7 +284,7 @@ impl CachingObjectStore {
         max_cache_bytes: usize,
         max_entries: usize,
     ) -> Self {
-        let cap = NonZeroUsize::new(max_entries).unwrap_or(NonZeroUsize::new(64).unwrap());
+        let cap = NonZeroUsize::new(max_entries).unwrap_or(NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN));
         Self {
             inner,
             cache: Mutex::new(LruCache::new(cap)),
@@ -528,8 +528,8 @@ impl PartitionDiscovery {
             .filter_map(|segment| {
                 if Self::is_partition_segment(segment) {
                     let mut parts = segment.splitn(2, '=');
-                    let name = parts.next().unwrap().to_string();
-                    let value = parts.next().unwrap().to_string();
+                    let name = parts.next().unwrap_or_default().to_string();
+                    let value = parts.next().unwrap_or_default().to_string();
                     Some((name, value))
                 } else {
                     None

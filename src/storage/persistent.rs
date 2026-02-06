@@ -83,7 +83,7 @@ pub struct BufferPool {
 impl BufferPool {
     /// Create a new buffer pool with the given page capacity.
     pub fn new(capacity: usize) -> Self {
-        let cap = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1).unwrap());
+        let cap = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN));
         Self {
             cache: Mutex::new(LruCache::new(cap)),
             capacity,
@@ -92,19 +92,23 @@ impl BufferPool {
 
     /// Retrieve a page from the cache, promoting it in the LRU order.
     pub fn get_page(&self, page_id: u64) -> Option<Page> {
-        self.cache.lock().unwrap().get(&page_id).cloned()
+        self.cache.lock().ok()?.get(&page_id).cloned()
     }
 
     /// Insert or update a page in the cache.
     ///
     /// If the cache is at capacity the least-recently-used page is evicted.
     pub fn put_page(&self, page: Page) {
-        self.cache.lock().unwrap().put(page.page_id, page);
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.put(page.page_id, page);
+        }
     }
 
     /// Flush (clear) all pages from the buffer pool.
     pub fn flush(&self) {
-        self.cache.lock().unwrap().clear();
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
+        }
     }
 
     /// Return the configured capacity.
@@ -114,7 +118,7 @@ impl BufferPool {
 
     /// Return the number of pages currently cached.
     pub fn len(&self) -> usize {
-        self.cache.lock().unwrap().len()
+        self.cache.lock().map(|c| c.len()).unwrap_or(0)
     }
 
     /// Return `true` if the cache contains no pages.
@@ -374,7 +378,9 @@ impl PersistentTable {
         let wal_path = path.join(&config.wal_dir).join("wal.log");
 
         fs::create_dir_all(&data_dir)?;
-        fs::create_dir_all(wal_path.parent().unwrap())?;
+        fs::create_dir_all(wal_path.parent().ok_or_else(|| {
+            BlazeError::execution("WAL path has no parent directory")
+        })?)?;
 
         // Persist the schema as JSON for later reopening.
         let schema_path = path.join("schema.json");
@@ -481,7 +487,9 @@ impl PersistentTable {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        self.wal.lock().unwrap().checkpoint(&table_name)?;
+        self.wal.lock().map_err(|e| {
+            BlazeError::execution(format!("Failed to acquire WAL lock: {e}"))
+        })?.checkpoint(&table_name)?;
 
         Ok(())
     }
@@ -723,7 +731,9 @@ impl TableProvider for PersistentTable {
             let encoded = Self::encode_batch(batch)?;
             self.wal
                 .lock()
-                .unwrap()
+                .map_err(|e| {
+                    BlazeError::execution(format!("Failed to acquire WAL lock: {e}"))
+                })?
                 .append(WalOperation::Insert, &table_name, Some(encoded))?;
             count += batch.num_rows();
         }
