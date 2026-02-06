@@ -351,7 +351,7 @@ pub fn coalesce_batches(batches: Vec<RecordBatch>) -> Result<Option<RecordBatch>
     }
 
     if batches.len() == 1 {
-        return Ok(Some(batches.into_iter().next().unwrap()));
+        return Ok(batches.into_iter().next());
     }
 
     let schema = batches[0].schema();

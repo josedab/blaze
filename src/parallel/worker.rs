@@ -99,7 +99,7 @@ impl WorkerPool {
 
         // For single task, execute directly
         if num_tasks == 1 {
-            let task = tasks.into_iter().next().unwrap();
+            let task = tasks.into_iter().next().ok_or_else(|| BlazeError::execution("Expected at least one task"))?;
             let result = task.execute(1);
             return Ok(vec![result]);
         }
@@ -131,7 +131,16 @@ impl WorkerPool {
 
                         // Take the task
                         let task = {
-                            let mut guard = tasks[idx].lock().unwrap();
+                            let mut guard = match tasks[idx].lock() {
+                                Ok(g) => g,
+                                Err(e) => {
+                                    let mut rg = results.lock().unwrap_or_else(|e| e.into_inner());
+                                    rg[idx] = Some(Err(BlazeError::execution(format!(
+                                        "Task mutex poisoned: {}", e
+                                    ))));
+                                    continue;
+                                }
+                            };
                             guard.take()
                         };
 
@@ -140,7 +149,8 @@ impl WorkerPool {
                             let result = task.execute(num_tasks);
 
                             // Store result
-                            let mut results_guard = results.lock().unwrap();
+                            let mut results_guard =
+                                results.lock().unwrap_or_else(|e| e.into_inner());
                             results_guard[partition_id] = Some(result);
                         }
                     }
@@ -149,7 +159,9 @@ impl WorkerPool {
         });
 
         // Collect results
-        let mut results_guard = results.lock().unwrap();
+        let mut results_guard = results
+            .lock()
+            .map_err(|e| BlazeError::execution(format!("Results mutex poisoned: {}", e)))?;
         let final_results: Vec<TaskResult> = results_guard
             .iter_mut()
             .map(|opt| {
@@ -231,7 +243,7 @@ impl<T> TaskFuture<T> {
     /// Try to get the result without blocking.
     pub fn try_get(&self) -> Option<T> {
         if self.completed.load(Ordering::SeqCst) {
-            self.result.lock().unwrap().take()
+            self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
         } else {
             None
         }
@@ -255,7 +267,7 @@ pub struct TaskFutureSetter<T> {
 impl<T> TaskFutureSetter<T> {
     /// Set the result.
     pub fn set(self, value: T) {
-        let mut guard = self.result.lock().unwrap();
+        let mut guard = self.result.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(value);
         self.completed.store(true, Ordering::SeqCst);
     }
