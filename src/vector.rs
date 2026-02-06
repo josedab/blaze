@@ -507,10 +507,10 @@ impl HnswIndex {
             return Ok(node_id);
         }
 
-        let entry = self.entry_point.unwrap();
+        let entry = self.entry_point.ok_or_else(|| {
+            BlazeError::execution("Entry point should exist after initial check")
+        })?;
         let mut current = entry;
-
-        // Traverse from top layer down to level+1, greedily finding closest node
         for layer in (level + 1..=self.max_layer).rev() {
             current = self.greedy_search_layer(&self.nodes[node_id].vector, current, layer)?;
         }
@@ -678,11 +678,17 @@ impl HnswIndex {
         }
         let mut pos = 0;
 
-        let node_count = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize;
+        let node_count = u64::from_le_bytes(bytes[pos..pos + 8].try_into().map_err(|_| {
+            BlazeError::invalid_argument("Invalid HNSW index data: bad node count bytes")
+        })?) as usize;
         pos += 8;
-        let max_layer = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let max_layer = u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
+            BlazeError::invalid_argument("Invalid HNSW index data: bad max_layer bytes")
+        })?) as usize;
         pos += 4;
-        let ep = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize;
+        let ep = u64::from_le_bytes(bytes[pos..pos + 8].try_into().map_err(|_| {
+            BlazeError::invalid_argument("Invalid HNSW index data: bad entry point bytes")
+        })?) as usize;
         pos += 8;
         let metric_byte = bytes[pos];
         pos += 1;
@@ -701,27 +707,37 @@ impl HnswIndex {
             if pos + 4 > bytes.len() {
                 return Err(BlazeError::invalid_argument("Truncated HNSW index data"));
             }
-            let dim = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+            let dim = u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
+                BlazeError::invalid_argument("Truncated HNSW index data: bad dimension bytes")
+            })?) as usize;
             pos += 4;
 
             let mut vector = Vec::with_capacity(dim);
             for _ in 0..dim {
-                vector.push(f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()));
+                vector.push(f32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
+                    BlazeError::invalid_argument("Truncated HNSW index data: bad vector bytes")
+                })?));
                 pos += 4;
             }
 
-            let num_layers = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+            let num_layers = u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
+                BlazeError::invalid_argument("Truncated HNSW index data: bad layer count bytes")
+            })?) as usize;
             pos += 4;
 
             let mut connections = Vec::with_capacity(num_layers);
             for _ in 0..num_layers {
                 let num_conns =
-                    u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+                    u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
+                        BlazeError::invalid_argument("Truncated HNSW index data: bad connection count bytes")
+                    })?) as usize;
                 pos += 4;
                 let mut conns = Vec::with_capacity(num_conns);
                 for _ in 0..num_conns {
                     conns
-                        .push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize);
+                        .push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().map_err(|_| {
+                            BlazeError::invalid_argument("Truncated HNSW index data: bad connection bytes")
+                        })?) as usize);
                     pos += 8;
                 }
                 connections.push(conns);
@@ -749,7 +765,9 @@ impl VectorIndex for HnswIndex {
             return Ok(Vec::new());
         }
 
-        let entry = self.entry_point.unwrap();
+        let entry = self.entry_point.ok_or_else(|| {
+            BlazeError::execution("HNSW index has nodes but no entry point")
+        })?;
         let mut current = entry;
 
         // Traverse from top layer to layer 1
@@ -1486,7 +1504,7 @@ impl VectorIndexManager {
                 meta,
             },
         );
-        self.indexes.get_mut(name).unwrap().index.as_mut()
+        self.indexes.get_mut(name).expect("just inserted").index.as_mut()
     }
 
     /// Create and register a new brute force index.
@@ -1513,7 +1531,7 @@ impl VectorIndexManager {
                 meta,
             },
         );
-        self.indexes.get_mut(name).unwrap().index.as_mut()
+        self.indexes.get_mut(name).expect("just inserted").index.as_mut()
     }
 
     /// Get an index by name.
