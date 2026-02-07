@@ -556,7 +556,9 @@ fn parse_path_segments(path: &str) -> Result<Vec<PathSegment>> {
                     if next == '.' || next == '[' {
                         break;
                     }
-                    key.push(chars.next().unwrap());
+                    if let Some(ch) = chars.next() {
+                        key.push(ch);
+                    }
                 }
                 if !key.is_empty() {
                     segments.push(PathSegment::Key(key));
@@ -618,7 +620,9 @@ fn extract_path<'a>(value: &'a Value, path: &str) -> Result<Option<&'a Value>> {
                     if next_c == '.' || next_c == '[' {
                         break;
                     }
-                    key.push(chars.next().unwrap());
+                    if let Some(ch) = chars.next() {
+                        key.push(ch);
+                    }
                 }
 
                 if key.is_empty() {
@@ -767,13 +771,13 @@ pub fn infer_json_schema(documents: &[String]) -> Result<HashMap<String, String>
         .into_iter()
         .map(|(k, types)| {
             let resolved = if types.len() == 1 {
-                types.into_iter().next().unwrap()
+                types.into_iter().next().unwrap_or_default()
             } else {
                 // Multiple types seen — mark as mixed
                 let non_null: std::collections::HashSet<_> =
                     types.into_iter().filter(|t| t != "null").collect();
                 if non_null.len() == 1 {
-                    non_null.into_iter().next().unwrap()
+                    non_null.into_iter().next().unwrap_or_default()
                 } else {
                     "mixed".to_string()
                 }
