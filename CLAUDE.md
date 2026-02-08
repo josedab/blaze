@@ -24,6 +24,14 @@ cargo fmt
 
 # Run the CLI
 cargo run
+
+# Makefile shortcuts
+make              # Format + test (default)
+make quick        # Fast syntax check + test
+make fix          # Auto-fix formatting + clippy
+make setup        # First-time contributor setup
+make test-all     # Test all feature flags
+make watch        # Re-run checks on file changes
 ```
 
 ## Project Structure
@@ -33,6 +41,12 @@ src/
 ├── lib.rs              # Main library entry point, Connection API
 ├── main.rs             # CLI binary
 ├── error.rs            # Error types (BlazeError, Result)
+├── prepared.rs         # Prepared statements and caching
+├── transaction.rs      # Transaction management (BEGIN/COMMIT/ROLLBACK)
+├── udf.rs              # User-defined functions
+├── output.rs           # Output formatting (table, CSV, JSON, Arrow)
+├── pool.rs             # Connection pooling
+├── profiler.rs         # Query profiling
 ├── catalog/            # Database catalog (tables, schemas, databases)
 │   ├── mod.rs          # CatalogList, Catalog, Schema management
 │   └── table.rs        # TableProvider trait
@@ -48,6 +62,7 @@ src/
 │   ├── physical_planner.rs # Logical to physical plan conversion
 │   ├── binder.rs       # SQL AST to logical plan binding
 │   └── optimizer.rs    # Query optimization rules
+├── optimizer/          # Advanced optimization (cost model, statistics, join ordering)
 ├── sql/                # SQL parsing
 │   └── parser.rs       # SQL parser using sqlparser-rs
 ├── storage/            # Data storage
@@ -55,11 +70,28 @@ src/
 │   ├── memory.rs       # In-memory tables
 │   ├── csv.rs          # CSV file support
 │   └── parquet.rs      # Parquet file support
-└── types/              # Type system
-    ├── mod.rs          # Type exports
-    ├── datatype.rs     # DataType enum
-    ├── schema.rs       # Schema, Field definitions
-    └── value.rs        # ScalarValue for literals
+├── types/              # Type system
+│   ├── mod.rs          # Type exports
+│   ├── datatype.rs     # DataType enum
+│   ├── schema.rs       # Schema, Field definitions
+│   └── value.rs        # ScalarValue for literals
+│
+│   # Extension modules (feature-gated, enable with --features <name>)
+├── adaptive/           # Adaptive query execution (feature: adaptive)
+├── federation.rs       # Federated query support (feature: federation)
+├── flight.rs           # Arrow Flight protocol (feature: flight)
+├── gpu/                # GPU acceleration (feature: gpu)
+├── lakehouse/          # Delta Lake / Iceberg support (feature: lakehouse)
+├── learned_optimizer.rs # ML-based optimization (feature: learned-optimizer)
+├── nlq/                # Natural language queries (feature: nlq)
+├── simd/               # SIMD optimizations (feature: simd)
+├── streaming.rs        # Streaming query execution (feature: streaming)
+├── timeseries.rs       # Time series operations (feature: timeseries)
+│
+│   # Platform binding modules (feature-gated)
+├── ffi/                # C FFI bindings (feature: c-ffi)
+├── python.rs           # Python bindings via PyO3 (feature: python)
+└── wasm/               # WASM bindings (always compiled)
 ```
 
 ## Key Concepts
