@@ -13,6 +13,30 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 - **Multi-Platform**: Rust library, CLI, WASM, Node.js, Python, and C FFI bindings
 - **COPY TO**: Export query results to Parquet, CSV, or JSON files
 
+### Feature Maturity
+
+| Feature | Status | Feature Flag |
+|---------|--------|-------------|
+| Core SQL Engine | ✅ Stable | _(default)_ |
+| CSV/Parquet Storage | ✅ Stable | _(default)_ |
+| In-Memory Tables | ✅ Stable | _(default)_ |
+| Prepared Statements | ✅ Stable | _(default)_ |
+| Window Functions | ✅ Stable | _(default)_ |
+| Connection Pooling | ✅ Stable | _(default)_ |
+| WASM Bindings | ✅ Stable | _(default)_ |
+| SIMD Optimization | ⚠️ Experimental | `simd` |
+| Arrow Flight / Flight SQL | ⚠️ Experimental | `flight` |
+| Time-Series Extensions | ⚠️ Experimental | `timeseries` |
+| Streaming Queries | ⚠️ Experimental | `streaming` |
+| Adaptive Query Execution | ⚠️ Experimental | `adaptive` |
+| Lakehouse (Delta Lake) | ⚠️ Experimental | `lakehouse` |
+| Federated Queries | 🚧 Preview | `federation` |
+| GPU Acceleration | 🚧 Preview | `gpu` |
+| Natural Language Queries | 🚧 Preview | `nlq` |
+| Learned Optimizer | 🚧 Preview | `learned-optimizer` |
+
+**Legend**: ✅ Production-ready • ⚠️ API may change • 🚧 Not feature-complete
+
 ## Quick Start
 
 ### Registering Data from Files
@@ -177,10 +201,26 @@ cargo run -- -c "SELECT * FROM users" --format csv --output results.csv
 ## Building
 
 ```bash
-cargo build            # Debug build
-cargo build --release  # Release build
-cargo test             # Run tests
+cargo build            # Debug build (~10s)
+cargo build --release  # Release build (~3-4min)
+cargo test             # Run tests (~0.2s, 500+ tests)
 cargo clippy           # Linting
+```
+
+## Development
+
+For contributors, see [CONTRIBUTING.md](CONTRIBUTING.md) for a full guide.
+
+```bash
+# First-time setup (installs pre-commit hook, verifies toolchain)
+make setup
+
+# Daily workflow
+make              # Format code + run tests
+make quick        # Fast check: syntax + tests
+make fix          # Auto-fix formatting + clippy issues
+make watch        # Re-run checks on file changes (requires cargo-watch)
+make test-all     # Test all feature flags
 ```
 
 ## Benchmarks
@@ -399,7 +439,7 @@ For comprehensive documentation, see the [Blaze Documentation Website](./website
 
 ## Contributing
 
-See `CLAUDE.md` for detailed development guidelines including code conventions, testing patterns, and architecture overview.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and conventions. For architecture details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## License
 
