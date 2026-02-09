@@ -36,9 +36,9 @@ impl GitRef {
         if s.eq_ignore_ascii_case("head") {
             GitRef::Head
         } else if s.starts_with("refs/heads/") {
-            GitRef::Branch(s.strip_prefix("refs/heads/").unwrap().to_string())
+            GitRef::Branch(s.strip_prefix("refs/heads/").unwrap_or(s).to_string())
         } else if s.starts_with("refs/tags/") {
-            GitRef::Tag(s.strip_prefix("refs/tags/").unwrap().to_string())
+            GitRef::Tag(s.strip_prefix("refs/tags/").unwrap_or(s).to_string())
         } else if s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()) {
             // Looks like a commit SHA
             GitRef::Commit(s.to_string())
