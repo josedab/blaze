@@ -24,10 +24,12 @@
 
 mod codegen;
 mod jit;
+pub mod strings;
 mod vectorize;
 
 pub use codegen::{CodeGenerator, GeneratedCode, Instruction, Register};
 pub use jit::{CompiledKernel, JitCompiler, JitConfig, JitFunction};
+pub use strings::VectorizedStringOps;
 pub use vectorize::{
     detect_simd_capabilities, SimdAggregateOps, SimdCapabilities, SimdFilterOps, SimdVector,
     SimdVectorOps,
