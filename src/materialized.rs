@@ -2261,7 +2261,7 @@ impl MaterializedViewRewriter {
                 + (sig.group_by_columns.len() as f64) * 0.5
                 + (sig.aggregate_columns.len() as f64) * 0.3;
 
-            if best_match.is_none() || score > best_match.unwrap().1 {
+            if best_match.is_none_or(|(_, s)| score > s) {
                 best_match = Some((name.as_str(), score));
             }
         }
