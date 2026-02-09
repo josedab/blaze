@@ -251,13 +251,12 @@ impl ChartRenderer {
 
         let mut out = String::new();
         if let Some(ref title) = self.config.title {
-            writeln!(out, "{}", title).unwrap();
-            writeln!(
+            let _ = writeln!(out, "{}", title);
+            let _ = writeln!(
                 out,
                 "{}",
                 "─".repeat(self.config.width.min(title.len() + 20))
-            )
-            .unwrap();
+            );
         }
 
         for (label, &val) in labels.iter().zip(values.iter()) {
@@ -274,17 +273,16 @@ impl ChartRenderer {
 
             let padded = self.pad_label(label);
             if self.config.show_values {
-                writeln!(
+                let _ = writeln!(
                     out,
                     "{}  {:<bw$} {}",
                     padded,
                     bar,
                     Self::format_number(val),
                     bw = bar_area
-                )
-                .unwrap();
+                );
             } else {
-                writeln!(out, "{}  {}", padded, bar).unwrap();
+                let _ = writeln!(out, "{}  {}", padded, bar);
             }
         }
 
@@ -358,13 +356,12 @@ impl ChartRenderer {
             .title
             .clone()
             .unwrap_or_else(|| format!("Distribution of {} ({} bins)", col_name, num_bins));
-        writeln!(out, "{}", title).unwrap();
-        writeln!(
+        let _ = writeln!(out, "{}", title);
+        let _ = writeln!(
             out,
             "{}",
             "─".repeat(self.config.width.min(title.len() + 20))
-        )
-        .unwrap();
+        );
 
         for (label, &count) in bin_labels.iter().zip(counts.iter()) {
             let ratio = count as f64 / max_count as f64;
@@ -372,9 +369,9 @@ impl ChartRenderer {
             let bar = FULL_BLOCK.to_string().repeat(full_blocks);
             let padded = self.pad_label(label);
             if self.config.show_values {
-                writeln!(out, "{}  {:<bw$} {}", padded, bar, count, bw = bar_area).unwrap();
+                let _ = writeln!(out, "{}  {:<bw$} {}", padded, bar, count, bw = bar_area);
             } else {
-                writeln!(out, "{}  {}", padded, bar).unwrap();
+                let _ = writeln!(out, "{}  {}", padded, bar);
             }
         }
 
@@ -449,31 +446,31 @@ impl ChartRenderer {
         // or just leave markers. Keep it simple: markers only.
         let mut out = String::new();
         if let Some(ref title) = self.config.title {
-            writeln!(out, "{}", title).unwrap();
+            let _ = writeln!(out, "{}", title);
         }
 
         let label_w = 8; // y-axis label width
         for (r, row) in grid.iter().enumerate() {
             if self.config.show_labels {
                 let y_val = max_y - (r as f64 / (height - 1) as f64) * range;
-                write!(out, "{:>w$.1} │", y_val, w = label_w).unwrap();
+                let _ = write!(out, "{:>w$.1} │", y_val, w = label_w);
             }
             let line: String = row.iter().collect();
-            writeln!(out, "{}", line).unwrap();
+            let _ = writeln!(out, "{}", line);
         }
 
         // x-axis
         if self.config.show_labels {
-            write!(out, "{:>w$} └", "", w = label_w).unwrap();
-            writeln!(out, "{}", "─".repeat(plot_width)).unwrap();
+            let _ = write!(out, "{:>w$} └", "", w = label_w);
+            let _ = writeln!(out, "{}", "─".repeat(plot_width));
             // Print first and last label.
             if let (Some(first), Some(last)) = (x_labels.first(), x_labels.last()) {
-                write!(out, "{:>w$}  ", "", w = label_w).unwrap();
+                let _ = write!(out, "{:>w$}  ", "", w = label_w);
                 if plot_width > first.len() + last.len() {
                     let gap = plot_width - first.len() - last.len();
-                    writeln!(out, "{}{:>gap$}", first, last, gap = gap).unwrap();
+                    let _ = writeln!(out, "{}{:>gap$}", first, last, gap = gap);
                 } else {
-                    writeln!(out, "{}", first).unwrap();
+                    let _ = writeln!(out, "{}", first);
                 }
             }
         }
@@ -495,13 +492,12 @@ impl ChartRenderer {
 
         let schema = batch.schema();
         let mut out = String::new();
-        writeln!(
+        let _ = writeln!(
             out,
             "{:<20} {:>10} {:>12} {:>12} {:>12}",
             "Column", "Count", "Min", "Max", "Mean"
-        )
-        .unwrap();
-        writeln!(out, "{}", "─".repeat(68)).unwrap();
+        );
+        let _ = writeln!(out, "{}", "─".repeat(68));
 
         let mut found_numeric = false;
         for (i, field) in schema.fields().iter().enumerate() {
@@ -523,7 +519,7 @@ impl ChartRenderer {
                 0.0
             };
 
-            writeln!(
+            let _ = writeln!(
                 out,
                 "{:<20} {:>10} {:>12.2} {:>12.2} {:>12.2}",
                 field.name(),
@@ -531,12 +527,11 @@ impl ChartRenderer {
                 min,
                 max,
                 mean,
-            )
-            .unwrap();
+            );
         }
 
         if !found_numeric {
-            writeln!(out, "(no numeric columns)").unwrap();
+            let _ = writeln!(out, "(no numeric columns)");
         }
 
         Ok(out)
@@ -587,22 +582,22 @@ impl ChartRenderer {
 
         let mut out = String::new();
         if let Some(ref title) = self.config.title {
-            writeln!(out, "{}", title).unwrap();
+            let _ = writeln!(out, "{}", title);
         }
 
         let label_w = 8;
         for (r, row) in grid.iter().enumerate() {
             if self.config.show_labels {
                 let y_val = y_max - (r as f64 / (height - 1).max(1) as f64) * y_range;
-                write!(out, "{:>w$.1} │", y_val, w = label_w).unwrap();
+                let _ = write!(out, "{:>w$.1} │", y_val, w = label_w);
             }
             let line: String = row.iter().collect();
-            writeln!(out, "{}", line).unwrap();
+            let _ = writeln!(out, "{}", line);
         }
 
         if self.config.show_labels {
-            write!(out, "{:>w$} └", "", w = label_w).unwrap();
-            writeln!(out, "{}", "─".repeat(plot_width)).unwrap();
+            let _ = write!(out, "{:>w$} └", "", w = label_w);
+            let _ = writeln!(out, "{}", "─".repeat(plot_width));
         }
 
         Ok(Chart {
@@ -645,13 +640,12 @@ impl ChartRenderer {
 
         let mut out = String::new();
         if let Some(ref title) = self.config.title {
-            writeln!(out, "{}", title).unwrap();
-            writeln!(
+            let _ = writeln!(out, "{}", title);
+            let _ = writeln!(
                 out,
                 "{}",
                 "─".repeat(self.config.width.min(title.len() + 20))
-            )
-            .unwrap();
+            );
         }
 
         // Summary with percentages
@@ -666,15 +660,14 @@ impl ChartRenderer {
             let ch = pie_chars[i % pie_chars.len()];
             let bar: String = std::iter::repeat_n(ch, fill).collect();
             let padded = self.pad_label(label);
-            writeln!(
+            let _ = writeln!(
                 out,
                 "{}  {:<bw$} {:>5.1}%",
                 padded,
                 bar,
                 pct,
                 bw = bar_width
-            )
-            .unwrap();
+            );
         }
 
         Ok(Chart {
@@ -715,7 +708,7 @@ impl ChartRenderer {
 
         let mut out = String::new();
         if let Some(ref title) = self.config.title {
-            writeln!(out, "{}", title).unwrap();
+            let _ = writeln!(out, "{}", title);
         }
 
         for chunk in values.chunks(cols) {
@@ -726,16 +719,15 @@ impl ChartRenderer {
                     heat_chars[idx.min(4)]
                 })
                 .collect();
-            writeln!(out, "│{}│", row).unwrap();
+            let _ = writeln!(out, "│{}│", row);
         }
 
         // Legend
-        writeln!(
+        let _ = writeln!(
             out,
             "  Low {} {} {} {} High",
             heat_chars[0], heat_chars[1], heat_chars[2], heat_chars[3]
-        )
-        .unwrap();
+        );
 
         Ok(Chart {
             chart_type: ChartType::Heatmap,
@@ -847,20 +839,18 @@ impl ChartRenderer {
         let bar_area = chart_width - 200;
 
         let mut svg = String::new();
-        writeln!(
+        let _ = writeln!(
             svg,
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}">"#,
             chart_width, chart_height
-        )
-        .unwrap();
+        );
 
         if let Some(ref title) = self.config.title {
-            writeln!(
+            let _ = writeln!(
                 svg,
                 r#"  <text x="{}" y="20" font-size="16" font-weight="bold" text-anchor="middle">{}</text>"#,
                 chart_width / 2, title
-            )
-            .unwrap();
+            );
         }
 
         let colors = [
@@ -872,32 +862,29 @@ impl ChartRenderer {
             let width = ((val / max_val) * bar_area as f64) as usize;
             let color = colors[i % colors.len()];
 
-            writeln!(
+            let _ = writeln!(
                 svg,
                 r#"  <text x="130" y="{}" font-size="12" text-anchor="end" dominant-baseline="middle">{}</text>"#,
                 y + bar_height / 2, label
-            )
-            .unwrap();
-            writeln!(
+            );
+            let _ = writeln!(
                 svg,
                 r#"  <rect x="140" y="{}" width="{}" height="{}" fill="{}" rx="3"/>"#,
                 y,
                 width,
                 bar_height - 2,
                 color
-            )
-            .unwrap();
-            writeln!(
+            );
+            let _ = writeln!(
                 svg,
                 r#"  <text x="{}" y="{}" font-size="11" dominant-baseline="middle">{}</text>"#,
                 145 + width,
                 y + bar_height / 2,
                 Self::format_number(val)
-            )
-            .unwrap();
+            );
         }
 
-        writeln!(svg, "</svg>").unwrap();
+        let _ = writeln!(svg, "</svg>");
         Ok(svg)
     }
 }
