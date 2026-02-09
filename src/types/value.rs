@@ -62,6 +62,8 @@ pub enum ScalarValue {
     Struct(Option<Vec<ScalarValue>>, Vec<(String, DataType)>),
     /// JSON value (stored as UTF-8 string)
     Json(Option<String>),
+    /// Vector embedding (fixed-dimension Float32 array)
+    Vector(Option<Vec<f32>>, usize),
 }
 
 impl ScalarValue {
@@ -97,6 +99,7 @@ impl ScalarValue {
             DataType::List(inner) => ScalarValue::List(None, inner.clone()),
             DataType::Struct(fields) => ScalarValue::Struct(None, fields.clone()),
             DataType::Json => ScalarValue::Json(None),
+            DataType::Vector { dimension } => ScalarValue::Vector(None, *dimension),
             _ => ScalarValue::Null,
         }
     }
@@ -127,6 +130,7 @@ impl ScalarValue {
             ScalarValue::List(v, _) => v.is_none(),
             ScalarValue::Struct(v, _) => v.is_none(),
             ScalarValue::Json(v) => v.is_none(),
+            ScalarValue::Vector(v, _) => v.is_none(),
         }
     }
 
@@ -162,6 +166,9 @@ impl ScalarValue {
             ScalarValue::List(_, inner) => DataType::List(inner.clone()),
             ScalarValue::Struct(_, fields) => DataType::Struct(fields.clone()),
             ScalarValue::Json(_) => DataType::Json,
+            ScalarValue::Vector(_, dimension) => DataType::Vector {
+                dimension: *dimension,
+            },
         }
     }
 
@@ -341,6 +348,43 @@ impl ScalarValue {
             ScalarValue::Json(v) => {
                 let arr: StringArray = (0..size).map(|_| v.as_deref()).collect();
                 std::sync::Arc::new(arr)
+            }
+            ScalarValue::Vector(v, dimension) => {
+                use arrow::array::{FixedSizeListArray, Float32Array};
+                use arrow::datatypes::{DataType as ArrowDataType, Field};
+
+                let dim = *dimension as i32;
+                let field = Arc::new(Field::new("item", ArrowDataType::Float32, true));
+
+                match v {
+                    Some(values) => {
+                        let float_arr = Float32Array::from(
+                            (0..size)
+                                .flat_map(|_| values.iter().copied())
+                                .collect::<Vec<f32>>(),
+                        );
+                        let arr = FixedSizeListArray::new(
+                            field,
+                            dim,
+                            Arc::new(float_arr),
+                            None,
+                        );
+                        Arc::new(arr)
+                    }
+                    None => {
+                        let float_arr =
+                            Float32Array::from(vec![0.0f32; size * *dimension]);
+                        let nulls =
+                            arrow::buffer::NullBuffer::new_null(size);
+                        let arr = FixedSizeListArray::new(
+                            field,
+                            dim,
+                            Arc::new(float_arr),
+                            Some(nulls),
+                        );
+                        Arc::new(arr)
+                    }
+                }
             }
             _ => {
                 return Err(BlazeError::not_implemented(format!(
@@ -541,6 +585,7 @@ impl PartialEq for ScalarValue {
                 },
             ) => v1 == v2 && u1 == u2 && t1 == t2,
             (ScalarValue::Json(a), ScalarValue::Json(b)) => a == b,
+            (ScalarValue::Vector(a, d1), ScalarValue::Vector(b, d2)) => a == b && d1 == d2,
             _ => false,
         }
     }
@@ -602,6 +647,14 @@ impl Hash for ScalarValue {
                 }
             }
             ScalarValue::Json(v) => v.hash(state),
+            ScalarValue::Vector(v, dim) => {
+                if let Some(vals) = v {
+                    for f in vals {
+                        f.to_bits().hash(state);
+                    }
+                }
+                dim.hash(state);
+            }
         }
     }
 }
@@ -699,6 +752,17 @@ impl fmt::Display for ScalarValue {
             ScalarValue::Struct(None, _) => write!(f, "NULL"),
             ScalarValue::Json(Some(v)) => write!(f, "'{}'", v),
             ScalarValue::Json(None) => write!(f, "NULL"),
+            ScalarValue::Vector(Some(v), _) => {
+                write!(f, "[")?;
+                for (i, val) in v.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", val)?;
+                }
+                write!(f, "]")
+            }
+            ScalarValue::Vector(None, _) => write!(f, "NULL"),
         }
     }
 }

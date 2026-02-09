@@ -86,6 +86,8 @@ pub enum DataType {
     },
     /// JSON data (stored as UTF-8 string)
     Json,
+    /// Fixed-dimension vector of Float32 values for embeddings
+    Vector { dimension: usize },
 }
 
 /// Time unit for temporal types.
@@ -121,6 +123,19 @@ impl DataType {
                 precision: 38,
                 scale: 0,
             };
+        }
+
+        if sql_type.starts_with("VECTOR") {
+            if let Some(start) = sql_type.find('(') {
+                if let Some(end) = sql_type.find(')') {
+                    let dim_str = sql_type[start + 1..end].trim();
+                    if let Ok(dimension) = dim_str.parse::<usize>() {
+                        return DataType::Vector { dimension };
+                    }
+                }
+            }
+            // Default dimension if not specified
+            return DataType::Vector { dimension: 128 };
         }
 
         if sql_type.starts_with("VARCHAR")
@@ -267,6 +282,11 @@ impl DataType {
         matches!(self, DataType::Json)
     }
 
+    /// Check if this type is a vector (embedding).
+    pub fn is_vector(&self) -> bool {
+        matches!(self, DataType::Vector { .. })
+    }
+
     /// Get the default value for this type (typically null-like).
     pub fn default_value(&self) -> &'static str {
         match self {
@@ -361,6 +381,14 @@ impl DataType {
             }
             // JSON is stored as UTF-8 string in Arrow
             DataType::Json => ArrowDataType::Utf8,
+            DataType::Vector { dimension } => ArrowDataType::FixedSizeList(
+                arrow::datatypes::FieldRef::new(arrow::datatypes::Field::new(
+                    "item",
+                    ArrowDataType::Float32,
+                    true,
+                )),
+                *dimension as i32,
+            ),
         }
     }
 
@@ -423,6 +451,12 @@ impl DataType {
                 Ok(DataType::List(Box::new(inner)))
             }
             ArrowDataType::FixedSizeList(field, size) => {
+                // Detect vector type: FixedSizeList of Float32
+                if matches!(field.data_type(), ArrowDataType::Float32) {
+                    return Ok(DataType::Vector {
+                        dimension: *size as usize,
+                    });
+                }
                 let element_type = DataType::from_arrow(field.data_type())?;
                 Ok(DataType::FixedSizeList {
                     element_type: Box::new(element_type),
@@ -525,6 +559,7 @@ impl fmt::Display for DataType {
                 value_type,
             } => write!(f, "MAP({}, {})", key_type, value_type),
             DataType::Json => write!(f, "JSON"),
+            DataType::Vector { dimension } => write!(f, "VECTOR({})", dimension),
         }
     }
 }
