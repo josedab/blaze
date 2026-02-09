@@ -351,7 +351,7 @@ impl DataFrame {
             execution_context: self.execution_context.clone(),
             sql_builder: {
                 let mut b = self.sql_builder.clone();
-                if b.limit.is_none() || b.limit.unwrap() > max_rows {
+                if b.limit.is_none_or(|l| l > max_rows) {
                     b.limit = Some(max_rows);
                 }
                 b
