@@ -1,4 +1,4 @@
-.PHONY: build check test lint fmt doc bench clean release all setup fix quick watch
+.PHONY: build check test lint fmt doc bench bench-tpch clean release all setup fix quick watch bump-patch bump-minor bump-major examples
 
 # Default: format + test (always works for new contributors)
 all: fmt test
@@ -64,9 +64,18 @@ doc:
 bench:
 	cargo bench
 
+# Run TPC-H benchmarks only
+bench-tpch:
+	cargo bench --bench tpch_benchmarks
+
 # Clean build artifacts
 clean:
 	cargo clean
+
+# Run examples
+examples:
+	cargo run --example basic_queries
+	cargo run --example advanced_queries
 
 # Run the CLI
 run:
@@ -92,3 +101,13 @@ setup:
 
 # Quick iteration: build + test
 dev: build test
+
+# Version bumping
+bump-patch:
+	./scripts/bump-version.sh patch
+
+bump-minor:
+	./scripts/bump-version.sh minor
+
+bump-major:
+	./scripts/bump-version.sh major
