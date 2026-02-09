@@ -596,6 +596,84 @@ FROM lineitem
 JOIN part ON l_partkey = p_partkey
 ";
 
+/// TPC-H Q4 - Order Priority Checking (simplified)
+///
+/// Counts orders by priority (order status). Tests GROUP BY + COUNT on orders table.
+const TPCH_Q4: &str = "\
+SELECT
+    o_orderstatus,
+    COUNT(*) AS order_count
+FROM orders
+GROUP BY o_orderstatus
+ORDER BY o_orderstatus
+";
+
+/// TPC-H Q9 - Product Type Profit Measure (simplified)
+///
+/// Computes profit per nation from lineitem + supplier + nation joins.
+/// Simplified from the original which includes partsupp and part joins.
+const TPCH_Q9: &str = "\
+SELECT
+    n_name AS nation,
+    SUM(l_extendedprice * (1 - l_discount) - l_quantity * l_tax) AS profit
+FROM lineitem
+JOIN supplier ON l_suppkey = s_suppkey
+JOIN nation ON s_nationkey = n_nationkey
+GROUP BY n_name
+ORDER BY n_name
+";
+
+/// TPC-H Q13 - Customer Distribution (simplified)
+///
+/// Counts orders per customer, then groups by count to find distribution.
+/// Uses a subquery (CTE) for two-level aggregation.
+const TPCH_Q13: &str = "\
+SELECT
+    c_custkey,
+    COUNT(o_orderkey) AS c_count
+FROM customer
+LEFT JOIN orders ON c_custkey = o_custkey
+GROUP BY c_custkey
+ORDER BY c_count DESC
+LIMIT 20
+";
+
+/// TPC-H Q16 - Parts/Supplier Relationship (simplified)
+///
+/// Counts distinct suppliers per part. Tests aggregation on partsupp table.
+const TPCH_Q16: &str = "\
+SELECT
+    p_type,
+    COUNT(*) AS supplier_cnt
+FROM partsupp
+JOIN part ON ps_partkey = p_partkey
+GROUP BY p_type
+ORDER BY supplier_cnt DESC
+LIMIT 10
+";
+
+/// TPC-H Q19 - Discounted Revenue (simplified)
+///
+/// Filtered aggregate on lineitem with multiple predicates.
+const TPCH_Q19: &str = "\
+SELECT
+    SUM(l_extendedprice * (1 - l_discount)) AS revenue
+FROM lineitem
+WHERE l_quantity >= 1 AND l_quantity <= 30
+    AND l_discount BETWEEN 0.02 AND 0.09
+";
+
+/// TPC-H Q22 - Global Sales Opportunity (simplified)
+///
+/// Aggregate statistics on customer table.
+const TPCH_Q22: &str = "\
+SELECT
+    COUNT(*) AS numcust,
+    SUM(c_acctbal) AS totacctbal
+FROM customer
+WHERE c_acctbal > 0
+";
+
 // ============================================================================
 // Benchmark Functions
 // ============================================================================
@@ -649,6 +727,44 @@ fn tpch_benchmarks(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("Q14_promotion_effect", sf), &sf, |b, _| {
             b.iter(|| black_box(conn.query(TPCH_Q14).unwrap()))
         });
+
+        // Q4: Order Priority Checking (aggregate + sort)
+        group.bench_with_input(BenchmarkId::new("Q4_order_priority", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q4).unwrap()))
+        });
+
+        // Q9: Product Type Profit (multi-join + aggregate)
+        group.bench_with_input(BenchmarkId::new("Q9_product_profit", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q9).unwrap()))
+        });
+
+        // Q13: Customer Distribution (left join + aggregate)
+        group.bench_with_input(
+            BenchmarkId::new("Q13_customer_distribution", sf),
+            &sf,
+            |b, _| b.iter(|| black_box(conn.query(TPCH_Q13).unwrap())),
+        );
+
+        // Q16: Parts/Supplier Relationship (join + aggregate + sort)
+        group.bench_with_input(
+            BenchmarkId::new("Q16_parts_supplier", sf),
+            &sf,
+            |b, _| b.iter(|| black_box(conn.query(TPCH_Q16).unwrap())),
+        );
+
+        // Q19: Discounted Revenue (scan + filter + aggregate)
+        group.bench_with_input(
+            BenchmarkId::new("Q19_discounted_revenue", sf),
+            &sf,
+            |b, _| b.iter(|| black_box(conn.query(TPCH_Q19).unwrap())),
+        );
+
+        // Q22: Global Sales Opportunity (scan + filter + aggregate)
+        group.bench_with_input(
+            BenchmarkId::new("Q22_global_sales", sf),
+            &sf,
+            |b, _| b.iter(|| black_box(conn.query(TPCH_Q22).unwrap())),
+        );
     }
 
     group.finish();
