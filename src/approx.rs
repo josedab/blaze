@@ -325,7 +325,7 @@ impl TDigest {
         }
 
         // Target weight is at or beyond the last centroid
-        Some(self.centroids.last().unwrap().mean)
+        self.centroids.last().map(|c| c.mean)
     }
 
     /// Estimate the median (50th percentile).
