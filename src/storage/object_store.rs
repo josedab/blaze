@@ -194,7 +194,7 @@ impl ObjectStoreProvider for LocalFileSystemStore {
                     last_modified: meta
                         .modified()
                         .ok()
-                        .map(|t| chrono::DateTime::<chrono::Utc>::from(t)),
+                        .map(chrono::DateTime::<chrono::Utc>::from),
                     content_type: None,
                 });
             }
@@ -210,7 +210,7 @@ impl ObjectStoreProvider for LocalFileSystemStore {
             last_modified: meta
                 .modified()
                 .ok()
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t)),
+                .map(chrono::DateTime::<chrono::Utc>::from),
             content_type: None,
         })
     }
@@ -374,7 +374,7 @@ impl ObjectStoreTable {
     /// Load batches from the object store (Parquet format).
     fn load_batches(&self) -> Result<Vec<RecordBatch>> {
         let data = self.store.get(&self.path)?;
-        let cursor = bytes::Bytes::from(data);
+        let cursor = data;
         let builder = ParquetRecordBatchReaderBuilder::try_new(cursor)?;
         let reader = builder.build()?;
 
@@ -466,6 +466,962 @@ impl TableProvider for ObjectStoreTable {
 
     fn supports_limit_pushdown(&self) -> bool {
         true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cloud storage extensions (designed for future integration)
+// ---------------------------------------------------------------------------
+
+/// A discovered partition in a partitioned dataset.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionSpec {
+    /// Partition column name-value pairs (e.g. year=2024, month=01)
+    pub columns: Vec<(String, String)>,
+    /// Object paths belonging to this partition
+    pub paths: Vec<ObjectPath>,
+}
+
+#[allow(dead_code)]
+impl PartitionSpec {
+    pub fn new() -> Self {
+        Self {
+            columns: Vec::new(),
+            paths: Vec::new(),
+        }
+    }
+
+    pub fn add_column(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.columns.push((name.into(), value.into()));
+    }
+
+    pub fn add_path(&mut self, path: ObjectPath) {
+        self.paths.push(path);
+    }
+
+    /// Returns true if this partition has the given column with the given value.
+    pub fn matches_filter(&self, column: &str, value: &str) -> bool {
+        self.columns.iter().any(|(c, v)| c == column && v == value)
+    }
+}
+
+impl Default for PartitionSpec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PartitionDiscovery
+// ---------------------------------------------------------------------------
+
+/// Discovers partitioned datasets from path patterns.
+#[allow(dead_code)]
+pub struct PartitionDiscovery;
+
+#[allow(dead_code)]
+impl PartitionDiscovery {
+    /// Parse partition columns from a path like `year=2024/month=01/data.parquet`.
+    pub fn parse_partition_path(path: &str) -> Vec<(String, String)> {
+        path.split('/')
+            .filter_map(|segment| {
+                if Self::is_partition_segment(segment) {
+                    let mut parts = segment.splitn(2, '=');
+                    let name = parts.next().unwrap().to_string();
+                    let value = parts.next().unwrap().to_string();
+                    Some((name, value))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Check if a path segment is a partition key=value.
+    pub fn is_partition_segment(segment: &str) -> bool {
+        let parts: Vec<&str> = segment.splitn(2, '=').collect();
+        parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty()
+    }
+
+    /// Prune partitions based on filter predicates.
+    pub fn prune_partitions(
+        partitions: &[PartitionSpec],
+        column: &str,
+        value: &str,
+    ) -> Vec<PartitionSpec> {
+        partitions
+            .iter()
+            .filter(|p| p.matches_filter(column, value))
+            .cloned()
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ParallelFetchConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for parallel data fetching from cloud storage.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ParallelFetchConfig {
+    pub max_concurrent_fetches: usize,
+    pub chunk_size_bytes: usize,
+    pub retry_max_attempts: u32,
+    pub retry_base_delay_ms: u64,
+    pub timeout_seconds: u64,
+}
+
+impl Default for ParallelFetchConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_fetches: 8,
+            chunk_size_bytes: 8 * 1024 * 1024, // 8 MiB
+            retry_max_attempts: 3,
+            retry_base_delay_ms: 100,
+            timeout_seconds: 30,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FetchStats
+// ---------------------------------------------------------------------------
+
+/// Statistics from a cloud storage fetch operation.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct FetchStats {
+    pub total_bytes_fetched: u64,
+    pub total_requests: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub total_duration_ms: u64,
+    pub partitions_pruned: u64,
+    pub partitions_scanned: u64,
+}
+
+#[allow(dead_code)]
+impl FetchStats {
+    /// Returns the cache hit rate as a value between 0.0 and 1.0.
+    pub fn cache_hit_rate(&self) -> f64 {
+        let total = self.cache_hits + self.cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.cache_hits as f64 / total as f64
+        }
+    }
+
+    /// Returns the average duration per request in milliseconds.
+    pub fn avg_request_duration_ms(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            self.total_duration_ms as f64 / self.total_requests as f64
+        }
+    }
+
+    /// Returns throughput in megabytes per second.
+    pub fn throughput_mbps(&self) -> f64 {
+        if self.total_duration_ms == 0 {
+            0.0
+        } else {
+            let bytes_per_ms = self.total_bytes_fetched as f64 / self.total_duration_ms as f64;
+            bytes_per_ms * 1000.0 / (1024.0 * 1024.0)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CloudStorageConfig
+// ---------------------------------------------------------------------------
+
+/// Cloud storage provider type.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudProvider {
+    S3,
+    Gcs,
+    Azure,
+    MinIO,
+    R2,
+    Local,
+}
+
+/// Credentials for authenticating with cloud storage.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum CloudCredentials {
+    Anonymous,
+    AccessKey { key_id: String, secret: String },
+    ServiceAccount { path: String },
+    Environment,
+}
+
+/// Configuration for connecting to cloud storage services.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct CloudStorageConfig {
+    pub provider: CloudProvider,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+    pub credentials: CloudCredentials,
+    pub fetch_config: ParallelFetchConfig,
+}
+
+// ---------------------------------------------------------------------------
+// Cloud Provider Implementations (S3, GCS, Azure)
+// ---------------------------------------------------------------------------
+
+/// S3-compatible object store provider.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct S3ObjectStore {
+    bucket: String,
+    region: String,
+    endpoint: Option<String>,
+    credentials: S3Credentials,
+}
+
+/// S3 authentication credentials.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct S3Credentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: Option<String>,
+}
+
+#[allow(dead_code)]
+impl S3ObjectStore {
+    pub fn new(bucket: &str, region: &str, credentials: S3Credentials) -> Self {
+        Self {
+            bucket: bucket.to_string(),
+            region: region.to_string(),
+            endpoint: None,
+            credentials,
+        }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: &str) -> Self {
+        self.endpoint = Some(endpoint.to_string());
+        self
+    }
+
+    pub fn bucket(&self) -> &str { &self.bucket }
+    pub fn region(&self) -> &str { &self.region }
+
+    /// Construct the full URL for an object.
+    pub fn object_url(&self, key: &str) -> String {
+        if let Some(endpoint) = &self.endpoint {
+            format!("{}/{}/{}", endpoint, self.bucket, key)
+        } else {
+            format!("https://{}.s3.{}.amazonaws.com/{}", self.bucket, self.region, key)
+        }
+    }
+
+    /// List objects with a prefix.
+    pub fn list_prefix(&self, prefix: &str) -> Vec<String> {
+        // Placeholder - would make actual S3 API calls
+        vec![format!("{}{}", prefix, "example.parquet")]
+    }
+}
+
+/// Google Cloud Storage provider.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct GcsObjectStore {
+    bucket: String,
+    project_id: String,
+    credentials_json: Option<String>,
+}
+
+#[allow(dead_code)]
+impl GcsObjectStore {
+    pub fn new(bucket: &str, project_id: &str) -> Self {
+        Self {
+            bucket: bucket.to_string(),
+            project_id: project_id.to_string(),
+            credentials_json: None,
+        }
+    }
+
+    pub fn with_credentials(mut self, json: &str) -> Self {
+        self.credentials_json = Some(json.to_string());
+        self
+    }
+
+    pub fn bucket(&self) -> &str { &self.bucket }
+
+    pub fn object_url(&self, key: &str) -> String {
+        format!("https://storage.googleapis.com/{}/{}", self.bucket, key)
+    }
+}
+
+/// Azure Blob Storage provider.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct AzureBlobStore {
+    account: String,
+    container: String,
+    access_key: Option<String>,
+    sas_token: Option<String>,
+}
+
+#[allow(dead_code)]
+impl AzureBlobStore {
+    pub fn new(account: &str, container: &str) -> Self {
+        Self {
+            account: account.to_string(),
+            container: container.to_string(),
+            access_key: None,
+            sas_token: None,
+        }
+    }
+
+    pub fn with_access_key(mut self, key: &str) -> Self {
+        self.access_key = Some(key.to_string());
+        self
+    }
+
+    pub fn with_sas_token(mut self, token: &str) -> Self {
+        self.sas_token = Some(token.to_string());
+        self
+    }
+
+    pub fn account(&self) -> &str { &self.account }
+    pub fn container(&self) -> &str { &self.container }
+
+    pub fn blob_url(&self, key: &str) -> String {
+        format!(
+            "https://{}.blob.core.windows.net/{}/{}",
+            self.account, self.container, key
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel Row-Group Fetching
+// ---------------------------------------------------------------------------
+
+/// Manages parallel fetching of Parquet row groups from remote storage.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct ParallelRowGroupFetcher {
+    concurrency: usize,
+    chunk_size_bytes: usize,
+    stats: FetchStats,
+}
+
+#[allow(dead_code)]
+impl ParallelRowGroupFetcher {
+    pub fn new(concurrency: usize, chunk_size_bytes: usize) -> Self {
+        Self {
+            concurrency,
+            chunk_size_bytes,
+            stats: FetchStats::default(),
+        }
+    }
+
+    pub fn from_config(config: &ParallelFetchConfig) -> Self {
+        Self::new(config.max_concurrent_fetches, config.chunk_size_bytes)
+    }
+
+    /// Plan fetch operations for a set of row groups.
+    pub fn plan_fetches(&self, row_groups: &[RowGroupMeta]) -> Vec<FetchPlan> {
+        let mut plans = Vec::new();
+        for (i, rg) in row_groups.iter().enumerate() {
+            let num_chunks = (rg.size_bytes + self.chunk_size_bytes - 1) / self.chunk_size_bytes;
+            for chunk in 0..num_chunks {
+                let offset = chunk * self.chunk_size_bytes;
+                let len = self.chunk_size_bytes.min(rg.size_bytes - offset);
+                plans.push(FetchPlan {
+                    row_group_index: i,
+                    offset: rg.offset + offset,
+                    length: len,
+                    priority: i,
+                });
+            }
+        }
+        plans
+    }
+
+    pub fn concurrency(&self) -> usize { self.concurrency }
+    pub fn stats(&self) -> &FetchStats { &self.stats }
+}
+
+/// Metadata for a Parquet row group.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RowGroupMeta {
+    pub index: usize,
+    pub offset: usize,
+    pub size_bytes: usize,
+    pub num_rows: usize,
+}
+
+/// A planned fetch operation.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct FetchPlan {
+    pub row_group_index: usize,
+    pub offset: usize,
+    pub length: usize,
+    pub priority: usize,
+}
+
+/// Column-level fetch optimizer that only retrieves needed columns.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct ColumnProjectionFetcher {
+    projected_columns: Vec<usize>,
+}
+
+#[allow(dead_code)]
+impl ColumnProjectionFetcher {
+    pub fn new(projected_columns: Vec<usize>) -> Self {
+        Self { projected_columns }
+    }
+
+    /// Filter row group columns to only those needed.
+    pub fn filter_columns<'a, T>(&self, all_columns: &'a [T]) -> Vec<&'a T> {
+        self.projected_columns
+            .iter()
+            .filter_map(|&i| all_columns.get(i))
+            .collect()
+    }
+
+    pub fn num_projected(&self) -> usize { self.projected_columns.len() }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Partition Pruning + Metadata Cache
+// ---------------------------------------------------------------------------
+
+/// Evaluates predicates against partition values to prune unnecessary partitions.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct PartitionPruner {
+    partition_columns: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl PartitionPruner {
+    pub fn new(partition_columns: Vec<String>) -> Self {
+        Self { partition_columns }
+    }
+
+    /// Prune partitions that don't match the given filter predicates.
+    /// Returns indices of partitions to scan.
+    pub fn prune(&self, partitions: &[PartitionValue], predicates: &[PartitionPredicate]) -> Vec<usize> {
+        partitions
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                predicates.iter().all(|pred| pred.matches(p))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+/// A partition value (key=value pair).
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PartitionValue {
+    pub column: String,
+    pub value: String,
+}
+
+/// A predicate for partition pruning.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum PartitionPredicate {
+    Eq(String, String),
+    NotEq(String, String),
+    In(String, Vec<String>),
+    Gt(String, String),
+    Lt(String, String),
+}
+
+#[allow(dead_code)]
+impl PartitionPredicate {
+    fn matches(&self, pv: &PartitionValue) -> bool {
+        match self {
+            Self::Eq(col, val) => pv.column != *col || pv.value == *val,
+            Self::NotEq(col, val) => pv.column != *col || pv.value != *val,
+            Self::In(col, vals) => pv.column != *col || vals.contains(&pv.value),
+            Self::Gt(col, val) => pv.column != *col || pv.value > *val,
+            Self::Lt(col, val) => pv.column != *col || pv.value < *val,
+        }
+    }
+}
+
+/// Metadata cache with TTL-based expiration.
+#[allow(dead_code)]
+pub struct MetadataCache {
+    entries: HashMap<String, CacheEntry>,
+    ttl_secs: u64,
+    max_entries: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    data: CachedMetadata,
+    inserted_at: std::time::Instant,
+}
+
+/// Cached file/partition metadata.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct CachedMetadata {
+    pub file_path: String,
+    pub size_bytes: u64,
+    pub num_row_groups: usize,
+    pub num_rows: u64,
+    pub schema_fingerprint: String,
+}
+
+#[allow(dead_code)]
+impl MetadataCache {
+    pub fn new(ttl_secs: u64, max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            ttl_secs,
+            max_entries,
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&CachedMetadata> {
+        self.entries.get(key).and_then(|e| {
+            if e.inserted_at.elapsed().as_secs() < self.ttl_secs {
+                Some(&e.data)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn put(&mut self, key: String, metadata: CachedMetadata) {
+        if self.entries.len() >= self.max_entries {
+            // Evict oldest entry
+            if let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.inserted_at)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest_key);
+            }
+        }
+        self.entries.insert(key, CacheEntry {
+            data: metadata,
+            inserted_at: std::time::Instant::now(),
+        });
+    }
+
+    pub fn invalidate(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
+    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    /// Remove expired entries.
+    pub fn evict_expired(&mut self) {
+        let ttl = self.ttl_secs;
+        self.entries.retain(|_, e| e.inserted_at.elapsed().as_secs() < ttl);
+    }
+}
+
+/// Multi-region failover configuration.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct MultiRegionConfig {
+    pub primary_region: String,
+    pub failover_regions: Vec<String>,
+    pub health_check_interval_secs: u64,
+}
+
+#[allow(dead_code)]
+impl MultiRegionConfig {
+    pub fn new(primary: &str) -> Self {
+        Self {
+            primary_region: primary.to_string(),
+            failover_regions: Vec::new(),
+            health_check_interval_secs: 30,
+        }
+    }
+
+    pub fn add_failover(mut self, region: &str) -> Self {
+        self.failover_regions.push(region.to_string());
+        self
+    }
+
+    /// Get the list of regions in priority order.
+    pub fn regions_in_order(&self) -> Vec<&str> {
+        let mut regions = vec![self.primary_region.as_str()];
+        regions.extend(self.failover_regions.iter().map(|r| r.as_str()));
+        regions
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PrefetchStats / PrefetchManager
+// ---------------------------------------------------------------------------
+
+/// Statistics for the prefetch manager.
+#[derive(Debug, Clone, Default)]
+pub struct PrefetchStats {
+    pub scheduled: usize,
+    pub completed: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+}
+
+/// Parallel prefetch manager that queues object paths for background fetching
+/// and serves previously fetched data from an in-memory cache.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct PrefetchManager {
+    max_concurrent: usize,
+    buffer_size: usize,
+    queue: Mutex<Vec<String>>,
+    cache: Mutex<HashMap<String, Vec<u8>>>,
+    stats: Mutex<PrefetchStats>,
+}
+
+#[allow(dead_code)]
+impl PrefetchManager {
+    pub fn new(max_concurrent: usize, buffer_size: usize) -> Self {
+        Self {
+            max_concurrent,
+            buffer_size,
+            queue: Mutex::new(Vec::new()),
+            cache: Mutex::new(HashMap::new()),
+            stats: Mutex::new(PrefetchStats::default()),
+        }
+    }
+
+    /// Queue paths for prefetching.
+    pub fn schedule_prefetch(&self, paths: &[String]) {
+        let mut queue = self.queue.lock();
+        let mut stats = self.stats.lock();
+        for p in paths {
+            if queue.len() < self.buffer_size {
+                queue.push(p.clone());
+                stats.scheduled += 1;
+            }
+        }
+    }
+
+    /// Retrieve prefetched data for the given path.
+    pub fn get_prefetched(&self, path: &str) -> Option<Vec<u8>> {
+        let mut stats = self.stats.lock();
+        let cache = self.cache.lock();
+        if let Some(data) = cache.get(path) {
+            stats.cache_hits += 1;
+            Some(data.clone())
+        } else {
+            stats.cache_misses += 1;
+            None
+        }
+    }
+
+    /// Simulate completing the prefetch for a given path (stores data in cache).
+    pub fn complete_prefetch(&self, path: &str, data: Vec<u8>) {
+        let mut cache = self.cache.lock();
+        let mut stats = self.stats.lock();
+        cache.insert(path.to_string(), data);
+        stats.completed += 1;
+    }
+
+    /// Cancel all pending prefetch operations.
+    pub fn cancel_all(&self) {
+        self.queue.lock().clear();
+    }
+
+    /// Return a snapshot of prefetch statistics.
+    pub fn stats(&self) -> PrefetchStats {
+        self.stats.lock().clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PartitionInfo / PartitionCache
+// ---------------------------------------------------------------------------
+
+/// Metadata about a single partition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartitionInfo {
+    pub path: String,
+    pub row_count: usize,
+    pub size_bytes: u64,
+    pub partition_values: HashMap<String, String>,
+}
+
+/// LRU cache for partition metadata keyed by table name.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct PartitionCache {
+    entries: Mutex<HashMap<String, Vec<PartitionInfo>>>,
+    max_entries: usize,
+}
+
+#[allow(dead_code)]
+impl PartitionCache {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            max_entries,
+        }
+    }
+
+    pub fn put(&self, table: &str, partitions: Vec<PartitionInfo>) {
+        let mut entries = self.entries.lock();
+        if entries.len() >= self.max_entries && !entries.contains_key(table) {
+            // Evict an arbitrary entry to stay within bounds.
+            if let Some(key) = entries.keys().next().cloned() {
+                entries.remove(&key);
+            }
+        }
+        entries.insert(table.to_string(), partitions);
+    }
+
+    pub fn get(&self, table: &str) -> Option<Vec<PartitionInfo>> {
+        self.entries.lock().get(table).cloned()
+    }
+
+    pub fn invalidate(&self, table: &str) {
+        self.entries.lock().remove(table);
+    }
+
+    pub fn invalidate_all(&self) {
+        self.entries.lock().clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CredentialChain / ResolvedCredential
+// ---------------------------------------------------------------------------
+
+/// Credential provider variants.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum CredentialProvider {
+    Environment,
+    Static { key: String, secret: String },
+    IamRole { role_arn: String },
+    ServiceAccount,
+    Anonymous,
+}
+
+/// A resolved credential ready for use with a cloud API.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ResolvedCredential {
+    pub access_key: String,
+    pub secret_key: String,
+    pub token: Option<String>,
+    pub expiry: Option<u64>,
+}
+
+/// Builder-style credential chain that tries providers in order.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct CredentialChain {
+    providers: Vec<CredentialProvider>,
+}
+
+#[allow(dead_code)]
+impl CredentialChain {
+    pub fn new() -> Self {
+        Self {
+            providers: Vec::new(),
+        }
+    }
+
+    pub fn with_environment(mut self) -> Self {
+        self.providers.push(CredentialProvider::Environment);
+        self
+    }
+
+    pub fn with_static(mut self, key: &str, secret: &str) -> Self {
+        self.providers.push(CredentialProvider::Static {
+            key: key.to_string(),
+            secret: secret.to_string(),
+        });
+        self
+    }
+
+    pub fn with_iam_role(mut self, role_arn: &str) -> Self {
+        self.providers.push(CredentialProvider::IamRole {
+            role_arn: role_arn.to_string(),
+        });
+        self
+    }
+
+    pub fn with_anonymous(mut self) -> Self {
+        self.providers.push(CredentialProvider::Anonymous);
+        self
+    }
+
+    /// Walk the provider chain and return the first successfully resolved
+    /// credential.
+    pub fn resolve(&self) -> Result<ResolvedCredential> {
+        for provider in &self.providers {
+            match provider {
+                CredentialProvider::Static { key, secret } => {
+                    return Ok(ResolvedCredential {
+                        access_key: key.clone(),
+                        secret_key: secret.clone(),
+                        token: None,
+                        expiry: None,
+                    });
+                }
+                CredentialProvider::Anonymous => {
+                    return Ok(ResolvedCredential {
+                        access_key: String::new(),
+                        secret_key: String::new(),
+                        token: None,
+                        expiry: None,
+                    });
+                }
+                CredentialProvider::Environment => {
+                    if let (Ok(ak), Ok(sk)) = (
+                        std::env::var("BLAZE_ACCESS_KEY"),
+                        std::env::var("BLAZE_SECRET_KEY"),
+                    ) {
+                        return Ok(ResolvedCredential {
+                            access_key: ak,
+                            secret_key: sk,
+                            token: std::env::var("BLAZE_SESSION_TOKEN").ok(),
+                            expiry: None,
+                        });
+                    }
+                }
+                CredentialProvider::IamRole { .. }
+                | CredentialProvider::ServiceAccount => {
+                    // Real IAM / SA resolution requires network calls;
+                    // intentionally not implemented in the embedded engine.
+                }
+            }
+        }
+        Err(BlazeError::invalid_argument(
+            "No credential provider in the chain could resolve credentials",
+        ))
+    }
+
+    pub fn providers(&self) -> &[CredentialProvider] {
+        &self.providers
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CloudRouter / CloudEndpoint
+// ---------------------------------------------------------------------------
+
+/// Describes a routable cloud endpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloudEndpoint {
+    pub cloud: CloudProvider,
+    pub region: String,
+    pub endpoint: String,
+}
+
+/// Region entry stored inside the router.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct RegionEntry {
+    name: String,
+    cloud: CloudProvider,
+    endpoint: String,
+}
+
+/// Routes queries to the best cloud region based on table-to-region mappings.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct CloudRouter {
+    regions: Vec<RegionEntry>,
+    table_map: HashMap<String, String>,
+}
+
+#[allow(dead_code)]
+impl CloudRouter {
+    pub fn new() -> Self {
+        Self {
+            regions: Vec::new(),
+            table_map: HashMap::new(),
+        }
+    }
+
+    pub fn add_region(mut self, name: &str, cloud: CloudProvider, endpoint: &str) -> Self {
+        self.regions.push(RegionEntry {
+            name: name.to_string(),
+            cloud,
+            endpoint: endpoint.to_string(),
+        });
+        self
+    }
+
+    /// Bind a table to a specific region name.
+    pub fn bind_table(&mut self, table: &str, region: &str) {
+        self.table_map.insert(table.to_string(), region.to_string());
+    }
+
+    /// Route a query for the given table to the best endpoint.
+    pub fn route_query(&self, table: &str) -> Result<CloudEndpoint> {
+        // If there is an explicit binding, use it.
+        if let Some(region_name) = self.table_map.get(table) {
+            if let Some(entry) = self.regions.iter().find(|r| r.name == *region_name) {
+                return Ok(CloudEndpoint {
+                    cloud: entry.cloud.clone(),
+                    region: entry.name.clone(),
+                    endpoint: entry.endpoint.clone(),
+                });
+            }
+        }
+        // Fall back to the first registered region.
+        self.regions
+            .first()
+            .map(|entry| CloudEndpoint {
+                cloud: entry.cloud.clone(),
+                region: entry.name.clone(),
+                endpoint: entry.endpoint.clone(),
+            })
+            .ok_or_else(|| {
+                BlazeError::invalid_argument(format!(
+                    "No region available to route query for table '{table}'"
+                ))
+            })
+    }
+
+    /// Estimate the data transfer cost (USD) between two regions.
+    pub fn estimate_transfer_cost(
+        &self,
+        from: &str,
+        to: &str,
+        bytes: u64,
+    ) -> f64 {
+        if from == to {
+            return 0.0;
+        }
+        let from_cloud = self.regions.iter().find(|r| r.name == from);
+        let to_cloud = self.regions.iter().find(|r| r.name == to);
+        let cross_cloud = match (from_cloud, to_cloud) {
+            (Some(a), Some(b)) => a.cloud != b.cloud,
+            _ => true,
+        };
+        let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        if cross_cloud {
+            gb * 0.09 // cross-cloud rate
+        } else {
+            gb * 0.02 // same-cloud cross-region rate
+        }
     }
 }
 
@@ -710,5 +1666,528 @@ mod tests {
 
         assert_eq!(b1.len(), b2.len());
         assert_eq!(b1[0].num_rows(), b2[0].num_rows());
+    }
+
+    // -----------------------------------------------------------------------
+    // PartitionSpec tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_partition_spec_basic() {
+        let mut spec = PartitionSpec::new();
+        assert!(spec.columns.is_empty());
+        assert!(spec.paths.is_empty());
+
+        spec.add_column("year", "2024");
+        spec.add_column("month", "01");
+        assert_eq!(spec.columns.len(), 2);
+        assert_eq!(spec.columns[0], ("year".to_string(), "2024".to_string()));
+        assert_eq!(spec.columns[1], ("month".to_string(), "01".to_string()));
+
+        let path = ObjectPath::parse("s3://bucket/year=2024/month=01/data.parquet").unwrap();
+        spec.add_path(path.clone());
+        assert_eq!(spec.paths.len(), 1);
+        assert_eq!(spec.paths[0], path);
+    }
+
+    #[test]
+    fn test_partition_spec_matches_filter() {
+        let mut spec = PartitionSpec::new();
+        spec.add_column("year", "2024");
+        spec.add_column("month", "01");
+
+        assert!(spec.matches_filter("year", "2024"));
+        assert!(spec.matches_filter("month", "01"));
+        assert!(!spec.matches_filter("year", "2023"));
+        assert!(!spec.matches_filter("day", "15"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PartitionDiscovery tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_partition_path() {
+        let cols = PartitionDiscovery::parse_partition_path(
+            "year=2024/month=01/data.parquet",
+        );
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0], ("year".to_string(), "2024".to_string()));
+        assert_eq!(cols[1], ("month".to_string(), "01".to_string()));
+
+        // Path with no partitions.
+        let cols = PartitionDiscovery::parse_partition_path("data/file.parquet");
+        assert!(cols.is_empty());
+
+        // Mixed segments.
+        let cols = PartitionDiscovery::parse_partition_path(
+            "data/region=us-east/file.parquet",
+        );
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0], ("region".to_string(), "us-east".to_string()));
+    }
+
+    #[test]
+    fn test_is_partition_segment() {
+        assert!(PartitionDiscovery::is_partition_segment("year=2024"));
+        assert!(PartitionDiscovery::is_partition_segment("region=us-east"));
+        assert!(!PartitionDiscovery::is_partition_segment("data.parquet"));
+        assert!(!PartitionDiscovery::is_partition_segment("=value"));
+        assert!(!PartitionDiscovery::is_partition_segment("key="));
+        assert!(!PartitionDiscovery::is_partition_segment("noequalssign"));
+    }
+
+    #[test]
+    fn test_prune_partitions() {
+        let mut p1 = PartitionSpec::new();
+        p1.add_column("year", "2024");
+        p1.add_column("month", "01");
+
+        let mut p2 = PartitionSpec::new();
+        p2.add_column("year", "2024");
+        p2.add_column("month", "02");
+
+        let mut p3 = PartitionSpec::new();
+        p3.add_column("year", "2023");
+        p3.add_column("month", "01");
+
+        let partitions = vec![p1.clone(), p2.clone(), p3.clone()];
+
+        let pruned = PartitionDiscovery::prune_partitions(&partitions, "year", "2024");
+        assert_eq!(pruned.len(), 2);
+        assert_eq!(pruned[0], p1);
+        assert_eq!(pruned[1], p2);
+
+        let pruned = PartitionDiscovery::prune_partitions(&partitions, "month", "01");
+        assert_eq!(pruned.len(), 2);
+        assert_eq!(pruned[0], p1);
+        assert_eq!(pruned[1], p3);
+
+        let pruned = PartitionDiscovery::prune_partitions(&partitions, "year", "2025");
+        assert!(pruned.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // ParallelFetchConfig tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parallel_fetch_config_default() {
+        let config = ParallelFetchConfig::default();
+        assert_eq!(config.max_concurrent_fetches, 8);
+        assert_eq!(config.chunk_size_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.retry_max_attempts, 3);
+        assert_eq!(config.retry_base_delay_ms, 100);
+        assert_eq!(config.timeout_seconds, 30);
+    }
+
+    // -----------------------------------------------------------------------
+    // FetchStats tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fetch_stats_cache_hit_rate() {
+        let mut stats = FetchStats::default();
+        // Zero requests → 0.0
+        assert_eq!(stats.cache_hit_rate(), 0.0);
+
+        stats.cache_hits = 3;
+        stats.cache_misses = 1;
+        assert!((stats.cache_hit_rate() - 0.75).abs() < f64::EPSILON);
+
+        stats.cache_hits = 0;
+        stats.cache_misses = 5;
+        assert_eq!(stats.cache_hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_fetch_stats_throughput() {
+        let mut stats = FetchStats::default();
+        // Zero duration → 0.0
+        assert_eq!(stats.throughput_mbps(), 0.0);
+        assert_eq!(stats.avg_request_duration_ms(), 0.0);
+
+        stats.total_bytes_fetched = 10 * 1024 * 1024; // 10 MiB
+        stats.total_duration_ms = 1000; // 1 second
+        stats.total_requests = 5;
+
+        // 10 MiB / 1s = 10 MB/s
+        assert!((stats.throughput_mbps() - 10.0).abs() < f64::EPSILON);
+        // 1000ms / 5 requests = 200ms average
+        assert!((stats.avg_request_duration_ms() - 200.0).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // CloudStorageConfig tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cloud_storage_config_creation() {
+        let config = CloudStorageConfig {
+            provider: CloudProvider::S3,
+            region: Some("us-east-1".to_string()),
+            endpoint: None,
+            credentials: CloudCredentials::AccessKey {
+                key_id: "AKID".to_string(),
+                secret: "SECRET".to_string(),
+            },
+            fetch_config: ParallelFetchConfig::default(),
+        };
+
+        assert_eq!(config.provider, CloudProvider::S3);
+        assert_eq!(config.region, Some("us-east-1".to_string()));
+        assert!(config.endpoint.is_none());
+        assert_eq!(config.fetch_config.max_concurrent_fetches, 8);
+
+        // Test other providers.
+        let gcs = CloudStorageConfig {
+            provider: CloudProvider::Gcs,
+            region: None,
+            endpoint: Some("https://storage.googleapis.com".to_string()),
+            credentials: CloudCredentials::ServiceAccount {
+                path: "/path/to/sa.json".to_string(),
+            },
+            fetch_config: ParallelFetchConfig::default(),
+        };
+        assert_eq!(gcs.provider, CloudProvider::Gcs);
+
+        let local = CloudStorageConfig {
+            provider: CloudProvider::Local,
+            region: None,
+            endpoint: None,
+            credentials: CloudCredentials::Anonymous,
+            fetch_config: ParallelFetchConfig::default(),
+        };
+        assert_eq!(local.provider, CloudProvider::Local);
+
+        let env = CloudStorageConfig {
+            provider: CloudProvider::Azure,
+            region: Some("westus2".to_string()),
+            endpoint: None,
+            credentials: CloudCredentials::Environment,
+            fetch_config: ParallelFetchConfig::default(),
+        };
+        assert_eq!(env.provider, CloudProvider::Azure);
+    }
+
+    // -----------------------------------------------------------------------
+    // S3/GCS/Azure provider tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_s3_object_url() {
+        let creds = S3Credentials {
+            access_key_id: "AKID".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+        };
+        let store = S3ObjectStore::new("my-bucket", "us-east-1", creds);
+        let url = store.object_url("data/file.parquet");
+        assert!(url.contains("my-bucket"));
+        assert!(url.contains("us-east-1"));
+        assert!(url.contains("data/file.parquet"));
+    }
+
+    #[test]
+    fn test_s3_custom_endpoint() {
+        let creds = S3Credentials {
+            access_key_id: "key".to_string(),
+            secret_access_key: "secret".to_string(),
+            session_token: None,
+        };
+        let store = S3ObjectStore::new("bucket", "us-east-1", creds)
+            .with_endpoint("http://localhost:9000");
+        let url = store.object_url("key.parquet");
+        assert!(url.starts_with("http://localhost:9000"));
+    }
+
+    #[test]
+    fn test_gcs_object_url() {
+        let store = GcsObjectStore::new("my-bucket", "my-project");
+        let url = store.object_url("data/file.parquet");
+        assert!(url.contains("storage.googleapis.com"));
+        assert!(url.contains("my-bucket"));
+    }
+
+    #[test]
+    fn test_azure_blob_url() {
+        let store = AzureBlobStore::new("myaccount", "mycontainer");
+        let url = store.blob_url("file.parquet");
+        assert!(url.contains("myaccount"));
+        assert!(url.contains("mycontainer"));
+        assert!(url.contains("blob.core.windows.net"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel fetch tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parallel_row_group_fetcher() {
+        let fetcher = ParallelRowGroupFetcher::new(4, 1024);
+        let row_groups = vec![
+            RowGroupMeta { index: 0, offset: 0, size_bytes: 3000, num_rows: 100 },
+            RowGroupMeta { index: 1, offset: 3000, size_bytes: 500, num_rows: 50 },
+        ];
+        let plans = fetcher.plan_fetches(&row_groups);
+        assert_eq!(plans.len(), 4); // 3 chunks for first RG + 1 for second
+        assert_eq!(plans[0].row_group_index, 0);
+    }
+
+    #[test]
+    fn test_column_projection_fetcher() {
+        let fetcher = ColumnProjectionFetcher::new(vec![0, 2, 4]);
+        let columns = vec!["a", "b", "c", "d", "e"];
+        let projected = fetcher.filter_columns(&columns);
+        assert_eq!(projected.len(), 3);
+        assert_eq!(*projected[0], "a");
+        assert_eq!(*projected[1], "c");
+        assert_eq!(*projected[2], "e");
+    }
+
+    // -----------------------------------------------------------------------
+    // Partition pruning tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_partition_pruner_eq() {
+        let pruner = PartitionPruner::new(vec!["date".to_string()]);
+        let partitions = vec![
+            PartitionValue { column: "date".to_string(), value: "2024-01".to_string() },
+            PartitionValue { column: "date".to_string(), value: "2024-02".to_string() },
+            PartitionValue { column: "date".to_string(), value: "2024-03".to_string() },
+        ];
+        let predicates = vec![PartitionPredicate::Eq("date".to_string(), "2024-02".to_string())];
+        let result = pruner.prune(&partitions, &predicates);
+        assert_eq!(result, vec![1]);
+    }
+
+    #[test]
+    fn test_partition_pruner_in() {
+        let pruner = PartitionPruner::new(vec!["region".to_string()]);
+        let partitions = vec![
+            PartitionValue { column: "region".to_string(), value: "us".to_string() },
+            PartitionValue { column: "region".to_string(), value: "eu".to_string() },
+            PartitionValue { column: "region".to_string(), value: "ap".to_string() },
+        ];
+        let predicates = vec![PartitionPredicate::In(
+            "region".to_string(),
+            vec!["us".to_string(), "eu".to_string()],
+        )];
+        let result = pruner.prune(&partitions, &predicates);
+        assert_eq!(result, vec![0, 1]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Metadata cache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_metadata_cache_put_get() {
+        let mut cache = MetadataCache::new(60, 100);
+        cache.put("file1.parquet".to_string(), CachedMetadata {
+            file_path: "file1.parquet".to_string(),
+            size_bytes: 1024,
+            num_row_groups: 2,
+            num_rows: 1000,
+            schema_fingerprint: "abc123".to_string(),
+        });
+        assert!(cache.get("file1.parquet").is_some());
+        assert!(cache.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_metadata_cache_invalidate() {
+        let mut cache = MetadataCache::new(60, 100);
+        cache.put("file1.parquet".to_string(), CachedMetadata {
+            file_path: "file1.parquet".to_string(),
+            size_bytes: 1024,
+            num_row_groups: 1,
+            num_rows: 500,
+            schema_fingerprint: "def".to_string(),
+        });
+        cache.invalidate("file1.parquet");
+        assert!(cache.get("file1.parquet").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-region tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_region_config() {
+        let config = MultiRegionConfig::new("us-east-1")
+            .add_failover("us-west-2")
+            .add_failover("eu-west-1");
+        let regions = config.regions_in_order();
+        assert_eq!(regions.len(), 3);
+        assert_eq!(regions[0], "us-east-1");
+        assert_eq!(regions[1], "us-west-2");
+    }
+
+    // -----------------------------------------------------------------------
+    // PrefetchManager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_prefetch_schedule_and_stats() {
+        let pm = PrefetchManager::new(4, 100);
+        pm.schedule_prefetch(&[
+            "s3://bucket/a.parquet".into(),
+            "s3://bucket/b.parquet".into(),
+        ]);
+        let s = pm.stats();
+        assert_eq!(s.scheduled, 2);
+        assert_eq!(s.completed, 0);
+    }
+
+    #[test]
+    fn test_prefetch_get_miss_then_hit() {
+        let pm = PrefetchManager::new(4, 100);
+        assert!(pm.get_prefetched("s3://bucket/a.parquet").is_none());
+        pm.complete_prefetch("s3://bucket/a.parquet", vec![1, 2, 3]);
+        assert_eq!(
+            pm.get_prefetched("s3://bucket/a.parquet"),
+            Some(vec![1, 2, 3])
+        );
+        let s = pm.stats();
+        assert_eq!(s.cache_misses, 1);
+        assert_eq!(s.cache_hits, 1);
+        assert_eq!(s.completed, 1);
+    }
+
+    #[test]
+    fn test_prefetch_cancel_all() {
+        let pm = PrefetchManager::new(4, 100);
+        pm.schedule_prefetch(&["a".into(), "b".into(), "c".into()]);
+        pm.cancel_all();
+        // Queue is empty; stats retain history.
+        assert_eq!(pm.stats().scheduled, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // PartitionCache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_partition_cache_put_get() {
+        let cache = PartitionCache::new(10);
+        let info = PartitionInfo {
+            path: "s3://b/year=2024/part0.parquet".into(),
+            row_count: 1000,
+            size_bytes: 4096,
+            partition_values: HashMap::from([("year".into(), "2024".into())]),
+        };
+        cache.put("events", vec![info.clone()]);
+        let got = cache.get("events").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], info);
+    }
+
+    #[test]
+    fn test_partition_cache_invalidate() {
+        let cache = PartitionCache::new(10);
+        cache.put("t1", vec![]);
+        cache.put("t2", vec![]);
+        cache.invalidate("t1");
+        assert!(cache.get("t1").is_none());
+        assert!(cache.get("t2").is_some());
+    }
+
+    #[test]
+    fn test_partition_cache_invalidate_all() {
+        let cache = PartitionCache::new(10);
+        cache.put("t1", vec![]);
+        cache.put("t2", vec![]);
+        cache.invalidate_all();
+        assert!(cache.get("t1").is_none());
+        assert!(cache.get("t2").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // CredentialChain tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_credential_chain_static() {
+        let cred = CredentialChain::new()
+            .with_static("AKID", "SECRET")
+            .resolve()
+            .unwrap();
+        assert_eq!(cred.access_key, "AKID");
+        assert_eq!(cred.secret_key, "SECRET");
+        assert!(cred.token.is_none());
+    }
+
+    #[test]
+    fn test_credential_chain_anonymous_fallback() {
+        let cred = CredentialChain::new()
+            .with_anonymous()
+            .resolve()
+            .unwrap();
+        assert!(cred.access_key.is_empty());
+    }
+
+    #[test]
+    fn test_credential_chain_empty_fails() {
+        let res = CredentialChain::new().resolve();
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_credential_chain_order() {
+        let chain = CredentialChain::new()
+            .with_environment()
+            .with_static("K", "S")
+            .with_iam_role("arn:aws:iam::123:role/r");
+        assert_eq!(chain.providers().len(), 3);
+        assert_eq!(chain.providers()[0], CredentialProvider::Environment);
+    }
+
+    // -----------------------------------------------------------------------
+    // CloudRouter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cloud_router_route_default() {
+        let router = CloudRouter::new()
+            .add_region("us-east-1", CloudProvider::S3, "https://s3.us-east-1.amazonaws.com");
+        let ep = router.route_query("any_table").unwrap();
+        assert_eq!(ep.region, "us-east-1");
+        assert_eq!(ep.cloud, CloudProvider::S3);
+    }
+
+    #[test]
+    fn test_cloud_router_route_bound_table() {
+        let mut router = CloudRouter::new()
+            .add_region("us-east-1", CloudProvider::S3, "https://s3.us-east-1.amazonaws.com")
+            .add_region("eu-west-1", CloudProvider::S3, "https://s3.eu-west-1.amazonaws.com");
+        router.bind_table("eu_events", "eu-west-1");
+        let ep = router.route_query("eu_events").unwrap();
+        assert_eq!(ep.region, "eu-west-1");
+    }
+
+    #[test]
+    fn test_cloud_router_no_regions_error() {
+        let router = CloudRouter::new();
+        assert!(router.route_query("t").is_err());
+    }
+
+    #[test]
+    fn test_cloud_router_transfer_cost_same_region() {
+        let router = CloudRouter::new()
+            .add_region("us-east-1", CloudProvider::S3, "https://s3.amazonaws.com");
+        let cost = router.estimate_transfer_cost("us-east-1", "us-east-1", 1_073_741_824);
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn test_cloud_router_transfer_cost_cross_cloud() {
+        let router = CloudRouter::new()
+            .add_region("us-east-1", CloudProvider::S3, "https://s3.amazonaws.com")
+            .add_region("us-central1", CloudProvider::Gcs, "https://storage.googleapis.com");
+        let cost = router.estimate_transfer_cost("us-east-1", "us-central1", 1_073_741_824);
+        // 1 GB cross-cloud at $0.09/GB
+        assert!((cost - 0.09).abs() < 1e-6);
     }
 }

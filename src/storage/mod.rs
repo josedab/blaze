@@ -9,6 +9,7 @@ mod memory;
 mod object_store;
 mod parquet;
 mod persistent;
+pub mod type_inference;
 
 pub use self::csv::{write_csv, CsvOptions, CsvTable};
 pub use self::delta::{
@@ -19,6 +20,7 @@ pub use self::object_store::{
     ObjectStoreRegistry, ObjectStoreTable,
 };
 pub use self::parquet::{write_parquet, write_parquet_with_options, ParquetOptions, ParquetTable};
+pub use self::type_inference::{infer_csv_schema, infer_json_schema, merge_schemas, InferenceConfig};
 pub use memory::MemoryTable;
 pub use persistent::{
     persistent_table, BufferPool, Page, PageType, PersistentConfig, PersistentTable, WalEntry,
@@ -48,11 +50,54 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvider>> {
     match extension.to_lowercase().as_str() {
         "csv" | "tsv" => Ok(Arc::new(CsvTable::open(path)?)),
         "parquet" | "pq" => Ok(Arc::new(ParquetTable::open(path)?)),
+        "json" | "jsonl" | "ndjson" => read_json_inferred(path),
         _ => Err(BlazeError::invalid_argument(format!(
             "Unsupported file format: {}",
             extension
         ))),
     }
+}
+
+/// Read a CSV file with automatic type inference and delimiter detection.
+pub fn read_csv_inferred(
+    path: impl AsRef<Path>,
+    config: Option<InferenceConfig>,
+) -> Result<Arc<dyn TableProvider>> {
+    let config = config.unwrap_or_default();
+    let (schema, delimiter) = infer_csv_schema(path.as_ref(), &config)?;
+    let blaze_schema = Schema::from_arrow(&schema)?;
+    let options = CsvOptions {
+        delimiter,
+        has_header: true,
+        batch_size: 8192,
+        schema_infer_max_records: config.sample_rows,
+    };
+    Ok(Arc::new(CsvTable::with_schema(path, blaze_schema, options)))
+}
+
+/// Read a newline-delimited JSON file with automatic type inference.
+pub fn read_json_inferred(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvider>> {
+    let config = InferenceConfig::default();
+    let schema = infer_json_schema(path.as_ref(), &config)?;
+
+    // Read all lines and build record batches
+    let file = std::fs::File::open(path.as_ref())?;
+    let reader = std::io::BufReader::new(file);
+    let decoder = arrow::json::ReaderBuilder::new(schema.clone())
+        .build(reader)?;
+
+    let mut batches = Vec::new();
+    for batch_result in decoder {
+        batches.push(batch_result?);
+    }
+
+    if batches.is_empty() {
+        let blaze_schema = Schema::from_arrow(&schema)?;
+        return Ok(Arc::new(MemoryTable::new(blaze_schema, vec![])));
+    }
+
+    let blaze_schema = Schema::from_arrow(&schema)?;
+    Ok(Arc::new(MemoryTable::new(blaze_schema, batches)))
 }
 
 /// Read a CSV file.
