@@ -603,6 +603,539 @@ impl IngestionPipeline {
 }
 
 // ---------------------------------------------------------------------------
+// SourceConnector Framework
+// ---------------------------------------------------------------------------
+
+/// Configuration for a source connector.
+#[derive(Debug, Clone)]
+pub struct SourceConnectorConfig {
+    /// Maximum rows per polled batch.
+    pub batch_size: usize,
+    /// Interval in milliseconds between poll attempts.
+    pub poll_interval_ms: u64,
+}
+
+impl Default for SourceConnectorConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 1024,
+            poll_interval_ms: 100,
+        }
+    }
+}
+
+/// Trait for pluggable source connectors that produce `RecordBatch`es.
+pub trait SourceConnector: Send + Sync {
+    /// Human-readable name of this connector.
+    fn name(&self) -> &str;
+    /// Schema of the data produced by this connector.
+    fn schema(&self) -> &Schema;
+    /// Poll the next batch from the source. Returns `Ok(None)` when exhausted.
+    fn poll_batch(&mut self) -> Result<Option<RecordBatch>>;
+}
+
+/// A CSV source connector that reads a CSV file in batches.
+pub struct CsvSourceConnector {
+    path: String,
+    schema: Schema,
+    config: SourceConnectorConfig,
+    exhausted: bool,
+}
+
+impl CsvSourceConnector {
+    /// Create a new CSV source connector.
+    pub fn new(path: impl Into<String>, schema: Schema, config: SourceConnectorConfig) -> Self {
+        Self {
+            path: path.into(),
+            schema,
+            config,
+            exhausted: false,
+        }
+    }
+}
+
+impl SourceConnector for CsvSourceConnector {
+    fn name(&self) -> &str {
+        "csv"
+    }
+
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn poll_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if self.exhausted {
+            return Ok(None);
+        }
+        // In a real implementation this would read `self.config.batch_size` rows
+        // from the CSV file at `self.path`. For now, mark as exhausted.
+        self.exhausted = true;
+        Err(BlazeError::not_implemented(format!(
+            "CsvSourceConnector::poll_batch not yet wired to file I/O for '{}'",
+            self.path
+        )))
+    }
+}
+
+/// A newline-delimited JSON (NDJSON) source connector.
+pub struct JsonSourceConnector {
+    path: String,
+    schema: Schema,
+    exhausted: bool,
+}
+
+impl JsonSourceConnector {
+    /// Create a new NDJSON source connector.
+    pub fn new(path: impl Into<String>, schema: Schema) -> Self {
+        Self {
+            path: path.into(),
+            schema,
+            exhausted: false,
+        }
+    }
+}
+
+impl SourceConnector for JsonSourceConnector {
+    fn name(&self) -> &str {
+        "json"
+    }
+
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn poll_batch(&mut self) -> Result<Option<RecordBatch>> {
+        if self.exhausted {
+            return Ok(None);
+        }
+        self.exhausted = true;
+        Err(BlazeError::not_implemented(format!(
+            "JsonSourceConnector::poll_batch not yet wired to file I/O for '{}'",
+            self.path
+        )))
+    }
+}
+
+/// Registry of named source connectors.
+pub struct ConnectorRegistry {
+    connectors: std::collections::HashMap<String, Box<dyn SourceConnector>>,
+}
+
+impl ConnectorRegistry {
+    /// Create an empty connector registry.
+    pub fn new() -> Self {
+        Self {
+            connectors: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Register a connector under the given name.
+    pub fn register(&mut self, name: impl Into<String>, connector: Box<dyn SourceConnector>) {
+        self.connectors.insert(name.into(), connector);
+    }
+
+    /// Get a mutable reference to a connector by name.
+    pub fn get(&mut self, name: &str) -> Option<&mut Box<dyn SourceConnector>> {
+        self.connectors.get_mut(name)
+    }
+
+    /// List all registered connector names.
+    pub fn list(&self) -> Vec<&str> {
+        self.connectors.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema Evolution
+// ---------------------------------------------------------------------------
+
+/// Type of schema evolution change detected between two schemas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvolutionType {
+    /// A new column was added.
+    AddColumn,
+    /// An existing column was dropped.
+    DropColumn,
+    /// A column type was widened (e.g. Int32 → Int64).
+    WidenType,
+    /// Schemas are fully compatible (no changes or only safe additions).
+    Compatible,
+    /// Schemas are incompatible (e.g. narrowing type, changing nullability unsafely).
+    Incompatible,
+}
+
+/// A single detected schema change.
+#[derive(Debug, Clone)]
+pub struct SchemaChange {
+    /// Column name affected by the change.
+    pub column: String,
+    /// Kind of change.
+    pub change_type: EvolutionType,
+}
+
+/// Manages forward-compatible schema evolution.
+#[derive(Debug, Clone)]
+pub struct SchemaEvolution {
+    schema: Schema,
+}
+
+impl SchemaEvolution {
+    /// Create a new `SchemaEvolution` tracker with the given initial schema.
+    pub fn new(initial_schema: Schema) -> Self {
+        Self {
+            schema: initial_schema,
+        }
+    }
+
+    /// Current schema.
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    /// Attempt to evolve the schema to `new_schema`.
+    ///
+    /// Returns an updated `SchemaEvolution` if the new schema is compatible
+    /// (additions and safe widenings only). Returns an error otherwise.
+    pub fn evolve(&self, new_schema: &Schema) -> Result<SchemaEvolution> {
+        if !Self::is_compatible(&self.schema, new_schema) {
+            return Err(BlazeError::analysis(
+                "Schema evolution failed: incompatible changes detected",
+            ));
+        }
+        Ok(SchemaEvolution {
+            schema: new_schema.clone(),
+        })
+    }
+
+    /// Check whether evolving from `old` to `new` is compatible.
+    ///
+    /// Compatible means: columns may be added, types may be widened, but
+    /// existing columns must not be removed or narrowed.
+    pub fn is_compatible(old: &Schema, new: &Schema) -> bool {
+        let changes = Self::detect_changes(old, new);
+        !changes
+            .iter()
+            .any(|c| matches!(c.change_type, EvolutionType::DropColumn | EvolutionType::Incompatible))
+    }
+
+    /// Detect individual column-level changes between two schemas.
+    pub fn detect_changes(old: &Schema, new: &Schema) -> Vec<SchemaChange> {
+        let mut changes = Vec::new();
+
+        // Check existing columns in old schema
+        for field in old.fields() {
+            match new.field_by_name(field.name()) {
+                Some(new_field) => {
+                    if field.data_type() != new_field.data_type() {
+                        if Self::is_widening(field.data_type(), new_field.data_type()) {
+                            changes.push(SchemaChange {
+                                column: field.name().to_string(),
+                                change_type: EvolutionType::WidenType,
+                            });
+                        } else {
+                            changes.push(SchemaChange {
+                                column: field.name().to_string(),
+                                change_type: EvolutionType::Incompatible,
+                            });
+                        }
+                    }
+                }
+                None => {
+                    changes.push(SchemaChange {
+                        column: field.name().to_string(),
+                        change_type: EvolutionType::DropColumn,
+                    });
+                }
+            }
+        }
+
+        // Check for new columns
+        for field in new.fields() {
+            if old.field_by_name(field.name()).is_none() {
+                changes.push(SchemaChange {
+                    column: field.name().to_string(),
+                    change_type: EvolutionType::AddColumn,
+                });
+            }
+        }
+
+        changes
+    }
+
+    /// Check if changing from `from` to `to` is a safe widening.
+    fn is_widening(from: &crate::types::DataType, to: &crate::types::DataType) -> bool {
+        use crate::types::DataType;
+        matches!(
+            (from, to),
+            (DataType::Int8, DataType::Int16)
+                | (DataType::Int8, DataType::Int32)
+                | (DataType::Int8, DataType::Int64)
+                | (DataType::Int16, DataType::Int32)
+                | (DataType::Int16, DataType::Int64)
+                | (DataType::Int32, DataType::Int64)
+                | (DataType::Float32, DataType::Float64)
+                | (DataType::Utf8, DataType::LargeUtf8)
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dead Letter Queue
+// ---------------------------------------------------------------------------
+
+/// A record that failed processing.
+#[derive(Debug, Clone)]
+pub struct FailedRecord {
+    /// Raw data that failed.
+    pub data: Vec<u8>,
+    /// Error description.
+    pub error: String,
+    /// Timestamp (epoch millis) when the failure occurred.
+    pub timestamp: u64,
+    /// Name of the source that produced this record.
+    pub source: String,
+}
+
+/// Aggregate statistics for a `DeadLetterQueue`.
+#[derive(Debug, Clone, Default)]
+pub struct DlqStats {
+    /// Total failures ever pushed.
+    pub total_failures: u64,
+    /// Records retried (placeholder for future retry logic).
+    pub retried: u64,
+    /// Records discarded due to capacity eviction.
+    pub discarded: u64,
+}
+
+/// A bounded dead-letter queue for records that failed ingestion.
+pub struct DeadLetterQueue {
+    max_size: usize,
+    records: Vec<FailedRecord>,
+    stats: DlqStats,
+}
+
+impl DeadLetterQueue {
+    /// Create a new dead-letter queue with the given maximum capacity.
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            max_size,
+            records: Vec::new(),
+            stats: DlqStats::default(),
+        }
+    }
+
+    /// Push a failed record. Evicts the oldest record if the queue is full.
+    pub fn push(&mut self, record: FailedRecord) {
+        self.stats.total_failures += 1;
+        if self.records.len() >= self.max_size {
+            self.records.remove(0);
+            self.stats.discarded += 1;
+        }
+        self.records.push(record);
+    }
+
+    /// Drain all records from the queue.
+    pub fn drain(&mut self) -> Vec<FailedRecord> {
+        std::mem::take(&mut self.records)
+    }
+
+    /// Number of records currently in the queue.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Whether the queue is empty.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Return a snapshot of the DLQ statistics.
+    pub fn stats(&self) -> DlqStats {
+        self.stats.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transformation Pipeline
+// ---------------------------------------------------------------------------
+
+/// A single transformation step in the pipeline.
+#[derive(Debug, Clone)]
+pub enum TransformStep {
+    /// Filter rows where `column` satisfies `predicate` (kept as a string expression).
+    Filter {
+        column: String,
+        predicate: String,
+    },
+    /// Rename a column.
+    Rename {
+        old_name: String,
+        new_name: String,
+    },
+    /// Cast a column to a new data type.
+    Cast {
+        column: String,
+        target_type: crate::types::DataType,
+    },
+    /// Drop a column from the batch.
+    Drop {
+        column: String,
+    },
+}
+
+/// A builder-style pipeline of transformations applied to `RecordBatch`es.
+pub struct TransformPipeline {
+    steps: Vec<TransformStep>,
+}
+
+impl TransformPipeline {
+    /// Create an empty transformation pipeline.
+    pub fn new() -> Self {
+        Self { steps: Vec::new() }
+    }
+
+    /// Add a filter step.
+    pub fn add_filter(mut self, column: impl Into<String>, predicate: impl Into<String>) -> Self {
+        self.steps.push(TransformStep::Filter {
+            column: column.into(),
+            predicate: predicate.into(),
+        });
+        self
+    }
+
+    /// Add a column rename step.
+    pub fn add_rename(mut self, old_name: impl Into<String>, new_name: impl Into<String>) -> Self {
+        self.steps.push(TransformStep::Rename {
+            old_name: old_name.into(),
+            new_name: new_name.into(),
+        });
+        self
+    }
+
+    /// Add a type cast step.
+    pub fn add_cast(mut self, column: impl Into<String>, target_type: crate::types::DataType) -> Self {
+        self.steps.push(TransformStep::Cast {
+            column: column.into(),
+            target_type,
+        });
+        self
+    }
+
+    /// Add a column drop step.
+    pub fn add_drop(mut self, column: impl Into<String>) -> Self {
+        self.steps.push(TransformStep::Drop {
+            column: column.into(),
+        });
+        self
+    }
+
+    /// Return the list of steps in this pipeline.
+    pub fn steps(&self) -> &[TransformStep] {
+        &self.steps
+    }
+
+    /// Apply all transformation steps to the given batch.
+    pub fn apply(&self, batch: &RecordBatch) -> Result<RecordBatch> {
+        let mut current = batch.clone();
+        for step in &self.steps {
+            current = self.apply_step(&current, step)?;
+        }
+        Ok(current)
+    }
+
+    fn apply_step(&self, batch: &RecordBatch, step: &TransformStep) -> Result<RecordBatch> {
+        match step {
+            TransformStep::Rename { old_name, new_name } => {
+                let schema = batch.schema();
+                let new_fields: Vec<arrow::datatypes::Field> = schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        if f.name() == old_name {
+                            arrow::datatypes::Field::new(new_name, f.data_type().clone(), f.is_nullable())
+                        } else {
+                            f.as_ref().clone()
+                        }
+                    })
+                    .collect();
+                let new_schema = Arc::new(arrow::datatypes::Schema::new(new_fields));
+                RecordBatch::try_new(new_schema, batch.columns().to_vec()).map_err(|e| {
+                    BlazeError::execution(format!("Rename failed: {e}"))
+                })
+            }
+            TransformStep::Drop { column } => {
+                let schema = batch.schema();
+                let idx = schema
+                    .index_of(column)
+                    .map_err(|_| BlazeError::analysis(format!("Column '{column}' not found for drop")))?;
+                let mut fields: Vec<arrow::datatypes::Field> = Vec::new();
+                let mut columns: Vec<arrow::array::ArrayRef> = Vec::new();
+                for (i, f) in schema.fields().iter().enumerate() {
+                    if i != idx {
+                        fields.push(f.as_ref().clone());
+                        columns.push(batch.column(i).clone());
+                    }
+                }
+                let new_schema = Arc::new(arrow::datatypes::Schema::new(fields));
+                RecordBatch::try_new(new_schema, columns).map_err(|e| {
+                    BlazeError::execution(format!("Drop column failed: {e}"))
+                })
+            }
+            TransformStep::Cast { column, target_type } => {
+                let schema = batch.schema();
+                let idx = schema
+                    .index_of(column)
+                    .map_err(|_| BlazeError::analysis(format!("Column '{column}' not found for cast")))?;
+                let arrow_target = target_type.to_arrow();
+                let casted = arrow::compute::cast(batch.column(idx), &arrow_target).map_err(|e| {
+                    BlazeError::execution(format!("Cast failed for column '{column}': {e}"))
+                })?;
+                let mut fields: Vec<arrow::datatypes::Field> = Vec::new();
+                let mut columns: Vec<arrow::array::ArrayRef> = Vec::new();
+                for (i, f) in schema.fields().iter().enumerate() {
+                    if i == idx {
+                        fields.push(arrow::datatypes::Field::new(
+                            f.name(),
+                            arrow_target.clone(),
+                            f.is_nullable(),
+                        ));
+                        columns.push(casted.clone());
+                    } else {
+                        fields.push(f.as_ref().clone());
+                        columns.push(batch.column(i).clone());
+                    }
+                }
+                let new_schema = Arc::new(arrow::datatypes::Schema::new(fields));
+                RecordBatch::try_new(new_schema, columns).map_err(|e| {
+                    BlazeError::execution(format!("Cast rebuild failed: {e}"))
+                })
+            }
+            TransformStep::Filter { column, predicate } => {
+                let schema = batch.schema();
+                let idx = schema
+                    .index_of(column)
+                    .map_err(|_| BlazeError::analysis(format!("Column '{column}' not found for filter")))?;
+                let col = batch.column(idx);
+
+                // Support simple "is_not_null" predicate
+                if predicate == "is_not_null" {
+                    let boolean_mask = arrow::compute::is_not_null(col).map_err(|e| {
+                        BlazeError::execution(format!("Filter is_not_null failed: {e}"))
+                    })?;
+                    let filtered = arrow::compute::filter_record_batch(batch, &boolean_mask)
+                        .map_err(|e| BlazeError::execution(format!("Filter apply failed: {e}")))?;
+                    return Ok(filtered);
+                }
+
+                Err(BlazeError::not_implemented(format!(
+                    "Filter predicate '{predicate}' is not yet supported"
+                )))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -794,5 +1327,211 @@ mod tests {
         assert_eq!(stats.total_flushes, 0);
         assert_eq!(stats.buffer_rows, 0);
         assert!(pipeline.snapshot().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Source Connector tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_source_connector_config_defaults() {
+        let config = SourceConnectorConfig::default();
+        assert_eq!(config.batch_size, 1024);
+        assert_eq!(config.poll_interval_ms, 100);
+    }
+
+    #[test]
+    fn test_csv_source_connector_basic() {
+        let schema = test_schema();
+        let config = SourceConnectorConfig { batch_size: 512, poll_interval_ms: 50 };
+        let connector = CsvSourceConnector::new("/tmp/test.csv", schema, config);
+        assert_eq!(connector.name(), "csv");
+        assert_eq!(connector.schema().len(), 2);
+    }
+
+    #[test]
+    fn test_json_source_connector_basic() {
+        let schema = test_schema();
+        let connector = JsonSourceConnector::new("/tmp/test.ndjson", schema);
+        assert_eq!(connector.name(), "json");
+        assert_eq!(connector.schema().len(), 2);
+    }
+
+    #[test]
+    fn test_connector_registry() {
+        let schema = test_schema();
+        let mut registry = ConnectorRegistry::new();
+        assert!(registry.list().is_empty());
+
+        registry.register(
+            "csv_source",
+            Box::new(CsvSourceConnector::new(
+                "/tmp/a.csv",
+                schema.clone(),
+                SourceConnectorConfig::default(),
+            )),
+        );
+        registry.register(
+            "json_source",
+            Box::new(JsonSourceConnector::new("/tmp/b.ndjson", schema)),
+        );
+
+        assert_eq!(registry.list().len(), 2);
+        assert!(registry.get("csv_source").is_some());
+        assert!(registry.get("missing").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema Evolution tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_schema_evolution_compatible_add_column() {
+        let old = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        let new = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        assert!(SchemaEvolution::is_compatible(&old, &new));
+
+        let evo = SchemaEvolution::new(old);
+        let evolved = evo.evolve(&new).unwrap();
+        assert_eq!(evolved.schema().len(), 2);
+    }
+
+    #[test]
+    fn test_schema_evolution_incompatible_drop_column() {
+        let old = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let new = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        assert!(!SchemaEvolution::is_compatible(&old, &new));
+
+        let evo = SchemaEvolution::new(old);
+        assert!(evo.evolve(&new).is_err());
+    }
+
+    #[test]
+    fn test_schema_evolution_detect_changes() {
+        let old = Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("dropped", DataType::Utf8, true),
+        ]);
+        let new = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("added", DataType::Float64, true),
+        ]);
+        let changes = SchemaEvolution::detect_changes(&old, &new);
+        assert_eq!(changes.len(), 3); // widen id, drop "dropped", add "added"
+
+        let widen = changes.iter().find(|c| c.column == "id").unwrap();
+        assert_eq!(widen.change_type, EvolutionType::WidenType);
+        let drop = changes.iter().find(|c| c.column == "dropped").unwrap();
+        assert_eq!(drop.change_type, EvolutionType::DropColumn);
+        let add = changes.iter().find(|c| c.column == "added").unwrap();
+        assert_eq!(add.change_type, EvolutionType::AddColumn);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dead Letter Queue tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dlq_push_and_drain() {
+        let mut dlq = DeadLetterQueue::new(10);
+        assert!(dlq.is_empty());
+
+        dlq.push(FailedRecord {
+            data: vec![1, 2, 3],
+            error: "parse error".into(),
+            timestamp: 1000,
+            source: "csv".into(),
+        });
+        assert_eq!(dlq.len(), 1);
+        assert!(!dlq.is_empty());
+
+        let drained = dlq.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].error, "parse error");
+        assert!(dlq.is_empty());
+    }
+
+    #[test]
+    fn test_dlq_eviction() {
+        let mut dlq = DeadLetterQueue::new(2);
+        for i in 0..3 {
+            dlq.push(FailedRecord {
+                data: vec![i],
+                error: format!("err{i}"),
+                timestamp: i as u64,
+                source: "test".into(),
+            });
+        }
+        assert_eq!(dlq.len(), 2);
+        let stats = dlq.stats();
+        assert_eq!(stats.total_failures, 3);
+        assert_eq!(stats.discarded, 1);
+
+        // Oldest record (i=0) should have been evicted
+        let records = dlq.drain();
+        assert_eq!(records[0].error, "err1");
+        assert_eq!(records[1].error, "err2");
+    }
+
+    // -----------------------------------------------------------------------
+    // Transformation Pipeline tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_transform_pipeline_rename() {
+        let batch = test_batch(vec![1, 2], vec![1.0, 2.0]);
+        let pipeline = TransformPipeline::new().add_rename("id", "user_id");
+        let result = pipeline.apply(&batch).unwrap();
+        assert_eq!(result.schema().field(0).name(), "user_id");
+        assert_eq!(result.num_rows(), 2);
+    }
+
+    #[test]
+    fn test_transform_pipeline_drop() {
+        let batch = test_batch(vec![1, 2], vec![1.0, 2.0]);
+        let pipeline = TransformPipeline::new().add_drop("value");
+        let result = pipeline.apply(&batch).unwrap();
+        assert_eq!(result.num_columns(), 1);
+        assert_eq!(result.schema().field(0).name(), "id");
+    }
+
+    #[test]
+    fn test_transform_pipeline_cast() {
+        let batch = test_batch(vec![1, 2], vec![1.0, 2.0]);
+        let pipeline = TransformPipeline::new().add_cast("id", DataType::Float64);
+        let result = pipeline.apply(&batch).unwrap();
+        assert_eq!(
+            *result.schema().field(0).data_type(),
+            arrow::datatypes::DataType::Float64
+        );
+        assert_eq!(result.num_rows(), 2);
+    }
+
+    #[test]
+    fn test_transform_pipeline_chained() {
+        let batch = test_batch(vec![1, 2, 3], vec![10.0, 20.0, 30.0]);
+        let pipeline = TransformPipeline::new()
+            .add_rename("id", "row_id")
+            .add_drop("value");
+        let result = pipeline.apply(&batch).unwrap();
+        assert_eq!(result.num_columns(), 1);
+        assert_eq!(result.schema().field(0).name(), "row_id");
+        assert_eq!(result.num_rows(), 3);
+    }
+
+    #[test]
+    fn test_transform_pipeline_steps() {
+        let pipeline = TransformPipeline::new()
+            .add_filter("x", "is_not_null")
+            .add_rename("a", "b")
+            .add_cast("c", DataType::Int64)
+            .add_drop("d");
+        assert_eq!(pipeline.steps().len(), 4);
     }
 }
