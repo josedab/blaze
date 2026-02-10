@@ -46,6 +46,22 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 > APIs will change, implementations may be incomplete, and bugs are expected.
 > Enable them with `--features <flag>` for evaluation only. Core features (✅ Stable) are safe to depend on.
 
+### Coming Soon
+
+> The following features are in development and will be included in the next release.
+> See [CHANGELOG.md](CHANGELOG.md) for details.
+
+- **Vector embeddings** — `VECTOR(n)` type, distance functions (L2, cosine, dot product), k-NN search
+- **Production streaming SQL** — temporal joins, deduplication, backpressure, checkpointing
+- **Cloud-native storage** — partition discovery, parallel fetch, multi-cloud (S3/GCS/Azure)
+- **Enhanced LSP** — signature help, code actions, document symbols, SQL formatting
+- **Auto-tuning optimizer** — A/B plan testing, cardinality feedback loops
+- **Federated query enhancements** — cost-based routing, source capability modeling
+- **Incremental view maintenance** — refresh triggers, priority queue, consistency checking
+- **Time-series enhancements** — delta-of-delta compression, interpolation engine
+- **Observability** — query profiler history, OpenTelemetry export, Prometheus metrics
+- **WASM optimization** — build profiles, size tracking, lazy module loading
+
 ## Quick Start
 
 ### Prerequisites
