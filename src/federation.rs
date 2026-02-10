@@ -1233,6 +1233,478 @@ impl CreateForeignTableStatement {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cost-based source selection and query routing
+// ---------------------------------------------------------------------------
+
+/// Capabilities advertised by a federated data source.
+#[derive(Debug, Clone)]
+pub struct SourceCapabilities {
+    pub supports_filter_pushdown: bool,
+    pub supports_projection_pushdown: bool,
+    pub supports_aggregation_pushdown: bool,
+    pub supports_sort_pushdown: bool,
+    pub supports_limit_pushdown: bool,
+    pub max_concurrent_queries: usize,
+    pub estimated_latency_ms: u64,
+    pub estimated_bandwidth_mbps: f64,
+}
+
+impl Default for SourceCapabilities {
+    fn default() -> Self {
+        Self {
+            supports_filter_pushdown: true,
+            supports_projection_pushdown: true,
+            supports_aggregation_pushdown: false,
+            supports_sort_pushdown: false,
+            supports_limit_pushdown: true,
+            max_concurrent_queries: 10,
+            estimated_latency_ms: 50,
+            estimated_bandwidth_mbps: 100.0,
+        }
+    }
+}
+
+/// Cost estimate for executing a query on a specific source.
+#[derive(Debug, Clone)]
+pub struct QueryCostEstimate {
+    pub source_name: String,
+    pub estimated_rows: u64,
+    pub estimated_bytes: u64,
+    pub estimated_latency_ms: u64,
+    pub network_cost: f64,
+    pub compute_cost: f64,
+}
+
+impl QueryCostEstimate {
+    pub fn total_cost(&self) -> f64 {
+        self.network_cost + self.compute_cost
+    }
+}
+
+/// Routes federated queries to the lowest-cost data source.
+pub struct CostBasedRouter {
+    source_capabilities: HashMap<String, SourceCapabilities>,
+}
+
+impl CostBasedRouter {
+    pub fn new() -> Self {
+        Self {
+            source_capabilities: HashMap::new(),
+        }
+    }
+
+    pub fn register_source(&mut self, name: impl Into<String>, capabilities: SourceCapabilities) {
+        self.source_capabilities.insert(name.into(), capabilities);
+    }
+
+    /// Estimate the cost of running a query against the named source.
+    pub fn estimate_cost(
+        &self,
+        source: &str,
+        estimated_rows: u64,
+        estimated_bytes: u64,
+    ) -> Option<QueryCostEstimate> {
+        let caps = self.source_capabilities.get(source)?;
+        // Network cost: bytes transferred relative to bandwidth, plus base latency.
+        let transfer_time_ms =
+            (estimated_bytes as f64) / (caps.estimated_bandwidth_mbps * 125_000.0) * 1000.0;
+        let network_cost = caps.estimated_latency_ms as f64 + transfer_time_ms;
+        // Compute cost: proportional to rows processed.
+        let compute_cost = estimated_rows as f64 * 0.001;
+        Some(QueryCostEstimate {
+            source_name: source.to_string(),
+            estimated_rows,
+            estimated_bytes,
+            estimated_latency_ms: caps.estimated_latency_ms,
+            network_cost,
+            compute_cost,
+        })
+    }
+
+    /// Select the source with the lowest total cost from a set of candidates.
+    pub fn select_best_source(
+        &self,
+        candidates: &[String],
+        estimated_rows: u64,
+        estimated_bytes: u64,
+    ) -> Option<String> {
+        candidates
+            .iter()
+            .filter_map(|name| self.estimate_cost(name, estimated_rows, estimated_bytes))
+            .min_by(|a, b| a.total_cost().partial_cmp(&b.total_cost()).unwrap())
+            .map(|est| est.source_name)
+    }
+
+    pub fn available_sources(&self) -> Vec<String> {
+        self.source_capabilities.keys().cloned().collect()
+    }
+}
+
+/// Metrics for federated query execution monitoring.
+#[derive(Debug, Clone, Default)]
+pub struct FederationMetrics {
+    pub total_federated_queries: u64,
+    pub total_bytes_transferred: u64,
+    pub total_rows_fetched: u64,
+    pub cache_hit_count: u64,
+    pub cache_miss_count: u64,
+    pub avg_query_latency_ms: f64,
+    pub source_errors: HashMap<String, u64>,
+}
+
+impl FederationMetrics {
+    /// Returns the cache hit rate as a value between 0.0 and 1.0.
+    pub fn cache_hit_rate(&self) -> f64 {
+        let total = self.cache_hit_count + self.cache_miss_count;
+        if total == 0 {
+            0.0
+        } else {
+            self.cache_hit_count as f64 / total as f64
+        }
+    }
+
+    /// Record a completed federated query, updating running averages.
+    pub fn record_query(&mut self, bytes: u64, rows: u64, latency_ms: f64) {
+        let prev_total = self.total_federated_queries as f64;
+        self.total_federated_queries += 1;
+        self.total_bytes_transferred += bytes;
+        self.total_rows_fetched += rows;
+        // Incremental average update.
+        self.avg_query_latency_ms =
+            (self.avg_query_latency_ms * prev_total + latency_ms) / self.total_federated_queries as f64;
+    }
+
+    /// Record an error from a specific source.
+    pub fn record_error(&mut self, source: &str) {
+        *self.source_errors.entry(source.to_string()).or_insert(0) += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Federation Result Cache
+// ---------------------------------------------------------------------------
+
+/// Cache for federated query results with TTL-based expiration.
+pub struct FederationResultCache {
+    entries: HashMap<String, FederationCacheEntry>,
+    ttl_secs: u64,
+    max_entries: usize,
+    hits: u64,
+    misses: u64,
+}
+
+struct FederationCacheEntry {
+    batches: Vec<RecordBatch>,
+    inserted_at: std::time::Instant,
+    access_count: u64,
+}
+
+impl FederationResultCache {
+    pub fn new(ttl_secs: u64, max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            ttl_secs,
+            max_entries,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Look up cached results for a query key.
+    pub fn get(&mut self, key: &str) -> Option<&Vec<RecordBatch>> {
+        if let Some(entry) = self.entries.get_mut(key) {
+            if entry.inserted_at.elapsed().as_secs() < self.ttl_secs {
+                entry.access_count += 1;
+                self.hits += 1;
+                return Some(&entry.batches);
+            }
+            // Expired
+        }
+        self.misses += 1;
+        None
+    }
+
+    /// Store results in the cache.
+    pub fn put(&mut self, key: String, batches: Vec<RecordBatch>) {
+        if self.entries.len() >= self.max_entries {
+            // Evict least recently used
+            if let Some(lru_key) = self.entries.iter()
+                .min_by_key(|(_, e)| e.access_count)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&lru_key);
+            }
+        }
+        self.entries.insert(key, FederationCacheEntry {
+            batches,
+            inserted_at: std::time::Instant::now(),
+            access_count: 0,
+        });
+    }
+
+    /// Invalidate a specific cache entry.
+    pub fn invalidate(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
+    /// Clear the entire cache.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Cache hit rate (0.0 to 1.0).
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 { 0.0 } else { self.hits as f64 / total as f64 }
+    }
+
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    /// Remove expired entries.
+    pub fn evict_expired(&mut self) {
+        let ttl = self.ttl_secs;
+        self.entries.retain(|_, e| e.inserted_at.elapsed().as_secs() < ttl);
+    }
+}
+
+/// Parallel query executor that fans out queries to multiple data sources.
+pub struct ParallelQueryExecutor {
+    max_concurrent: usize,
+    timeout_ms: u64,
+    results: Vec<SourceQueryResult>,
+}
+
+/// Result from querying a single source.
+#[derive(Debug)]
+pub struct SourceQueryResult {
+    pub source_name: String,
+    pub batches: Vec<RecordBatch>,
+    pub execution_time_ms: u64,
+    pub rows_returned: usize,
+    pub error: Option<String>,
+}
+
+impl ParallelQueryExecutor {
+    pub fn new(max_concurrent: usize, timeout_ms: u64) -> Self {
+        Self {
+            max_concurrent,
+            timeout_ms,
+            results: Vec::new(),
+        }
+    }
+
+    /// Plan parallel execution for a federated query.
+    pub fn plan_execution(&self, sources: &[&str]) -> Vec<ExecutionPlan> {
+        sources.iter().enumerate().map(|(i, &source)| {
+            ExecutionPlan {
+                source: source.to_string(),
+                priority: i,
+                batch_idx: i / self.max_concurrent,
+            }
+        }).collect()
+    }
+
+    /// Add a result from a source.
+    pub fn add_result(&mut self, result: SourceQueryResult) {
+        self.results.push(result);
+    }
+
+    /// Get all results.
+    pub fn results(&self) -> &[SourceQueryResult] {
+        &self.results
+    }
+
+    /// Total rows across all source results.
+    pub fn total_rows(&self) -> usize {
+        self.results.iter().map(|r| r.rows_returned).sum()
+    }
+
+    /// Sources that returned errors.
+    pub fn failed_sources(&self) -> Vec<&str> {
+        self.results.iter()
+            .filter(|r| r.error.is_some())
+            .map(|r| r.source_name.as_str())
+            .collect()
+    }
+
+    pub fn max_concurrent(&self) -> usize { self.max_concurrent }
+    pub fn timeout_ms(&self) -> u64 { self.timeout_ms }
+}
+
+/// Execution plan for a single source query.
+#[derive(Debug, Clone)]
+pub struct ExecutionPlan {
+    pub source: String,
+    pub priority: usize,
+    pub batch_idx: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: REST Connector + Credential Vault
+// ---------------------------------------------------------------------------
+
+/// REST API data connector that maps JSON responses to Arrow RecordBatches.
+#[derive(Debug, Clone)]
+pub struct RestApiConnector {
+    pub base_url: String,
+    pub headers: HashMap<String, String>,
+    pub auth: RestAuth,
+    pub response_path: Option<String>,
+    pub timeout_ms: u64,
+}
+
+/// REST API authentication methods.
+#[derive(Debug, Clone)]
+pub enum RestAuth {
+    None,
+    Bearer(String),
+    Basic { username: String, password: String },
+    ApiKey { header: String, key: String },
+}
+
+impl RestApiConnector {
+    pub fn new(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            headers: HashMap::new(),
+            auth: RestAuth::None,
+            response_path: None,
+            timeout_ms: 30000,
+        }
+    }
+
+    pub fn with_auth(mut self, auth: RestAuth) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    pub fn with_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    pub fn with_response_path(mut self, path: &str) -> Self {
+        self.response_path = Some(path.to_string());
+        self
+    }
+
+    /// Build the full URL for an endpoint.
+    pub fn build_url(&self, endpoint: &str) -> String {
+        if self.base_url.ends_with('/') || endpoint.starts_with('/') {
+            format!("{}{}", self.base_url.trim_end_matches('/'), endpoint)
+        } else {
+            format!("{}/{}", self.base_url, endpoint)
+        }
+    }
+
+    /// Get the authorization header value.
+    pub fn auth_header(&self) -> Option<(String, String)> {
+        match &self.auth {
+            RestAuth::None => None,
+            RestAuth::Bearer(token) => Some(("Authorization".to_string(), format!("Bearer {}", token))),
+            RestAuth::Basic { username, password } => {
+                let encoded = base64_encode(&format!("{}:{}", username, password));
+                Some(("Authorization".to_string(), format!("Basic {}", encoded)))
+            }
+            RestAuth::ApiKey { header, key } => Some((header.clone(), key.clone())),
+        }
+    }
+}
+
+/// Simple base64 encoding (no external dependency).
+fn base64_encode(input: &str) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = input.as_bytes();
+    let mut result = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
+/// Credential vault for securely storing data source credentials.
+pub struct CredentialVault {
+    credentials: HashMap<String, StoredCredential>,
+}
+
+/// A stored credential entry.
+#[derive(Debug, Clone)]
+pub struct StoredCredential {
+    pub source_name: String,
+    pub credential_type: CredentialType,
+    pub created_at: std::time::SystemTime,
+    pub expires_at: Option<std::time::SystemTime>,
+}
+
+/// Types of stored credentials.
+#[derive(Debug, Clone)]
+pub enum CredentialType {
+    UsernamePassword { username: String, password: String },
+    Token(String),
+    AccessKey { key_id: String, secret: String },
+    Certificate { cert_pem: String, key_pem: String },
+}
+
+impl CredentialVault {
+    pub fn new() -> Self {
+        Self {
+            credentials: HashMap::new(),
+        }
+    }
+
+    /// Store a credential for a data source.
+    pub fn store(&mut self, name: &str, credential: CredentialType, expires_at: Option<std::time::SystemTime>) {
+        self.credentials.insert(name.to_string(), StoredCredential {
+            source_name: name.to_string(),
+            credential_type: credential,
+            created_at: std::time::SystemTime::now(),
+            expires_at,
+        });
+    }
+
+    /// Retrieve a credential by source name.
+    pub fn get(&self, name: &str) -> Option<&StoredCredential> {
+        self.credentials.get(name).and_then(|cred| {
+            if let Some(expires) = cred.expires_at {
+                if std::time::SystemTime::now() > expires {
+                    return None; // Expired
+                }
+            }
+            Some(cred)
+        })
+    }
+
+    /// Remove a credential.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.credentials.remove(name).is_some()
+    }
+
+    /// List all stored credential names.
+    pub fn list_sources(&self) -> Vec<&str> {
+        self.credentials.keys().map(|k| k.as_str()).collect()
+    }
+
+    pub fn len(&self) -> usize { self.credentials.len() }
+    pub fn is_empty(&self) -> bool { self.credentials.is_empty() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1752,5 +2224,226 @@ mod tests {
         } else {
             panic!("Expected Custom source type");
         }
+    }
+
+    #[test]
+    fn test_source_capabilities_default() {
+        let caps = SourceCapabilities::default();
+        assert!(caps.supports_filter_pushdown);
+        assert!(caps.supports_projection_pushdown);
+        assert!(!caps.supports_aggregation_pushdown);
+        assert!(!caps.supports_sort_pushdown);
+        assert!(caps.supports_limit_pushdown);
+        assert_eq!(caps.max_concurrent_queries, 10);
+        assert_eq!(caps.estimated_latency_ms, 50);
+        assert!((caps.estimated_bandwidth_mbps - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_query_cost_estimate_total() {
+        let est = QueryCostEstimate {
+            source_name: "s1".to_string(),
+            estimated_rows: 1000,
+            estimated_bytes: 4096,
+            estimated_latency_ms: 10,
+            network_cost: 5.0,
+            compute_cost: 3.0,
+        };
+        assert!((est.total_cost() - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_cost_based_router_selection() {
+        let mut router = CostBasedRouter::new();
+        // Fast source: low latency, high bandwidth
+        router.register_source(
+            "fast",
+            SourceCapabilities {
+                estimated_latency_ms: 5,
+                estimated_bandwidth_mbps: 1000.0,
+                ..Default::default()
+            },
+        );
+        // Slow source: high latency, low bandwidth
+        router.register_source(
+            "slow",
+            SourceCapabilities {
+                estimated_latency_ms: 200,
+                estimated_bandwidth_mbps: 10.0,
+                ..Default::default()
+            },
+        );
+
+        let candidates = vec!["fast".to_string(), "slow".to_string()];
+        let best = router.select_best_source(&candidates, 1000, 1_000_000);
+        assert_eq!(best, Some("fast".to_string()));
+
+        // Verify available sources contains both
+        let mut sources = router.available_sources();
+        sources.sort();
+        assert_eq!(sources, vec!["fast".to_string(), "slow".to_string()]);
+    }
+
+    #[test]
+    fn test_cost_based_router_empty() {
+        let router = CostBasedRouter::new();
+        let candidates = vec!["missing".to_string()];
+        assert!(router.select_best_source(&candidates, 100, 100).is_none());
+        assert!(router.estimate_cost("missing", 100, 100).is_none());
+        assert!(router.available_sources().is_empty());
+    }
+
+    #[test]
+    fn test_federation_metrics_cache_hit_rate() {
+        let mut m = FederationMetrics::default();
+        // No hits or misses => 0.0
+        assert!((m.cache_hit_rate() - 0.0).abs() < f64::EPSILON);
+
+        m.cache_hit_count = 3;
+        m.cache_miss_count = 1;
+        assert!((m.cache_hit_rate() - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_federation_metrics_record_query() {
+        let mut m = FederationMetrics::default();
+        m.record_query(1000, 50, 10.0);
+        assert_eq!(m.total_federated_queries, 1);
+        assert_eq!(m.total_bytes_transferred, 1000);
+        assert_eq!(m.total_rows_fetched, 50);
+        assert!((m.avg_query_latency_ms - 10.0).abs() < f64::EPSILON);
+
+        m.record_query(2000, 100, 20.0);
+        assert_eq!(m.total_federated_queries, 2);
+        assert_eq!(m.total_bytes_transferred, 3000);
+        assert_eq!(m.total_rows_fetched, 150);
+        assert!((m.avg_query_latency_ms - 15.0).abs() < f64::EPSILON);
+
+        m.record_error("pg");
+        m.record_error("pg");
+        m.record_error("mysql");
+        assert_eq!(m.source_errors.get("pg"), Some(&2));
+        assert_eq!(m.source_errors.get("mysql"), Some(&1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Federation Result Cache tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_federation_cache_hit_miss() {
+        let mut cache = FederationResultCache::new(60, 100);
+        assert!(cache.get("key1").is_none());
+        assert_eq!(cache.hit_rate(), 0.0);
+
+        cache.put("key1".to_string(), vec![]);
+        assert!(cache.get("key1").is_some());
+        assert!(cache.hit_rate() > 0.0);
+    }
+
+    #[test]
+    fn test_federation_cache_invalidate() {
+        let mut cache = FederationResultCache::new(60, 100);
+        cache.put("key1".to_string(), vec![]);
+        cache.invalidate("key1");
+        assert!(cache.get("key1").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel Query Executor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parallel_executor_plan() {
+        let exec = ParallelQueryExecutor::new(2, 5000);
+        let plans = exec.plan_execution(&["postgres", "mysql", "sqlite"]);
+        assert_eq!(plans.len(), 3);
+        assert_eq!(plans[0].source, "postgres");
+    }
+
+    #[test]
+    fn test_parallel_executor_results() {
+        let mut exec = ParallelQueryExecutor::new(2, 5000);
+        exec.add_result(SourceQueryResult {
+            source_name: "pg".to_string(),
+            batches: vec![],
+            execution_time_ms: 100,
+            rows_returned: 50,
+            error: None,
+        });
+        exec.add_result(SourceQueryResult {
+            source_name: "mysql".to_string(),
+            batches: vec![],
+            execution_time_ms: 200,
+            rows_returned: 30,
+            error: Some("timeout".to_string()),
+        });
+        assert_eq!(exec.total_rows(), 80);
+        assert_eq!(exec.failed_sources(), vec!["mysql"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // REST Connector tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rest_connector_url() {
+        let conn = RestApiConnector::new("https://api.example.com");
+        assert_eq!(conn.build_url("/users"), "https://api.example.com/users");
+    }
+
+    #[test]
+    fn test_rest_connector_auth() {
+        let conn = RestApiConnector::new("https://api.example.com")
+            .with_auth(RestAuth::Bearer("token123".to_string()));
+        let (header, value) = conn.auth_header().unwrap();
+        assert_eq!(header, "Authorization");
+        assert!(value.starts_with("Bearer "));
+    }
+
+    #[test]
+    fn test_rest_connector_api_key() {
+        let conn = RestApiConnector::new("https://api.example.com")
+            .with_auth(RestAuth::ApiKey {
+                header: "X-Api-Key".to_string(),
+                key: "secret123".to_string(),
+            });
+        let (header, value) = conn.auth_header().unwrap();
+        assert_eq!(header, "X-Api-Key");
+        assert_eq!(value, "secret123");
+    }
+
+    // -----------------------------------------------------------------------
+    // Credential Vault tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_credential_vault() {
+        let mut vault = CredentialVault::new();
+        vault.store("postgres", CredentialType::UsernamePassword {
+            username: "admin".to_string(),
+            password: "secret".to_string(),
+        }, None);
+        
+        assert_eq!(vault.len(), 1);
+        assert!(vault.get("postgres").is_some());
+        assert!(vault.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_credential_vault_remove() {
+        let mut vault = CredentialVault::new();
+        vault.store("pg", CredentialType::Token("tok".to_string()), None);
+        assert!(vault.remove("pg"));
+        assert!(vault.is_empty());
+    }
+
+    #[test]
+    fn test_credential_vault_list() {
+        let mut vault = CredentialVault::new();
+        vault.store("pg", CredentialType::Token("t1".to_string()), None);
+        vault.store("mysql", CredentialType::Token("t2".to_string()), None);
+        let sources = vault.list_sources();
+        assert_eq!(sources.len(), 2);
     }
 }
