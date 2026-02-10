@@ -1,6 +1,7 @@
 # Blaze Query Engine
 
 [![CI](https://github.com/blaze-db/blaze/actions/workflows/ci.yml/badge.svg)](https://github.com/blaze-db/blaze/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/blaze.svg)](https://crates.io/crates/blaze)
 [![Coverage](https://codecov.io/gh/blaze-db/blaze/branch/main/graph/badge.svg)](https://codecov.io/gh/blaze-db/blaze)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
