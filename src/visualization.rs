@@ -22,6 +22,12 @@ pub enum ChartType {
     Line,
     /// Frequency distribution
     Histogram,
+    /// Scatter plot with two numeric axes
+    Scatter,
+    /// Proportional pie chart (text-based)
+    Pie,
+    /// Grid-based heatmap with intensity shading
+    Heatmap,
     /// Pretty-printed table (see `output.rs` for the canonical implementation)
     Table,
 }
@@ -535,6 +541,329 @@ impl ChartRenderer {
 
         Ok(out)
     }
+
+    /// Render a scatter plot from two numeric columns.
+    ///
+    /// `x_col` and `y_col` are zero-based column indices for numeric data.
+    pub fn render_scatter(
+        &self,
+        batch: &RecordBatch,
+        x_col: usize,
+        y_col: usize,
+    ) -> Result<Chart> {
+        if batch.num_rows() == 0 {
+            return Ok(Chart {
+                chart_type: ChartType::Scatter,
+                config: self.config.clone(),
+                output: "(empty result set)\n".to_string(),
+            });
+        }
+
+        let x_vals = Self::extract_f64(batch, x_col)?;
+        let y_vals = Self::extract_f64(batch, y_col)?;
+
+        let x_min = x_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let x_max = x_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+        let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let x_range = if (x_max - x_min).abs() < f64::EPSILON { 1.0 } else { x_max - x_min };
+        let y_range = if (y_max - y_min).abs() < f64::EPSILON { 1.0 } else { y_max - y_min };
+
+        let height = self.config.height;
+        let plot_width = self.config.width.saturating_sub(12);
+
+        let mut grid = vec![vec![' '; plot_width]; height];
+
+        for (&x, &y) in x_vals.iter().zip(y_vals.iter()) {
+            let col = (((x - x_min) / x_range) * (plot_width - 1) as f64).round() as usize;
+            let row = height - 1 - (((y - y_min) / y_range) * (height - 1) as f64).round() as usize;
+            let col = col.min(plot_width - 1);
+            let row = row.min(height - 1);
+            grid[row][col] = '•';
+        }
+
+        let mut out = String::new();
+        if let Some(ref title) = self.config.title {
+            writeln!(out, "{}", title).unwrap();
+        }
+
+        let label_w = 8;
+        for (r, row) in grid.iter().enumerate() {
+            if self.config.show_labels {
+                let y_val = y_max - (r as f64 / (height - 1).max(1) as f64) * y_range;
+                write!(out, "{:>w$.1} │", y_val, w = label_w).unwrap();
+            }
+            let line: String = row.iter().collect();
+            writeln!(out, "{}", line).unwrap();
+        }
+
+        if self.config.show_labels {
+            write!(out, "{:>w$} └", "", w = label_w).unwrap();
+            writeln!(out, "{}", "─".repeat(plot_width)).unwrap();
+        }
+
+        Ok(Chart {
+            chart_type: ChartType::Scatter,
+            config: self.config.clone(),
+            output: out,
+        })
+    }
+
+    /// Render a text-based pie chart showing proportions of values.
+    ///
+    /// `label_col` and `value_col` are zero-based column indices.
+    pub fn render_pie(
+        &self,
+        batch: &RecordBatch,
+        label_col: usize,
+        value_col: usize,
+    ) -> Result<Chart> {
+        if batch.num_rows() == 0 {
+            return Ok(Chart {
+                chart_type: ChartType::Pie,
+                config: self.config.clone(),
+                output: "(empty result set)\n".to_string(),
+            });
+        }
+
+        let labels = Self::extract_strings(batch, label_col)?;
+        let values = Self::extract_f64(batch, value_col)?;
+
+        let total: f64 = values.iter().filter(|v| **v > 0.0).sum();
+        if total <= 0.0 {
+            return Ok(Chart {
+                chart_type: ChartType::Pie,
+                config: self.config.clone(),
+                output: "(no positive values)\n".to_string(),
+            });
+        }
+
+        let pie_chars = ['█', '▓', '▒', '░', '▪', '▫', '◆', '◇', '●', '○'];
+
+        let mut out = String::new();
+        if let Some(ref title) = self.config.title {
+            writeln!(out, "{}", title).unwrap();
+            writeln!(out, "{}", "─".repeat(self.config.width.min(title.len() + 20))).unwrap();
+        }
+
+        // Summary with percentages
+        let bar_width = self.config.width.saturating_sub(35);
+        for (i, (label, &val)) in labels.iter().zip(values.iter()).enumerate() {
+            let pct = if val > 0.0 { (val / total) * 100.0 } else { 0.0 };
+            let fill = ((pct / 100.0) * bar_width as f64).round() as usize;
+            let ch = pie_chars[i % pie_chars.len()];
+            let bar: String = std::iter::repeat(ch).take(fill).collect();
+            let padded = self.pad_label(label);
+            writeln!(out, "{}  {:<bw$} {:>5.1}%", padded, bar, pct, bw = bar_width).unwrap();
+        }
+
+        Ok(Chart {
+            chart_type: ChartType::Pie,
+            config: self.config.clone(),
+            output: out,
+        })
+    }
+
+    /// Render a text-based heatmap from a numeric column.
+    ///
+    /// Displays values as colored/shaded Unicode blocks in a grid layout.
+    pub fn render_heatmap(
+        &self,
+        batch: &RecordBatch,
+        value_col: usize,
+        cols_per_row: usize,
+    ) -> Result<Chart> {
+        if batch.num_rows() == 0 {
+            return Ok(Chart {
+                chart_type: ChartType::Heatmap,
+                config: self.config.clone(),
+                output: "(empty result set)\n".to_string(),
+            });
+        }
+
+        let values = Self::extract_f64(batch, value_col)?;
+        let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = if (max - min).abs() < f64::EPSILON { 1.0 } else { max - min };
+
+        let heat_chars = [' ', '░', '▒', '▓', '█'];
+        let cols = cols_per_row.max(1);
+
+        let mut out = String::new();
+        if let Some(ref title) = self.config.title {
+            writeln!(out, "{}", title).unwrap();
+        }
+
+        for chunk in values.chunks(cols) {
+            let row: String = chunk
+                .iter()
+                .map(|&v| {
+                    let idx = (((v - min) / range) * 4.0).round() as usize;
+                    heat_chars[idx.min(4)]
+                })
+                .collect();
+            writeln!(out, "│{}│", row).unwrap();
+        }
+
+        // Legend
+        writeln!(out, "  Low {} {} {} {} High", heat_chars[0], heat_chars[1], heat_chars[2], heat_chars[3]).unwrap();
+
+        Ok(Chart {
+            chart_type: ChartType::Heatmap,
+            config: self.config.clone(),
+            output: out,
+        })
+    }
+
+    /// Auto-detect the best chart type based on the data schema.
+    ///
+    /// Rules:
+    /// - 1 string + 1 numeric column → Bar chart
+    /// - 2 numeric columns → Scatter plot
+    /// - 1 numeric column → Histogram
+    /// - Otherwise → Summary statistics
+    pub fn auto_detect_chart_type(batch: &RecordBatch) -> ChartType {
+        if batch.num_rows() == 0 {
+            return ChartType::Table;
+        }
+
+        let schema = batch.schema();
+        let mut string_cols = Vec::new();
+        let mut numeric_cols = Vec::new();
+
+        for (i, field) in schema.fields().iter().enumerate() {
+            match field.data_type() {
+                ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => string_cols.push(i),
+                ArrowDataType::Float64
+                | ArrowDataType::Float32
+                | ArrowDataType::Int64
+                | ArrowDataType::Int32 => numeric_cols.push(i),
+                _ => {}
+            }
+        }
+
+        match (string_cols.len(), numeric_cols.len()) {
+            (1, 1) => ChartType::Bar,
+            (_, 2) => ChartType::Scatter,
+            (_, 1) => ChartType::Histogram,
+            (1, n) if n > 1 => ChartType::Bar,
+            _ => ChartType::Table,
+        }
+    }
+
+    /// Render a chart using auto-detected chart type.
+    pub fn render_auto(&self, batch: &RecordBatch) -> Result<Chart> {
+        let chart_type = Self::auto_detect_chart_type(batch);
+        let schema = batch.schema();
+
+        let mut string_cols = Vec::new();
+        let mut numeric_cols = Vec::new();
+        for (i, field) in schema.fields().iter().enumerate() {
+            match field.data_type() {
+                ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => string_cols.push(i),
+                ArrowDataType::Float64
+                | ArrowDataType::Float32
+                | ArrowDataType::Int64
+                | ArrowDataType::Int32 => numeric_cols.push(i),
+                _ => {}
+            }
+        }
+
+        match chart_type {
+            ChartType::Bar => {
+                let label_col = string_cols.first().copied().unwrap_or(0);
+                let value_col = numeric_cols.first().copied().unwrap_or(1);
+                self.render_bar(batch, label_col, value_col)
+            }
+            ChartType::Scatter => {
+                let x = numeric_cols.first().copied().unwrap_or(0);
+                let y = numeric_cols.get(1).copied().unwrap_or(1);
+                self.render_scatter(batch, x, y)
+            }
+            ChartType::Histogram => {
+                let col = numeric_cols.first().copied().unwrap_or(0);
+                self.render_histogram(batch, col, 10)
+            }
+            _ => {
+                let summary = Self::render_summary(batch)?;
+                Ok(Chart {
+                    chart_type: ChartType::Table,
+                    config: self.config.clone(),
+                    output: summary,
+                })
+            }
+        }
+    }
+
+    /// Render a bar chart as an SVG string.
+    pub fn render_bar_svg(
+        &self,
+        batch: &RecordBatch,
+        label_col: usize,
+        value_col: usize,
+    ) -> Result<String> {
+        if batch.num_rows() == 0 {
+            return Ok("<svg></svg>".to_string());
+        }
+
+        let labels = Self::extract_strings(batch, label_col)?;
+        let values = Self::extract_f64(batch, value_col)?;
+        let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max_val = if max_val <= 0.0 { 1.0 } else { max_val };
+
+        let bar_height = 30;
+        let gap = 5;
+        let chart_width = 600;
+        let chart_height = (bar_height + gap) * labels.len() + 40;
+        let bar_area = chart_width - 200;
+
+        let mut svg = String::new();
+        writeln!(
+            svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}">"#,
+            chart_width, chart_height
+        )
+        .unwrap();
+
+        if let Some(ref title) = self.config.title {
+            writeln!(
+                svg,
+                r#"  <text x="{}" y="20" font-size="16" font-weight="bold" text-anchor="middle">{}</text>"#,
+                chart_width / 2, title
+            )
+            .unwrap();
+        }
+
+        let colors = ["#4285f4", "#ea4335", "#fbbc04", "#34a853", "#ff6d01", "#46bdc6"];
+
+        for (i, (label, &val)) in labels.iter().zip(values.iter()).enumerate() {
+            let y = 40 + i * (bar_height + gap);
+            let width = ((val / max_val) * bar_area as f64) as usize;
+            let color = colors[i % colors.len()];
+
+            writeln!(
+                svg,
+                r#"  <text x="130" y="{}" font-size="12" text-anchor="end" dominant-baseline="middle">{}</text>"#,
+                y + bar_height / 2, label
+            )
+            .unwrap();
+            writeln!(
+                svg,
+                r#"  <rect x="140" y="{}" width="{}" height="{}" fill="{}" rx="3"/>"#,
+                y, width, bar_height - 2, color
+            )
+            .unwrap();
+            writeln!(
+                svg,
+                r#"  <text x="{}" y="{}" font-size="11" dominant-baseline="middle">{}</text>"#,
+                145 + width, y + bar_height / 2, Self::format_number(val)
+            )
+            .unwrap();
+        }
+
+        writeln!(svg, "</svg>").unwrap();
+        Ok(svg)
+    }
 }
 
 impl std::fmt::Display for Chart {
@@ -692,5 +1021,114 @@ mod tests {
         assert_eq!(spark.chars().count(), 1);
         // Single value should map to the middle level.
         assert_eq!(spark.chars().next().unwrap(), SPARK_CHARS[3]);
+    }
+
+    fn make_two_numeric_batch() -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("x", ArrowDataType::Float64, false),
+            ArrowField::new("y", ArrowDataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+                Arc::new(Float64Array::from(vec![2.0, 4.0, 1.0, 5.0, 3.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_render_scatter() {
+        let batch = make_two_numeric_batch();
+        let renderer = ChartRenderer::new(ChartConfig {
+            height: 10,
+            title: Some("X vs Y".to_string()),
+            ..ChartConfig::default()
+        });
+        let chart = renderer.render_scatter(&batch, 0, 1).unwrap();
+        assert_eq!(chart.chart_type, ChartType::Scatter);
+        assert!(chart.output.contains('•'));
+        assert!(chart.output.contains("X vs Y"));
+    }
+
+    #[test]
+    fn test_render_pie() {
+        let batch = make_test_batch();
+        let renderer = ChartRenderer::new(ChartConfig {
+            title: Some("Market Share".to_string()),
+            ..ChartConfig::default()
+        });
+        let chart = renderer.render_pie(&batch, 0, 1).unwrap();
+        assert_eq!(chart.chart_type, ChartType::Pie);
+        assert!(chart.output.contains('%'));
+        assert!(chart.output.contains("Market Share"));
+    }
+
+    #[test]
+    fn test_render_heatmap() {
+        let batch = make_numeric_batch();
+        let renderer = ChartRenderer::new(ChartConfig {
+            title: Some("Heat".to_string()),
+            ..ChartConfig::default()
+        });
+        let chart = renderer.render_heatmap(&batch, 0, 5).unwrap();
+        assert_eq!(chart.chart_type, ChartType::Heatmap);
+        assert!(chart.output.contains('│'));
+    }
+
+    #[test]
+    fn test_auto_detect_chart_type() {
+        // 1 string + 1 numeric → Bar
+        let batch = make_test_batch();
+        assert_eq!(ChartRenderer::auto_detect_chart_type(&batch), ChartType::Bar);
+
+        // 2 numeric → Scatter
+        let batch = make_two_numeric_batch();
+        assert_eq!(ChartRenderer::auto_detect_chart_type(&batch), ChartType::Scatter);
+
+        // 1 numeric → Histogram
+        let batch = make_numeric_batch();
+        assert_eq!(ChartRenderer::auto_detect_chart_type(&batch), ChartType::Histogram);
+    }
+
+    #[test]
+    fn test_render_auto() {
+        let batch = make_test_batch();
+        let renderer = ChartRenderer::new(ChartConfig::default());
+        let chart = renderer.render_auto(&batch).unwrap();
+        // Auto should pick Bar for 1 string + 1 numeric
+        assert_eq!(chart.chart_type, ChartType::Bar);
+    }
+
+    #[test]
+    fn test_render_bar_svg() {
+        let batch = make_test_batch();
+        let renderer = ChartRenderer::new(ChartConfig {
+            title: Some("SVG Chart".to_string()),
+            ..ChartConfig::default()
+        });
+        let svg = renderer.render_bar_svg(&batch, 0, 1).unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("</svg>"));
+        assert!(svg.contains("North"));
+        assert!(svg.contains("SVG Chart"));
+        assert!(svg.contains("rect"));
+    }
+
+    #[test]
+    fn test_scatter_empty() {
+        let batch = make_empty_batch();
+        let renderer = ChartRenderer::new(ChartConfig::default());
+        let chart = renderer.render_scatter(&batch, 0, 1).unwrap();
+        assert!(chart.output.contains("empty"));
+    }
+
+    #[test]
+    fn test_pie_empty() {
+        let batch = make_empty_batch();
+        let renderer = ChartRenderer::new(ChartConfig::default());
+        let chart = renderer.render_pie(&batch, 0, 1).unwrap();
+        assert!(chart.output.contains("empty"));
     }
 }
