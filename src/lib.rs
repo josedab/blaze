@@ -1,5 +1,5 @@
 #![warn(clippy::all)]
-#![warn(clippy::unwrap_used)]
+#![deny(clippy::unwrap_used)]
 #![allow(clippy::type_complexity)]
 #![deny(unused_imports)]
 //! Blaze - Next-Generation Embedded OLAP Query Engine
