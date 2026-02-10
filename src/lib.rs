@@ -1484,6 +1484,21 @@ impl Default for Connection {
 }
 
 /// Configuration options for a database connection.
+///
+/// Controls vectorized batch size, memory limits, and parallelism.
+/// Use [`ConnectionConfig::new()`] to create a default configuration,
+/// then chain builder methods to customize.
+///
+/// # Example
+///
+/// ```rust
+/// use blaze::ConnectionConfig;
+///
+/// let config = ConnectionConfig::new()
+///     .with_batch_size(4096)
+///     .with_memory_limit(512 * 1024 * 1024)
+///     .with_num_threads(4);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     /// Batch size for vectorized execution
