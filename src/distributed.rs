@@ -1053,6 +1053,481 @@ impl NodeHealthChecker {
 }
 
 // ---------------------------------------------------------------------------
+// Data Partitioning
+// ---------------------------------------------------------------------------
+
+/// Partitioning scheme for distributing data across nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartitionScheme {
+    /// Hash a column and assign rows to partitions via modulo.
+    Hash { column_index: usize },
+    /// Range-based partitioning using sorted split points.
+    Range { column_index: usize, split_points: Vec<i64> },
+    /// Distribute rows cyclically across partitions.
+    RoundRobin,
+    /// Clone the entire dataset to every partition.
+    Broadcast,
+}
+
+/// Partitions `RecordBatch`es according to a [`PartitionScheme`].
+pub struct DataPartitioner {
+    scheme: PartitionScheme,
+    num_partitions: usize,
+}
+
+impl DataPartitioner {
+    pub fn new(scheme: PartitionScheme, num_partitions: usize) -> Self {
+        Self { scheme, num_partitions }
+    }
+
+    /// Split `batches` into `num_partitions` buckets.
+    pub fn partition(&self, batches: &[RecordBatch]) -> Result<Vec<Vec<RecordBatch>>> {
+        if self.num_partitions == 0 {
+            return Err(BlazeError::execution("num_partitions must be > 0"));
+        }
+        match &self.scheme {
+            PartitionScheme::Hash { column_index } => self.hash_partition(batches, *column_index),
+            PartitionScheme::Range { column_index, split_points } => {
+                self.range_partition(batches, *column_index, split_points)
+            }
+            PartitionScheme::RoundRobin => self.round_robin_partition(batches),
+            PartitionScheme::Broadcast => self.broadcast_partition(batches),
+        }
+    }
+
+    pub fn num_partitions(&self) -> usize {
+        self.num_partitions
+    }
+
+    pub fn scheme(&self) -> &PartitionScheme {
+        &self.scheme
+    }
+
+    // -- private helpers -----------------------------------------------------
+
+    fn hash_partition(
+        &self,
+        batches: &[RecordBatch],
+        col_idx: usize,
+    ) -> Result<Vec<Vec<RecordBatch>>> {
+        use arrow::array::Array;
+        let mut buckets: Vec<Vec<RecordBatch>> =
+            (0..self.num_partitions).map(|_| Vec::new()).collect();
+
+        for batch in batches {
+            if col_idx >= batch.num_columns() {
+                return Err(BlazeError::execution(format!(
+                    "Column index {} out of range ({})",
+                    col_idx,
+                    batch.num_columns()
+                )));
+            }
+            let col = batch.column(col_idx);
+            // Assign each row by hashing its debug representation.
+            let mut row_indices: Vec<Vec<usize>> =
+                (0..self.num_partitions).map(|_| Vec::new()).collect();
+            for row in 0..batch.num_rows() {
+                let hash = if col.is_null(row) {
+                    0usize
+                } else {
+                    // Simple hash: use the formatted scalar as bytes.
+                    let s = format!("{:?}", col.slice(row, 1));
+                    s.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize))
+                };
+                row_indices[hash % self.num_partitions].push(row);
+            }
+            for (part, indices) in row_indices.into_iter().enumerate() {
+                if !indices.is_empty() {
+                    let cols = batch
+                        .columns()
+                        .iter()
+                        .map(|c| {
+                            let idx_arr = arrow::array::UInt32Array::from(
+                                indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+                            );
+                            arrow::compute::take(c.as_ref(), &idx_arr, None)
+                                .map_err(|e| BlazeError::execution(format!("take error: {e}")))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let rb = RecordBatch::try_new(batch.schema(), cols)
+                        .map_err(|e| BlazeError::execution(format!("batch error: {e}")))?;
+                    buckets[part].push(rb);
+                }
+            }
+        }
+        Ok(buckets)
+    }
+
+    fn range_partition(
+        &self,
+        batches: &[RecordBatch],
+        col_idx: usize,
+        split_points: &[i64],
+    ) -> Result<Vec<Vec<RecordBatch>>> {
+        use arrow::array::{Array, AsArray};
+        let mut buckets: Vec<Vec<RecordBatch>> =
+            (0..self.num_partitions).map(|_| Vec::new()).collect();
+
+        for batch in batches {
+            if col_idx >= batch.num_columns() {
+                return Err(BlazeError::execution("Column index out of range"));
+            }
+            let col = batch.column(col_idx);
+            let int_col = col.as_primitive_opt::<arrow::datatypes::Int64Type>().ok_or_else(|| {
+                BlazeError::execution("Range partitioning requires Int64 column")
+            })?;
+            let mut row_indices: Vec<Vec<usize>> =
+                (0..self.num_partitions).map(|_| Vec::new()).collect();
+            for row in 0..batch.num_rows() {
+                let val = if int_col.is_null(row) { i64::MIN } else { int_col.value(row) };
+                let mut part = split_points.len(); // last bucket by default
+                for (i, &sp) in split_points.iter().enumerate() {
+                    if val < sp {
+                        part = i;
+                        break;
+                    }
+                }
+                let part = part.min(self.num_partitions - 1);
+                row_indices[part].push(row);
+            }
+            for (part, indices) in row_indices.into_iter().enumerate() {
+                if !indices.is_empty() {
+                    let cols = batch
+                        .columns()
+                        .iter()
+                        .map(|c| {
+                            let idx_arr = arrow::array::UInt32Array::from(
+                                indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+                            );
+                            arrow::compute::take(c.as_ref(), &idx_arr, None)
+                                .map_err(|e| BlazeError::execution(format!("take error: {e}")))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let rb = RecordBatch::try_new(batch.schema(), cols)
+                        .map_err(|e| BlazeError::execution(format!("batch error: {e}")))?;
+                    buckets[part].push(rb);
+                }
+            }
+        }
+        Ok(buckets)
+    }
+
+    fn round_robin_partition(&self, batches: &[RecordBatch]) -> Result<Vec<Vec<RecordBatch>>> {
+        let mut buckets: Vec<Vec<RecordBatch>> =
+            (0..self.num_partitions).map(|_| Vec::new()).collect();
+        let mut counter = 0usize;
+
+        for batch in batches {
+            let mut row_indices: Vec<Vec<usize>> =
+                (0..self.num_partitions).map(|_| Vec::new()).collect();
+            for row in 0..batch.num_rows() {
+                row_indices[counter % self.num_partitions].push(row);
+                counter += 1;
+            }
+            for (part, indices) in row_indices.into_iter().enumerate() {
+                if !indices.is_empty() {
+                    let cols = batch
+                        .columns()
+                        .iter()
+                        .map(|c| {
+                            let idx_arr = arrow::array::UInt32Array::from(
+                                indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+                            );
+                            arrow::compute::take(c.as_ref(), &idx_arr, None)
+                                .map_err(|e| BlazeError::execution(format!("take error: {e}")))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let rb = RecordBatch::try_new(batch.schema(), cols)
+                        .map_err(|e| BlazeError::execution(format!("batch error: {e}")))?;
+                    buckets[part].push(rb);
+                }
+            }
+        }
+        Ok(buckets)
+    }
+
+    fn broadcast_partition(&self, batches: &[RecordBatch]) -> Result<Vec<Vec<RecordBatch>>> {
+        let mut buckets: Vec<Vec<RecordBatch>> =
+            (0..self.num_partitions).map(|_| Vec::new()).collect();
+        for bucket in &mut buckets {
+            bucket.extend(batches.iter().cloned());
+        }
+        Ok(buckets)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exchange Operators
+// ---------------------------------------------------------------------------
+
+/// Exchange operators that redistribute data between distributed execution stages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExchangeOperator {
+    /// Repartition data according to a given scheme.
+    Repartition {
+        scheme: PartitionScheme,
+        num_partitions: usize,
+    },
+    /// Broadcast data to a set of target nodes.
+    BroadcastExchange { target_nodes: Vec<String> },
+    /// Gather results from all nodes onto the coordinator.
+    GatherExchange,
+    /// Co-locate two inputs by join keys so matching rows land on the same node.
+    ColocatedJoinExchange {
+        left_key: String,
+        right_key: String,
+    },
+}
+
+impl ExchangeOperator {
+    /// Return a human-readable description of this exchange.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Repartition { scheme, num_partitions } => {
+                format!("Repartition({:?}, {} partitions)", scheme, num_partitions)
+            }
+            Self::BroadcastExchange { target_nodes } => {
+                format!("BroadcastExchange(targets: [{}])", target_nodes.join(", "))
+            }
+            Self::GatherExchange => "GatherExchange".to_string(),
+            Self::ColocatedJoinExchange { left_key, right_key } => {
+                format!("ColocatedJoinExchange(left={}, right={})", left_key, right_key)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resource Governor
+// ---------------------------------------------------------------------------
+
+/// Statistics tracked by the [`ResourceGovernor`].
+#[derive(Debug, Clone, Default)]
+pub struct ResourceStats {
+    pub queries_admitted: usize,
+    pub queries_rejected: usize,
+    pub queries_timed_out: usize,
+}
+
+/// A resource grant representing an allocated execution slot.
+#[derive(Debug)]
+pub struct ResourceGrant {
+    pub grant_id: u64,
+    pub memory_budget: usize,
+    pub timeout_ms: u64,
+    pub acquired_at: Instant,
+}
+
+/// Governs resource allocation for distributed query execution.
+pub struct ResourceGovernor {
+    max_concurrent_queries: usize,
+    max_memory_per_query: usize,
+    query_timeout_ms: u64,
+    active: RwLock<HashMap<u64, ResourceGrant>>,
+    next_id: RwLock<u64>,
+    stats: RwLock<ResourceStats>,
+}
+
+impl ResourceGovernor {
+    pub fn new(
+        max_concurrent_queries: usize,
+        max_memory_per_query: usize,
+        query_timeout_ms: u64,
+    ) -> Self {
+        Self {
+            max_concurrent_queries,
+            max_memory_per_query,
+            query_timeout_ms,
+            active: RwLock::new(HashMap::new()),
+            next_id: RwLock::new(1),
+            stats: RwLock::new(ResourceStats::default()),
+        }
+    }
+
+    /// Try to acquire a resource slot. Returns an error if capacity is exceeded.
+    pub fn try_acquire(&self) -> Result<ResourceGrant> {
+        let active = self.active.read();
+        if active.len() >= self.max_concurrent_queries {
+            self.stats.write().queries_rejected += 1;
+            return Err(BlazeError::execution(format!(
+                "Resource limit reached: {} of {} slots in use",
+                active.len(),
+                self.max_concurrent_queries,
+            )));
+        }
+        drop(active);
+
+        let mut id_guard = self.next_id.write();
+        let grant_id = *id_guard;
+        *id_guard += 1;
+        drop(id_guard);
+
+        let grant = ResourceGrant {
+            grant_id,
+            memory_budget: self.max_memory_per_query,
+            timeout_ms: self.query_timeout_ms,
+            acquired_at: Instant::now(),
+        };
+
+        self.active.write().insert(grant_id, ResourceGrant {
+            grant_id,
+            memory_budget: self.max_memory_per_query,
+            timeout_ms: self.query_timeout_ms,
+            acquired_at: grant.acquired_at,
+        });
+        self.stats.write().queries_admitted += 1;
+
+        Ok(grant)
+    }
+
+    /// Release a previously acquired resource grant.
+    pub fn release(&self, grant_id: u64) {
+        self.active.write().remove(&grant_id);
+    }
+
+    /// Number of queries currently holding a resource slot.
+    pub fn active_queries(&self) -> usize {
+        self.active.read().len()
+    }
+
+    /// Record a timed-out query (and release its slot).
+    pub fn record_timeout(&self, grant_id: u64) {
+        self.active.write().remove(&grant_id);
+        self.stats.write().queries_timed_out += 1;
+    }
+
+    /// Return a snapshot of resource statistics.
+    pub fn stats(&self) -> ResourceStats {
+        self.stats.read().clone()
+    }
+
+    pub fn max_concurrent_queries(&self) -> usize {
+        self.max_concurrent_queries
+    }
+
+    pub fn max_memory_per_query(&self) -> usize {
+        self.max_memory_per_query
+    }
+
+    pub fn query_timeout_ms(&self) -> u64 {
+        self.query_timeout_ms
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Result Streaming
+// ---------------------------------------------------------------------------
+
+/// Strategy used when merging results from multiple fragment executions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeStrategy {
+    /// Simply append all batches in arrival order.
+    Append,
+    /// Sort the merged result by a given column.
+    Sort { column: String, descending: bool },
+    /// Aggregate the merged result using a given expression description.
+    Aggregate { expression: String },
+}
+
+/// Collects streaming results from distributed fragment executions with
+/// configurable merge strategies.
+pub struct StreamingResultCollector {
+    strategy: MergeStrategy,
+    results: Vec<(usize, Vec<RecordBatch>)>,
+    total_rows: usize,
+    total_bytes: usize,
+}
+
+impl StreamingResultCollector {
+    pub fn new(strategy: MergeStrategy) -> Self {
+        Self {
+            strategy,
+            results: Vec::new(),
+            total_rows: 0,
+            total_bytes: 0,
+        }
+    }
+
+    /// Add results from a fragment execution.
+    pub fn add_result(&mut self, fragment_id: usize, batches: Vec<RecordBatch>) {
+        for b in &batches {
+            self.total_rows += b.num_rows();
+            self.total_bytes += b.get_array_memory_size();
+        }
+        self.results.push((fragment_id, batches));
+    }
+
+    /// Merge all collected results according to the configured strategy.
+    pub fn merge_results(&self) -> Result<Vec<RecordBatch>> {
+        let mut all_batches: Vec<RecordBatch> = Vec::new();
+        for (_frag_id, batches) in &self.results {
+            all_batches.extend(batches.iter().cloned());
+        }
+
+        if all_batches.is_empty() {
+            return Ok(all_batches);
+        }
+
+        match &self.strategy {
+            MergeStrategy::Append => Ok(all_batches),
+            MergeStrategy::Sort { column, descending } => {
+                // Find column index by name in the first batch schema.
+                let schema = all_batches[0].schema();
+                let col_idx = schema.index_of(column).map_err(|_| {
+                    BlazeError::execution(format!("Sort column '{}' not found", column))
+                })?;
+                // Compact into a single batch then sort.
+                let compacted = concat_batches(&schema, &all_batches)
+                    .map_err(|e| BlazeError::execution(format!("concat error: {e}")))?;
+                let sort_col = compacted.column(col_idx).clone();
+                let options = arrow::compute::SortOptions {
+                    descending: *descending,
+                    nulls_first: false,
+                };
+                let indices = arrow::compute::sort_to_indices(&sort_col, Some(options), None)
+                    .map_err(|e| BlazeError::execution(format!("sort error: {e}")))?;
+                let sorted_cols = compacted
+                    .columns()
+                    .iter()
+                    .map(|c| {
+                        arrow::compute::take(c.as_ref(), &indices, None)
+                            .map_err(|e| BlazeError::execution(format!("take error: {e}")))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let sorted =
+                    RecordBatch::try_new(schema, sorted_cols)
+                        .map_err(|e| BlazeError::execution(format!("batch error: {e}")))?;
+                Ok(vec![sorted])
+            }
+            MergeStrategy::Aggregate { expression: _ } => {
+                // Full aggregation is delegated to the executor; here we just
+                // compact the batches so downstream can process them.
+                let schema = all_batches[0].schema();
+                let compacted = concat_batches(&schema, &all_batches)
+                    .map_err(|e| BlazeError::execution(format!("concat error: {e}")))?;
+                Ok(vec![compacted])
+            }
+        }
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn strategy(&self) -> &MergeStrategy {
+        &self.strategy
+    }
+
+    pub fn fragment_count(&self) -> usize {
+        self.results.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1409,5 +1884,232 @@ mod tests {
     fn test_health_checker_config() {
         let checker = NodeHealthChecker::new(3000, 5);
         assert_eq!(checker.check_interval_ms(), 3000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Data Partitioning tests
+    // -----------------------------------------------------------------------
+
+    fn make_int_batch(values: Vec<i64>) -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![arrow::datatypes::Field::new(
+            "id",
+            arrow::datatypes::DataType::Int64,
+            false,
+        )]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::Int64Array::from(values))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_hash_partition_distributes_rows() {
+        let batch = make_int_batch(vec![1, 2, 3, 4, 5, 6]);
+        let partitioner =
+            DataPartitioner::new(PartitionScheme::Hash { column_index: 0 }, 3);
+        let buckets = partitioner.partition(&[batch]).unwrap();
+
+        assert_eq!(buckets.len(), 3);
+        let total: usize = buckets.iter().flat_map(|b| b.iter().map(|r| r.num_rows())).sum();
+        assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn test_round_robin_partition() {
+        let batch = make_int_batch(vec![10, 20, 30, 40]);
+        let partitioner = DataPartitioner::new(PartitionScheme::RoundRobin, 2);
+        let buckets = partitioner.partition(&[batch]).unwrap();
+
+        assert_eq!(buckets.len(), 2);
+        let total: usize = buckets.iter().flat_map(|b| b.iter().map(|r| r.num_rows())).sum();
+        assert_eq!(total, 4);
+        // Each partition should have 2 rows (round-robin evenly).
+        for bucket in &buckets {
+            let rows: usize = bucket.iter().map(|r| r.num_rows()).sum();
+            assert_eq!(rows, 2);
+        }
+    }
+
+    #[test]
+    fn test_broadcast_partition() {
+        let batch = make_int_batch(vec![1, 2, 3]);
+        let partitioner = DataPartitioner::new(PartitionScheme::Broadcast, 4);
+        let buckets = partitioner.partition(&[batch]).unwrap();
+
+        assert_eq!(buckets.len(), 4);
+        for bucket in &buckets {
+            let rows: usize = bucket.iter().map(|r| r.num_rows()).sum();
+            assert_eq!(rows, 3);
+        }
+    }
+
+    #[test]
+    fn test_range_partition() {
+        let batch = make_int_batch(vec![5, 15, 25, 35, 45]);
+        let partitioner = DataPartitioner::new(
+            PartitionScheme::Range {
+                column_index: 0,
+                split_points: vec![10, 30],
+            },
+            3,
+        );
+        let buckets = partitioner.partition(&[batch]).unwrap();
+
+        assert_eq!(buckets.len(), 3);
+        let total: usize = buckets.iter().flat_map(|b| b.iter().map(|r| r.num_rows())).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn test_partition_zero_partitions_error() {
+        let batch = make_int_batch(vec![1]);
+        let partitioner = DataPartitioner::new(PartitionScheme::RoundRobin, 0);
+        assert!(partitioner.partition(&[batch]).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Exchange Operator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exchange_operator_describe() {
+        let rp = ExchangeOperator::Repartition {
+            scheme: PartitionScheme::Hash { column_index: 0 },
+            num_partitions: 4,
+        };
+        assert!(rp.describe().contains("Repartition"));
+        assert!(rp.describe().contains("4 partitions"));
+
+        let bc = ExchangeOperator::BroadcastExchange {
+            target_nodes: vec!["n1".into(), "n2".into()],
+        };
+        assert!(bc.describe().contains("n1"));
+
+        let ge = ExchangeOperator::GatherExchange;
+        assert_eq!(ge.describe(), "GatherExchange");
+
+        let cj = ExchangeOperator::ColocatedJoinExchange {
+            left_key: "order_id".into(),
+            right_key: "id".into(),
+        };
+        assert!(cj.describe().contains("order_id"));
+        assert!(cj.describe().contains("id"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Resource Governor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resource_governor_acquire_release() {
+        let gov = ResourceGovernor::new(2, 1024 * 1024, 5000);
+        assert_eq!(gov.active_queries(), 0);
+
+        let g1 = gov.try_acquire().unwrap();
+        assert_eq!(gov.active_queries(), 1);
+        assert_eq!(g1.memory_budget, 1024 * 1024);
+
+        let g2 = gov.try_acquire().unwrap();
+        assert_eq!(gov.active_queries(), 2);
+
+        // Third should fail — at capacity.
+        assert!(gov.try_acquire().is_err());
+
+        gov.release(g1.grant_id);
+        assert_eq!(gov.active_queries(), 1);
+
+        // Now there's room again.
+        let _g3 = gov.try_acquire().unwrap();
+        assert_eq!(gov.active_queries(), 2);
+        gov.release(g2.grant_id);
+    }
+
+    #[test]
+    fn test_resource_governor_stats() {
+        let gov = ResourceGovernor::new(1, 512, 1000);
+
+        let g = gov.try_acquire().unwrap();
+        let _ = gov.try_acquire(); // rejected
+
+        let stats = gov.stats();
+        assert_eq!(stats.queries_admitted, 1);
+        assert_eq!(stats.queries_rejected, 1);
+
+        gov.record_timeout(g.grant_id);
+        let stats = gov.stats();
+        assert_eq!(stats.queries_timed_out, 1);
+        assert_eq!(gov.active_queries(), 0);
+    }
+
+    #[test]
+    fn test_resource_governor_config() {
+        let gov = ResourceGovernor::new(10, 2048, 3000);
+        assert_eq!(gov.max_concurrent_queries(), 10);
+        assert_eq!(gov.max_memory_per_query(), 2048);
+        assert_eq!(gov.query_timeout_ms(), 3000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming Result Collector tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_streaming_collector_append() {
+        let mut collector = StreamingResultCollector::new(MergeStrategy::Append);
+
+        let b1 = make_int_batch(vec![1, 2]);
+        let b2 = make_int_batch(vec![3, 4, 5]);
+
+        collector.add_result(0, vec![b1]);
+        collector.add_result(1, vec![b2]);
+
+        assert_eq!(collector.total_rows(), 5);
+        assert!(collector.total_bytes() > 0);
+        assert_eq!(collector.fragment_count(), 2);
+
+        let merged = collector.merge_results().unwrap();
+        let total: usize = merged.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn test_streaming_collector_sort() {
+        let mut collector =
+            StreamingResultCollector::new(MergeStrategy::Sort {
+                column: "id".to_string(),
+                descending: true,
+            });
+
+        collector.add_result(0, vec![make_int_batch(vec![3, 1])]);
+        collector.add_result(1, vec![make_int_batch(vec![4, 2])]);
+
+        let merged = collector.merge_results().unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].num_rows(), 4);
+
+        // Verify descending order.
+        let col = merged[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(col.value(0), 4);
+        assert_eq!(col.value(1), 3);
+        assert_eq!(col.value(2), 2);
+        assert_eq!(col.value(3), 1);
+    }
+
+    #[test]
+    fn test_streaming_collector_aggregate_compacts() {
+        let mut collector = StreamingResultCollector::new(MergeStrategy::Aggregate {
+            expression: "SUM(id)".to_string(),
+        });
+        collector.add_result(0, vec![make_int_batch(vec![10, 20])]);
+        collector.add_result(1, vec![make_int_batch(vec![30])]);
+
+        let merged = collector.merge_results().unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].num_rows(), 3);
     }
 }
