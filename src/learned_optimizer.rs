@@ -890,6 +890,907 @@ impl WorkloadSummary {
     }
 }
 
+/// Result of an A/B test between two query plans.
+#[derive(Debug, Clone)]
+pub struct ABTestResult {
+    pub plan_a_name: String,
+    pub plan_b_name: String,
+    pub plan_a_latency_ms: f64,
+    pub plan_b_latency_ms: f64,
+    pub winner: String,
+    pub speedup_pct: f64,
+    pub sample_size: usize,
+}
+
+/// A/B tester for comparing query plan strategies.
+pub struct PlanABTester {
+    results: RwLock<Vec<ABTestResult>>,
+    exploration_rate: f64,
+    counter: RwLock<u64>,
+}
+
+impl PlanABTester {
+    pub fn new(exploration_rate: f64) -> Self {
+        Self {
+            results: RwLock::new(Vec::new()),
+            exploration_rate,
+            counter: RwLock::new(0),
+        }
+    }
+
+    /// Returns true `exploration_rate` fraction of the time using a counter-based approach.
+    pub fn should_explore(&self) -> bool {
+        let mut counter = self.counter.write();
+        *counter += 1;
+        let threshold = (1.0 / self.exploration_rate).max(1.0) as u64;
+        *counter % threshold == 0
+    }
+
+    pub fn record_result(&self, result: ABTestResult) {
+        self.results.write().push(result);
+    }
+
+    /// Returns the plan with lower average latency across all results for the given pair.
+    pub fn best_strategy(&self, plan_a: &str, plan_b: &str) -> Option<String> {
+        let results = self.results.read();
+        let mut a_total = 0.0;
+        let mut b_total = 0.0;
+        let mut count = 0usize;
+        for r in results.iter() {
+            if (r.plan_a_name == plan_a && r.plan_b_name == plan_b)
+                || (r.plan_a_name == plan_b && r.plan_b_name == plan_a)
+            {
+                if r.plan_a_name == plan_a {
+                    a_total += r.plan_a_latency_ms;
+                    b_total += r.plan_b_latency_ms;
+                } else {
+                    a_total += r.plan_b_latency_ms;
+                    b_total += r.plan_a_latency_ms;
+                }
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        if a_total / count as f64 <= b_total / count as f64 {
+            Some(plan_a.to_string())
+        } else {
+            Some(plan_b.to_string())
+        }
+    }
+
+    pub fn total_tests(&self) -> usize {
+        self.results.read().len()
+    }
+}
+
+/// Detects when a learned model's predictions drift from observed reality.
+pub struct ModelDriftDetector {
+    recent_errors: RwLock<Vec<f64>>,
+    window_size: usize,
+    drift_threshold: f64,
+}
+
+impl ModelDriftDetector {
+    pub fn new(window_size: usize, drift_threshold: f64) -> Self {
+        Self {
+            recent_errors: RwLock::new(Vec::new()),
+            window_size,
+            drift_threshold,
+        }
+    }
+
+    /// Records the q-error: max(estimated/actual, actual/estimated).
+    pub fn record_prediction(&self, estimated: f64, actual: f64) {
+        let q_error = if estimated <= 0.0 || actual <= 0.0 {
+            1.0
+        } else {
+            (estimated / actual).max(actual / estimated)
+        };
+        let mut errors = self.recent_errors.write();
+        errors.push(q_error);
+        if errors.len() > self.window_size {
+            errors.remove(0);
+        }
+    }
+
+    /// Returns true if mean q-error in the window exceeds drift_threshold.
+    pub fn is_drifting(&self) -> bool {
+        self.mean_q_error() > self.drift_threshold
+    }
+
+    pub fn mean_q_error(&self) -> f64 {
+        let errors = self.recent_errors.read();
+        if errors.is_empty() {
+            return 1.0;
+        }
+        errors.iter().sum::<f64>() / errors.len() as f64
+    }
+
+    pub fn max_q_error(&self) -> f64 {
+        let errors = self.recent_errors.read();
+        errors.iter().cloned().fold(1.0_f64, f64::max)
+    }
+
+    /// True if drifting or if window is full.
+    pub fn should_retrain(&self) -> bool {
+        self.is_drifting() || self.recent_errors.read().len() >= self.window_size
+    }
+}
+
+/// Feedback loop that corrects cardinality estimates based on observed execution.
+pub struct CardinalityFeedbackLoop {
+    corrections: RwLock<HashMap<String, f64>>,
+    observation_count: RwLock<HashMap<String, u64>>,
+}
+
+impl CardinalityFeedbackLoop {
+    pub fn new() -> Self {
+        Self {
+            corrections: RwLock::new(HashMap::new()),
+            observation_count: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Updates the running correction factor using exponential moving average (alpha=0.1).
+    pub fn record_feedback(&self, table: &str, estimated: f64, actual: f64) {
+        let new_factor = if estimated <= 0.0 { 1.0 } else { actual / estimated };
+        let alpha = 0.1;
+        let mut corrections = self.corrections.write();
+        let mut counts = self.observation_count.write();
+        let current = corrections.entry(table.to_string()).or_insert(1.0);
+        *current = (1.0 - alpha) * *current + alpha * new_factor;
+        *counts.entry(table.to_string()).or_insert(0) += 1;
+    }
+
+    /// Returns correction factor (1.0 if no data).
+    pub fn get_correction(&self, table: &str) -> f64 {
+        *self.corrections.read().get(table).unwrap_or(&1.0)
+    }
+
+    /// Applies correction factor to a raw estimate.
+    pub fn corrected_estimate(&self, table: &str, raw_estimate: f64) -> f64 {
+        raw_estimate * self.get_correction(table)
+    }
+
+    pub fn tables_with_feedback(&self) -> Vec<String> {
+        self.corrections.read().keys().cloned().collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Re-optimization
+// ---------------------------------------------------------------------------
+
+/// Runtime re-optimizer that can trigger re-planning mid-execution
+/// when actual cardinalities deviate significantly from estimates.
+pub struct RuntimeReoptimizer {
+    threshold: f64,
+    check_interval_rows: usize,
+    reopt_count: u32,
+    max_reopts: u32,
+}
+
+impl RuntimeReoptimizer {
+    pub fn new(threshold: f64, check_interval_rows: usize) -> Self {
+        Self {
+            threshold,
+            check_interval_rows,
+            reopt_count: 0,
+            max_reopts: 3,
+        }
+    }
+
+    /// Check if re-optimization should be triggered based on actual vs estimated rows.
+    pub fn should_reoptimize(&self, estimated_rows: usize, actual_rows: usize) -> bool {
+        if self.reopt_count >= self.max_reopts || estimated_rows == 0 {
+            return false;
+        }
+        let ratio = actual_rows as f64 / estimated_rows as f64;
+        ratio > self.threshold || ratio < (1.0 / self.threshold)
+    }
+
+    /// Record that a re-optimization occurred.
+    pub fn record_reopt(&mut self) {
+        self.reopt_count += 1;
+    }
+
+    /// Get the check interval in rows.
+    pub fn check_interval(&self) -> usize {
+        self.check_interval_rows
+    }
+
+    /// How many re-optimizations have occurred.
+    pub fn reopt_count(&self) -> u32 {
+        self.reopt_count
+    }
+
+    /// Whether more re-optimizations are allowed.
+    pub fn can_reoptimize(&self) -> bool {
+        self.reopt_count < self.max_reopts
+    }
+}
+
+/// Adaptive parallelism controller that adjusts thread counts based on workload.
+pub struct AdaptiveParallelism {
+    min_threads: usize,
+    max_threads: usize,
+    current_threads: usize,
+    cpu_utilization_history: Vec<f64>,
+    max_history: usize,
+}
+
+impl AdaptiveParallelism {
+    pub fn new(min_threads: usize, max_threads: usize) -> Self {
+        Self {
+            min_threads,
+            max_threads,
+            current_threads: min_threads,
+            cpu_utilization_history: Vec::new(),
+            max_history: 20,
+        }
+    }
+
+    /// Record a CPU utilization sample (0.0 to 1.0).
+    pub fn record_utilization(&mut self, utilization: f64) {
+        if self.cpu_utilization_history.len() >= self.max_history {
+            self.cpu_utilization_history.remove(0);
+        }
+        self.cpu_utilization_history.push(utilization.clamp(0.0, 1.0));
+        self.adjust();
+    }
+
+    /// Get the current recommended thread count.
+    pub fn recommended_threads(&self) -> usize {
+        self.current_threads
+    }
+
+    fn adjust(&mut self) {
+        if self.cpu_utilization_history.is_empty() {
+            return;
+        }
+        let avg: f64 = self.cpu_utilization_history.iter().sum::<f64>()
+            / self.cpu_utilization_history.len() as f64;
+
+        if avg > 0.85 && self.current_threads > self.min_threads {
+            // High CPU - reduce parallelism to avoid contention
+            self.current_threads -= 1;
+        } else if avg < 0.5 && self.current_threads < self.max_threads {
+            // Low CPU - increase parallelism
+            self.current_threads += 1;
+        }
+    }
+
+    pub fn min_threads(&self) -> usize { self.min_threads }
+    pub fn max_threads(&self) -> usize { self.max_threads }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Workload Clustering + Pattern Detection + Auto-Indexing
+// ---------------------------------------------------------------------------
+
+/// Workload clusterer that groups similar queries for optimization.
+pub struct WorkloadClusterer {
+    clusters: Vec<QueryCluster>,
+    similarity_threshold: f64,
+}
+
+/// A cluster of similar queries.
+#[derive(Debug, Clone)]
+pub struct QueryCluster {
+    pub id: usize,
+    pub centroid: Vec<f64>,
+    pub query_count: usize,
+    pub total_execution_time_us: u64,
+    pub representative_sql: String,
+}
+
+impl WorkloadClusterer {
+    pub fn new(similarity_threshold: f64) -> Self {
+        Self {
+            clusters: Vec::new(),
+            similarity_threshold,
+        }
+    }
+
+    /// Add a query to the appropriate cluster or create a new one.
+    pub fn add_query(&mut self, features: &[f64], sql: &str, execution_time_us: u64) {
+        let best_cluster = self.find_nearest_cluster(features);
+
+        if let Some((idx, distance)) = best_cluster {
+            if distance < self.similarity_threshold {
+                let cluster = &mut self.clusters[idx];
+                cluster.query_count += 1;
+                cluster.total_execution_time_us += execution_time_us;
+                // Update centroid (running average)
+                for (i, &f) in features.iter().enumerate() {
+                    if i < cluster.centroid.len() {
+                        let n = cluster.query_count as f64;
+                        cluster.centroid[i] = cluster.centroid[i] * (n - 1.0) / n + f / n;
+                    }
+                }
+                return;
+            }
+        }
+
+        // Create new cluster
+        let id = self.clusters.len();
+        self.clusters.push(QueryCluster {
+            id,
+            centroid: features.to_vec(),
+            query_count: 1,
+            total_execution_time_us: execution_time_us,
+            representative_sql: sql.to_string(),
+        });
+    }
+
+    fn find_nearest_cluster(&self, features: &[f64]) -> Option<(usize, f64)> {
+        self.clusters
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let dist: f64 = c.centroid.iter().zip(features.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                (i, dist)
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    /// Get all clusters sorted by total execution time (hottest first).
+    pub fn hot_clusters(&self) -> Vec<&QueryCluster> {
+        let mut sorted: Vec<_> = self.clusters.iter().collect();
+        sorted.sort_by(|a, b| b.total_execution_time_us.cmp(&a.total_execution_time_us));
+        sorted
+    }
+
+    pub fn num_clusters(&self) -> usize { self.clusters.len() }
+}
+
+/// Pattern detector that identifies recurring query shapes.
+pub struct PatternDetector {
+    patterns: HashMap<String, PatternStats>,
+}
+
+/// Statistics for a detected query pattern.
+#[derive(Debug, Clone)]
+pub struct PatternStats {
+    pub pattern: String,
+    pub count: usize,
+    pub avg_execution_time_us: f64,
+    pub tables: Vec<String>,
+    pub has_join: bool,
+    pub has_aggregation: bool,
+}
+
+impl PatternDetector {
+    pub fn new() -> Self {
+        Self {
+            patterns: HashMap::new(),
+        }
+    }
+
+    /// Extract a normalized pattern from a SQL query.
+    pub fn extract_pattern(sql: &str) -> String {
+        let upper = sql.to_uppercase();
+        let mut pattern = String::new();
+        
+        if upper.contains("SELECT") { pattern.push_str("S"); }
+        if upper.contains("JOIN") { pattern.push_str("J"); }
+        if upper.contains("WHERE") { pattern.push_str("W"); }
+        if upper.contains("GROUP BY") { pattern.push_str("G"); }
+        if upper.contains("HAVING") { pattern.push_str("H"); }
+        if upper.contains("ORDER BY") { pattern.push_str("O"); }
+        if upper.contains("LIMIT") { pattern.push_str("L"); }
+        if upper.contains("UNION") || upper.contains("INTERSECT") || upper.contains("EXCEPT") {
+            pattern.push_str("U");
+        }
+        if upper.contains("WITH") { pattern.push_str("C"); } // CTE
+        
+        pattern
+    }
+
+    /// Record a query execution.
+    pub fn record(&mut self, sql: &str, execution_time_us: u64) {
+        let pattern = Self::extract_pattern(sql);
+        let upper = sql.to_uppercase();
+        
+        let entry = self.patterns.entry(pattern.clone()).or_insert(PatternStats {
+            pattern: pattern.clone(),
+            count: 0,
+            avg_execution_time_us: 0.0,
+            tables: Vec::new(),
+            has_join: upper.contains("JOIN"),
+            has_aggregation: upper.contains("GROUP BY") || upper.contains("SUM") || upper.contains("COUNT") || upper.contains("AVG"),
+        });
+        
+        let n = entry.count as f64;
+        entry.avg_execution_time_us = (entry.avg_execution_time_us * n + execution_time_us as f64) / (n + 1.0);
+        entry.count += 1;
+    }
+
+    /// Get the most common patterns.
+    pub fn top_patterns(&self, n: usize) -> Vec<&PatternStats> {
+        let mut patterns: Vec<_> = self.patterns.values().collect();
+        patterns.sort_by(|a, b| b.count.cmp(&a.count));
+        patterns.truncate(n);
+        patterns
+    }
+
+    pub fn num_patterns(&self) -> usize { self.patterns.len() }
+}
+
+/// Auto-indexer that recommends and tracks index creation.
+pub struct AutoIndexer {
+    recommendations: Vec<IndexRecommendation>,
+    applied: Vec<String>,
+    min_query_count: usize,
+}
+
+impl AutoIndexer {
+    pub fn new(min_query_count: usize) -> Self {
+        Self {
+            recommendations: Vec::new(),
+            applied: Vec::new(),
+            min_query_count,
+        }
+    }
+
+    /// Analyze a workload and generate index recommendations.
+    pub fn analyze_workload(&mut self, patterns: &[&PatternStats], column_access: &HashMap<String, usize>) {
+        self.recommendations.clear();
+        
+        for (column, &access_count) in column_access {
+            if access_count >= self.min_query_count {
+                let parts: Vec<&str> = column.splitn(2, '.').collect();
+                if parts.len() == 2 {
+                    self.recommendations.push(IndexRecommendation {
+                        table_name: parts[0].to_string(),
+                        columns: vec![parts[1].to_string()],
+                        index_type: if patterns.iter().any(|p| p.has_join) {
+                            IndexType::Hash
+                        } else {
+                            IndexType::BTree
+                        },
+                        estimated_benefit: (access_count as f64 / self.min_query_count as f64).min(10.0),
+                        reason: format!("Column accessed {} times", access_count),
+                    });
+                }
+            }
+        }
+
+        self.recommendations.sort_by(|a, b| {
+            b.estimated_benefit.partial_cmp(&a.estimated_benefit).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    /// Mark a recommendation as applied.
+    pub fn mark_applied(&mut self, table: &str, columns: &[String]) {
+        let key = format!("{}:{}", table, columns.join(","));
+        self.applied.push(key);
+    }
+
+    pub fn recommendations(&self) -> &[IndexRecommendation] { &self.recommendations }
+    pub fn applied_count(&self) -> usize { self.applied.len() }
+}
+
+// ---------------------------------------------------------------------------
+// Gradient-Based Cardinality Model
+// ---------------------------------------------------------------------------
+
+/// Metrics from the gradient cardinality model.
+#[derive(Debug, Clone)]
+pub struct ModelMetrics {
+    /// Total predictions made
+    pub predictions: u64,
+    /// Mean absolute percentage error
+    pub mean_error: f64,
+    /// Maximum absolute percentage error observed
+    pub max_error: f64,
+    /// Number of training samples processed
+    pub training_samples: u64,
+}
+
+/// Lightweight linear regression model for cardinality estimation trained via
+/// online gradient descent.
+pub struct GradientCardinalityModel {
+    weights: RwLock<Vec<f64>>,
+    bias: RwLock<f64>,
+    learning_rate: f64,
+    error_sum: RwLock<f64>,
+    max_error: RwLock<f64>,
+    training_samples: RwLock<u64>,
+    predictions: RwLock<u64>,
+}
+
+impl GradientCardinalityModel {
+    /// Create a new model with the given learning rate and feature count.
+    pub fn new(learning_rate: f64, features: usize) -> Self {
+        Self {
+            weights: RwLock::new(vec![0.0; features]),
+            bias: RwLock::new(0.0),
+            learning_rate,
+            error_sum: RwLock::new(0.0),
+            max_error: RwLock::new(0.0),
+            training_samples: RwLock::new(0),
+            predictions: RwLock::new(0),
+        }
+    }
+
+    /// Predict cardinality from a feature vector.
+    pub fn predict(&self, features: &[f64]) -> f64 {
+        let weights = self.weights.read();
+        let bias = *self.bias.read();
+        let raw: f64 = weights.iter().zip(features.iter()).map(|(w, f)| w * f).sum::<f64>() + bias;
+        *self.predictions.write() += 1;
+        raw.max(0.0)
+    }
+
+    /// Train the model on a single sample using gradient descent.
+    pub fn train(&self, features: &[f64], actual: f64) {
+        let predicted = {
+            let weights = self.weights.read();
+            let bias = *self.bias.read();
+            weights.iter().zip(features.iter()).map(|(w, f)| w * f).sum::<f64>() + bias
+        };
+        let error = predicted - actual;
+
+        // Update weights
+        {
+            let mut weights = self.weights.write();
+            for (w, f) in weights.iter_mut().zip(features.iter()) {
+                *w -= self.learning_rate * error * f;
+            }
+        }
+        {
+            let mut bias = self.bias.write();
+            *bias -= self.learning_rate * error;
+        }
+
+        // Track error metrics
+        let abs_pct_error = if actual.abs() > 1e-9 {
+            (error.abs() / actual.abs()) * 100.0
+        } else {
+            error.abs() * 100.0
+        };
+        {
+            let mut sum = self.error_sum.write();
+            *sum += abs_pct_error;
+        }
+        {
+            let mut max = self.max_error.write();
+            if abs_pct_error > *max {
+                *max = abs_pct_error;
+            }
+        }
+        *self.training_samples.write() += 1;
+    }
+
+    /// Mean absolute percentage error across all training samples.
+    pub fn accuracy(&self) -> f64 {
+        let samples = *self.training_samples.read();
+        if samples == 0 {
+            return 0.0;
+        }
+        *self.error_sum.read() / samples as f64
+    }
+
+    /// Retrieve current model metrics.
+    pub fn metrics(&self) -> ModelMetrics {
+        ModelMetrics {
+            predictions: *self.predictions.read(),
+            mean_error: self.accuracy(),
+            max_error: *self.max_error.read(),
+            training_samples: *self.training_samples.read(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plan Cost Predictor
+// ---------------------------------------------------------------------------
+
+/// Execution record for a plan.
+#[derive(Debug, Clone)]
+struct PlanRecord {
+    cost_ema: f64,
+    duration_ema_ms: f64,
+    count: u64,
+}
+
+/// History-based plan cost predictor using exponential moving average.
+pub struct PlanCostPredictor {
+    records: RwLock<HashMap<u64, PlanRecord>>,
+    alpha: f64,
+}
+
+impl PlanCostPredictor {
+    /// Create a new predictor with default EMA smoothing factor.
+    pub fn new() -> Self {
+        Self {
+            records: RwLock::new(HashMap::new()),
+            alpha: 0.3,
+        }
+    }
+
+    /// Record an execution of a plan.
+    pub fn record_execution(&self, plan_hash: u64, cost: f64, duration_ms: u64) {
+        let mut records = self.records.write();
+        let entry = records.entry(plan_hash).or_insert(PlanRecord {
+            cost_ema: cost,
+            duration_ema_ms: duration_ms as f64,
+            count: 0,
+        });
+        if entry.count > 0 {
+            entry.cost_ema = self.alpha * cost + (1.0 - self.alpha) * entry.cost_ema;
+            entry.duration_ema_ms =
+                self.alpha * duration_ms as f64 + (1.0 - self.alpha) * entry.duration_ema_ms;
+        }
+        entry.count += 1;
+    }
+
+    /// Predict cost for a plan based on historical EMA.
+    pub fn predict_cost(&self, plan_hash: u64) -> Option<f64> {
+        self.records.read().get(&plan_hash).map(|r| r.cost_ema)
+    }
+
+    /// Find plans with cost within `threshold` ratio of the given plan's cost.
+    pub fn similar_plans(&self, plan_hash: u64, threshold: f64) -> Vec<(u64, f64)> {
+        let records = self.records.read();
+        let base_cost = match records.get(&plan_hash) {
+            Some(r) => r.cost_ema,
+            None => return vec![],
+        };
+        records
+            .iter()
+            .filter(|(&h, r)| {
+                h != plan_hash && {
+                    let ratio = if base_cost > r.cost_ema {
+                        r.cost_ema / base_cost
+                    } else if r.cost_ema > 0.0 {
+                        base_cost / r.cost_ema
+                    } else {
+                        0.0
+                    };
+                    ratio >= threshold
+                }
+            })
+            .map(|(&h, r)| (h, r.cost_ema))
+            .collect()
+    }
+}
+
+impl Default for PlanCostPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Automatic Index Recommender (filter-frequency based)
+// ---------------------------------------------------------------------------
+
+/// A recommendation produced by `IndexRecommender`.
+#[derive(Debug, Clone)]
+pub struct SmartIndexRecommendation {
+    /// Table name
+    pub table: String,
+    /// Columns to index
+    pub columns: Vec<String>,
+    /// Estimated speedup factor
+    pub estimated_speedup: f64,
+    /// Number of queries that would benefit
+    pub query_count: u64,
+}
+
+/// Recommends indexes based on filter column frequency across recorded queries.
+pub struct IndexRecommender {
+    /// column → frequency in filter predicates
+    filter_freq: RwLock<HashMap<String, u64>>,
+    /// column → frequency in any access
+    access_freq: RwLock<HashMap<String, u64>>,
+    total_queries: RwLock<u64>,
+}
+
+impl IndexRecommender {
+    pub fn new() -> Self {
+        Self {
+            filter_freq: RwLock::new(HashMap::new()),
+            access_freq: RwLock::new(HashMap::new()),
+            total_queries: RwLock::new(0),
+        }
+    }
+
+    /// Record a query's column access patterns.
+    pub fn record_query(&self, columns_accessed: &[String], filter_columns: &[String]) {
+        *self.total_queries.write() += 1;
+        {
+            let mut access = self.access_freq.write();
+            for col in columns_accessed {
+                *access.entry(col.clone()).or_insert(0) += 1;
+            }
+        }
+        {
+            let mut filters = self.filter_freq.write();
+            for col in filter_columns {
+                *filters.entry(col.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// Produce index recommendations sorted by estimated benefit.
+    pub fn recommend(&self) -> Vec<SmartIndexRecommendation> {
+        let filters = self.filter_freq.read();
+        let total = *self.total_queries.read();
+        if total == 0 {
+            return vec![];
+        }
+        let mut recs: Vec<SmartIndexRecommendation> = filters
+            .iter()
+            .filter(|(_, &count)| count >= 2)
+            .map(|(col, &count)| {
+                let frequency_ratio = count as f64 / total as f64;
+                SmartIndexRecommendation {
+                    table: col.split('.').next().unwrap_or(col).to_string(),
+                    columns: vec![col.clone()],
+                    estimated_speedup: 1.0 + frequency_ratio * 9.0, // 1x–10x
+                    query_count: count,
+                }
+            })
+            .collect();
+        recs.sort_by(|a, b| b.estimated_speedup.partial_cmp(&a.estimated_speedup).unwrap());
+        recs
+    }
+}
+
+impl Default for IndexRecommender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query Plan A/B Tester
+// ---------------------------------------------------------------------------
+
+/// Identifies which plan variant is being tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanVariant {
+    PlanA,
+    PlanB,
+}
+
+/// Statistics for a completed or in-progress experiment.
+#[derive(Debug, Clone)]
+pub struct ExperimentStats {
+    pub plan_a_runs: u64,
+    pub plan_b_runs: u64,
+    pub plan_a_avg_ms: f64,
+    pub plan_b_avg_ms: f64,
+    /// Approximate p-value from Welch's t-test.
+    pub p_value: f64,
+}
+
+/// An A/B test between two query plans.
+pub struct PlanExperiment {
+    name: String,
+    plan_a_hash: u64,
+    plan_b_hash: u64,
+    plan_a_times: RwLock<Vec<f64>>,
+    plan_b_times: RwLock<Vec<f64>>,
+}
+
+impl PlanExperiment {
+    pub fn new(name: impl Into<String>, plan_a_hash: u64, plan_b_hash: u64) -> Self {
+        Self {
+            name: name.into(),
+            plan_a_hash,
+            plan_b_hash,
+            plan_a_times: RwLock::new(Vec::new()),
+            plan_b_times: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Record a duration for a plan variant.
+    pub fn record_result(&self, plan: PlanVariant, duration_ms: u64) {
+        match plan {
+            PlanVariant::PlanA => self.plan_a_times.write().push(duration_ms as f64),
+            PlanVariant::PlanB => self.plan_b_times.write().push(duration_ms as f64),
+        }
+    }
+
+    /// Return the statistically better plan, if significance threshold is met.
+    pub fn winner(&self) -> Option<PlanVariant> {
+        let stats = self.stats();
+        if stats.plan_a_runs < 3 || stats.plan_b_runs < 3 {
+            return None;
+        }
+        if stats.p_value > 0.05 {
+            return None;
+        }
+        if stats.plan_a_avg_ms < stats.plan_b_avg_ms {
+            Some(PlanVariant::PlanA)
+        } else {
+            Some(PlanVariant::PlanB)
+        }
+    }
+
+    /// Compute experiment statistics.
+    pub fn stats(&self) -> ExperimentStats {
+        let a = self.plan_a_times.read();
+        let b = self.plan_b_times.read();
+
+        let mean_a = Self::mean(&a);
+        let mean_b = Self::mean(&b);
+        let p_value = Self::welch_t_test(&a, &b);
+
+        ExperimentStats {
+            plan_a_runs: a.len() as u64,
+            plan_b_runs: b.len() as u64,
+            plan_a_avg_ms: mean_a,
+            plan_b_avg_ms: mean_b,
+            p_value,
+        }
+    }
+
+    /// Name of this experiment.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Plan A hash.
+    pub fn plan_a_hash(&self) -> u64 {
+        self.plan_a_hash
+    }
+
+    /// Plan B hash.
+    pub fn plan_b_hash(&self) -> u64 {
+        self.plan_b_hash
+    }
+
+    // --- helpers ---
+
+    fn mean(values: &[f64]) -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+
+    fn variance(values: &[f64]) -> f64 {
+        if values.len() < 2 {
+            return 0.0;
+        }
+        let m = Self::mean(values);
+        values.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64
+    }
+
+    /// Welch's t-test approximation returning an approximate p-value.
+    fn welch_t_test(a: &[f64], b: &[f64]) -> f64 {
+        if a.len() < 2 || b.len() < 2 {
+            return 1.0;
+        }
+        let var_a = Self::variance(a);
+        let var_b = Self::variance(b);
+        let n_a = a.len() as f64;
+        let n_b = b.len() as f64;
+        let se = (var_a / n_a + var_b / n_b).sqrt();
+        if se < 1e-12 {
+            // Zero variance: if means differ, it's perfectly significant
+            let mean_diff = (Self::mean(a) - Self::mean(b)).abs();
+            return if mean_diff > 1e-9 { 0.0 } else { 1.0 };
+        }
+        let t = (Self::mean(a) - Self::mean(b)).abs() / se;
+        let _df = n_a + n_b - 2.0;
+        // Approximate p-value using a simple sigmoid mapping of the t-statistic
+        // This is a lightweight approximation suitable for an embedded engine.
+        let p = (-0.7 * t + 1.5_f64).exp() / (1.0 + (-0.7 * t + 1.5_f64).exp());
+        p.clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,5 +2157,421 @@ mod tests {
         assert!(mats[0].query_frequency >= 5);
         assert!(mats[0].estimated_speedup > 1.0);
         assert!(mats[0].source_tables.contains(&"orders".to_string()));
+    }
+
+    #[test]
+    fn test_ab_tester_record_and_best_strategy() {
+        let tester = PlanABTester::new(0.1);
+        assert_eq!(tester.total_tests(), 0);
+        assert!(tester.best_strategy("hash", "merge").is_none());
+
+        tester.record_result(ABTestResult {
+            plan_a_name: "hash".into(),
+            plan_b_name: "merge".into(),
+            plan_a_latency_ms: 10.0,
+            plan_b_latency_ms: 20.0,
+            winner: "hash".into(),
+            speedup_pct: 50.0,
+            sample_size: 1,
+        });
+        tester.record_result(ABTestResult {
+            plan_a_name: "hash".into(),
+            plan_b_name: "merge".into(),
+            plan_a_latency_ms: 12.0,
+            plan_b_latency_ms: 18.0,
+            winner: "hash".into(),
+            speedup_pct: 33.3,
+            sample_size: 1,
+        });
+        assert_eq!(tester.total_tests(), 2);
+        let best = tester.best_strategy("hash", "merge").unwrap();
+        assert_eq!(best, "hash");
+
+        // Query in reverse order should still work
+        let best_rev = tester.best_strategy("merge", "hash").unwrap();
+        assert_eq!(best_rev, "hash");
+    }
+
+    #[test]
+    fn test_ab_tester_exploration() {
+        let tester = PlanABTester::new(0.5);
+        let mut explore_count = 0;
+        for _ in 0..10 {
+            if tester.should_explore() {
+                explore_count += 1;
+            }
+        }
+        // With rate 0.5, threshold = 2, so every 2nd call should explore => 5 out of 10
+        assert_eq!(explore_count, 5);
+    }
+
+    #[test]
+    fn test_model_drift_detection() {
+        let detector = ModelDriftDetector::new(5, 2.0);
+        assert!(!detector.is_drifting());
+        assert_eq!(detector.mean_q_error(), 1.0);
+
+        // Good predictions (q-error near 1.0)
+        detector.record_prediction(100.0, 100.0);
+        detector.record_prediction(200.0, 200.0);
+        assert!(!detector.is_drifting());
+        assert!((detector.mean_q_error() - 1.0).abs() < 0.01);
+
+        // Bad predictions that cause drift
+        detector.record_prediction(100.0, 1000.0); // q-error = 10
+        detector.record_prediction(100.0, 500.0); // q-error = 5
+        detector.record_prediction(100.0, 300.0); // q-error = 3
+        assert!(detector.is_drifting());
+        assert!(detector.max_q_error() >= 10.0);
+    }
+
+    #[test]
+    fn test_model_drift_threshold() {
+        let detector = ModelDriftDetector::new(3, 5.0);
+        detector.record_prediction(100.0, 200.0); // q-error = 2
+        detector.record_prediction(100.0, 300.0); // q-error = 3
+        detector.record_prediction(100.0, 400.0); // q-error = 4
+        // Mean = 3.0, threshold = 5.0 => not drifting
+        assert!(!detector.is_drifting());
+        // But window is full => should retrain
+        assert!(detector.should_retrain());
+    }
+
+    #[test]
+    fn test_cardinality_feedback_loop() {
+        let fb = CardinalityFeedbackLoop::new();
+        assert_eq!(fb.get_correction("users"), 1.0);
+        assert_eq!(fb.corrected_estimate("users", 100.0), 100.0);
+
+        // Actual is 2x estimated repeatedly
+        for _ in 0..20 {
+            fb.record_feedback("users", 100.0, 200.0);
+        }
+        let correction = fb.get_correction("users");
+        // EMA with alpha=0.1 converges toward 2.0
+        assert!(correction > 1.5, "correction was {}", correction);
+        assert!(correction <= 2.0, "correction was {}", correction);
+
+        let corrected = fb.corrected_estimate("users", 100.0);
+        assert!(corrected > 150.0);
+
+        let tables = fb.tables_with_feedback();
+        assert!(tables.contains(&"users".to_string()));
+    }
+
+    #[test]
+    fn test_cardinality_correction_factor() {
+        let fb = CardinalityFeedbackLoop::new();
+        // Single observation: factor = 0.9 * 1.0 + 0.1 * (500/100) = 0.9 + 0.5 = 1.4
+        fb.record_feedback("orders", 100.0, 500.0);
+        let correction = fb.get_correction("orders");
+        assert!((correction - 1.4).abs() < 0.01, "correction was {}", correction);
+
+        // Second observation: factor = 0.9 * 1.4 + 0.1 * (500/100) = 1.26 + 0.5 = 1.76
+        fb.record_feedback("orders", 100.0, 500.0);
+        let correction = fb.get_correction("orders");
+        assert!((correction - 1.76).abs() < 0.01, "correction was {}", correction);
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime Re-optimizer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_runtime_reoptimizer_trigger() {
+        let mut reopt = RuntimeReoptimizer::new(3.0, 10000);
+        // 10x overestimate should trigger
+        assert!(reopt.should_reoptimize(100, 1000));
+        // 2x is within threshold
+        assert!(!reopt.should_reoptimize(100, 200));
+        // Record reopt
+        reopt.record_reopt();
+        assert_eq!(reopt.reopt_count(), 1);
+    }
+
+    #[test]
+    fn test_runtime_reoptimizer_max_reopts() {
+        let mut reopt = RuntimeReoptimizer::new(2.0, 10000);
+        reopt.record_reopt();
+        reopt.record_reopt();
+        reopt.record_reopt();
+        assert!(!reopt.can_reoptimize());
+        assert!(!reopt.should_reoptimize(100, 10000));
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive Parallelism tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_adaptive_parallelism_scale_up() {
+        let mut ap = AdaptiveParallelism::new(2, 8);
+        assert_eq!(ap.recommended_threads(), 2);
+        // Low utilization should scale up
+        for _ in 0..5 {
+            ap.record_utilization(0.3);
+        }
+        assert!(ap.recommended_threads() > 2);
+    }
+
+    #[test]
+    fn test_adaptive_parallelism_scale_down() {
+        let mut ap = AdaptiveParallelism::new(2, 8);
+        // Start at 2, so scale up first
+        for _ in 0..5 {
+            ap.record_utilization(0.3);
+        }
+        let threads_after_up = ap.recommended_threads();
+        // High utilization should scale down (need enough samples to flush history)
+        for _ in 0..20 {
+            ap.record_utilization(0.95);
+        }
+        assert!(ap.recommended_threads() < threads_after_up);
+    }
+
+    // -----------------------------------------------------------------------
+    // Workload Clustering tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_workload_clusterer() {
+        let mut clusterer = WorkloadClusterer::new(5.0);
+        clusterer.add_query(&[1.0, 2.0, 3.0], "SELECT * FROM users", 100);
+        clusterer.add_query(&[1.1, 2.1, 3.1], "SELECT * FROM users WHERE id = 1", 150);
+        clusterer.add_query(&[10.0, 20.0, 30.0], "SELECT * FROM orders JOIN products", 500);
+        
+        assert_eq!(clusterer.num_clusters(), 2); // Two distinct clusters
+    }
+
+    #[test]
+    fn test_workload_clusterer_hot_clusters() {
+        let mut clusterer = WorkloadClusterer::new(5.0);
+        clusterer.add_query(&[1.0, 0.0], "fast query", 10);
+        clusterer.add_query(&[100.0, 100.0], "slow query", 10000);
+        
+        let hot = clusterer.hot_clusters();
+        assert_eq!(hot[0].total_execution_time_us, 10000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pattern Detector tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pattern_detector() {
+        let mut detector = PatternDetector::new();
+        detector.record("SELECT * FROM users WHERE id = 1", 100);
+        detector.record("SELECT * FROM orders WHERE status = 'active'", 200);
+        detector.record("SELECT * FROM users WHERE name = 'Alice'", 150);
+        
+        assert_eq!(detector.num_patterns(), 1); // Same pattern: SW
+        let top = detector.top_patterns(1);
+        assert_eq!(top[0].count, 3);
+    }
+
+    #[test]
+    fn test_pattern_detector_different_patterns() {
+        let mut detector = PatternDetector::new();
+        detector.record("SELECT * FROM users", 100);
+        detector.record("SELECT * FROM users WHERE id = 1 ORDER BY name", 200);
+        detector.record("SELECT * FROM users JOIN orders ON u.id = o.user_id GROUP BY u.name", 300);
+        
+        assert!(detector.num_patterns() >= 2); // Different shapes
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-Indexer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_auto_indexer() {
+        let mut indexer = AutoIndexer::new(3);
+        let patterns = vec![];
+        let mut access = HashMap::new();
+        access.insert("users.id".to_string(), 10);
+        access.insert("users.name".to_string(), 5);
+        access.insert("orders.date".to_string(), 1); // Below threshold
+        
+        indexer.analyze_workload(&patterns, &access);
+        assert_eq!(indexer.recommendations().len(), 2); // users.id and users.name
+        assert!(indexer.recommendations()[0].estimated_benefit >= indexer.recommendations()[1].estimated_benefit);
+    }
+
+    #[test]
+    fn test_auto_indexer_mark_applied() {
+        let mut indexer = AutoIndexer::new(1);
+        indexer.mark_applied("users", &["id".to_string()]);
+        assert_eq!(indexer.applied_count(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // GradientCardinalityModel tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gradient_model_predict_untrained() {
+        let model = GradientCardinalityModel::new(0.01, 3);
+        let pred = model.predict(&[1.0, 2.0, 3.0]);
+        assert_eq!(pred, 0.0); // all weights zero → prediction 0
+    }
+
+    #[test]
+    fn test_gradient_model_train_and_converge() {
+        let model = GradientCardinalityModel::new(0.01, 2);
+        // Train on a simple pattern: actual = 3*x0 + 2*x1
+        for _ in 0..500 {
+            model.train(&[1.0, 1.0], 5.0);
+            model.train(&[2.0, 0.0], 6.0);
+            model.train(&[0.0, 3.0], 6.0);
+        }
+        let pred = model.predict(&[1.0, 1.0]);
+        assert!((pred - 5.0).abs() < 0.5, "expected ~5.0, got {pred}");
+    }
+
+    #[test]
+    fn test_gradient_model_metrics() {
+        let model = GradientCardinalityModel::new(0.01, 2);
+        model.train(&[1.0, 1.0], 10.0);
+        model.train(&[2.0, 2.0], 20.0);
+        let m = model.metrics();
+        assert_eq!(m.training_samples, 2);
+        assert!(m.mean_error >= 0.0);
+        assert!(m.max_error >= m.mean_error);
+    }
+
+    #[test]
+    fn test_gradient_model_accuracy_zero_when_no_training() {
+        let model = GradientCardinalityModel::new(0.01, 2);
+        assert_eq!(model.accuracy(), 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // PlanCostPredictor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_plan_cost_predictor_record_and_predict() {
+        let predictor = PlanCostPredictor::new();
+        assert!(predictor.predict_cost(42).is_none());
+        predictor.record_execution(42, 100.0, 50);
+        let cost = predictor.predict_cost(42).unwrap();
+        assert!((cost - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_plan_cost_predictor_ema_update() {
+        let predictor = PlanCostPredictor::new();
+        predictor.record_execution(1, 100.0, 50);
+        predictor.record_execution(1, 200.0, 80);
+        let cost = predictor.predict_cost(1).unwrap();
+        // EMA: 0.3*200 + 0.7*100 = 130
+        assert!((cost - 130.0).abs() < 1e-9, "expected 130.0, got {cost}");
+    }
+
+    #[test]
+    fn test_plan_cost_predictor_similar_plans() {
+        let predictor = PlanCostPredictor::new();
+        predictor.record_execution(1, 100.0, 50);
+        predictor.record_execution(2, 95.0, 48);
+        predictor.record_execution(3, 10.0, 5);
+        let similar = predictor.similar_plans(1, 0.9);
+        assert!(similar.iter().any(|(h, _)| *h == 2));
+        assert!(!similar.iter().any(|(h, _)| *h == 3));
+    }
+
+    // -----------------------------------------------------------------------
+    // IndexRecommender tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_index_recommender_no_queries() {
+        let rec = IndexRecommender::new();
+        assert!(rec.recommend().is_empty());
+    }
+
+    #[test]
+    fn test_index_recommender_basic() {
+        let rec = IndexRecommender::new();
+        rec.record_query(
+            &["users.id".into(), "users.name".into()],
+            &["users.id".into()],
+        );
+        rec.record_query(
+            &["users.id".into(), "orders.total".into()],
+            &["users.id".into(), "orders.total".into()],
+        );
+        rec.record_query(
+            &["orders.total".into()],
+            &["orders.total".into()],
+        );
+        let recs = rec.recommend();
+        // users.id appears in filters 2 times, orders.total 2 times
+        assert_eq!(recs.len(), 2);
+        assert!(recs[0].query_count >= 2);
+    }
+
+    #[test]
+    fn test_index_recommender_filters_below_threshold() {
+        let rec = IndexRecommender::new();
+        rec.record_query(&["a".into()], &["a".into()]);
+        // Only 1 occurrence of "a" in filters → below threshold of 2
+        assert!(rec.recommend().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // PlanExperiment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_plan_experiment_no_winner_insufficient_data() {
+        let exp = PlanExperiment::new("test", 1, 2);
+        exp.record_result(PlanVariant::PlanA, 100);
+        exp.record_result(PlanVariant::PlanB, 200);
+        assert!(exp.winner().is_none()); // <3 runs each
+    }
+
+    #[test]
+    fn test_plan_experiment_stats() {
+        let exp = PlanExperiment::new("test", 1, 2);
+        for _ in 0..5 {
+            exp.record_result(PlanVariant::PlanA, 10);
+            exp.record_result(PlanVariant::PlanB, 100);
+        }
+        let stats = exp.stats();
+        assert_eq!(stats.plan_a_runs, 5);
+        assert_eq!(stats.plan_b_runs, 5);
+        assert!((stats.plan_a_avg_ms - 10.0).abs() < 1e-9);
+        assert!((stats.plan_b_avg_ms - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_plan_experiment_clear_winner() {
+        let exp = PlanExperiment::new("perf_test", 10, 20);
+        // PlanA consistently faster
+        for _ in 0..20 {
+            exp.record_result(PlanVariant::PlanA, 10);
+            exp.record_result(PlanVariant::PlanB, 500);
+        }
+        let winner = exp.winner();
+        assert_eq!(winner, Some(PlanVariant::PlanA));
+    }
+
+    #[test]
+    fn test_plan_experiment_no_winner_similar_plans() {
+        let exp = PlanExperiment::new("similar", 1, 2);
+        for _ in 0..10 {
+            exp.record_result(PlanVariant::PlanA, 100);
+            exp.record_result(PlanVariant::PlanB, 100);
+        }
+        // Identical results → p-value should be high → no winner
+        assert!(exp.winner().is_none());
+    }
+
+    #[test]
+    fn test_plan_experiment_accessors() {
+        let exp = PlanExperiment::new("my_exp", 42, 84);
+        assert_eq!(exp.name(), "my_exp");
+        assert_eq!(exp.plan_a_hash(), 42);
+        assert_eq!(exp.plan_b_hash(), 84);
     }
 }

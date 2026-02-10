@@ -1337,6 +1337,25 @@ impl IncrementalPipeline {
     pub fn engine(&self) -> &IncrementalRefreshEngine {
         &self.engine
     }
+
+    /// Apply incremental delta transform to pending changes for a view.
+    ///
+    /// Takes the pending changes from the tracker, applies the view's
+    /// delta transform, and returns the transformed delta batches.
+    /// Returns None if full recompute is needed.
+    pub fn apply_incremental(
+        &self,
+        view_name: &str,
+        delta_batches: &[RecordBatch],
+        catalog_list: Option<&CatalogList>,
+    ) -> Result<Option<Vec<RecordBatch>>> {
+        let transforms = self.transforms.read();
+        let transform = transforms.get(view_name).ok_or_else(|| {
+            BlazeError::execution(format!("No transform registered for view '{}'", view_name))
+        })?;
+
+        IncrementalExecutor::apply_transform(transform, delta_batches, catalog_list)
+    }
 }
 
 impl Default for IncrementalPipeline {
@@ -1354,6 +1373,761 @@ pub enum RefreshDecision {
     Incremental,
     /// No refresh needed.
     NoOp,
+}
+
+// ---------------------------------------------------------------------------
+// Version vectors for multi-table change coordination
+// ---------------------------------------------------------------------------
+
+/// A version vector tracking per-table versions for consistent snapshots.
+#[derive(Debug, Clone, Default)]
+pub struct VersionVector {
+    versions: HashMap<String, u64>,
+}
+
+impl VersionVector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a new version for a table.
+    pub fn advance(&mut self, table: &str, version: u64) {
+        let entry = self.versions.entry(table.to_string()).or_insert(0);
+        if version > *entry {
+            *entry = version;
+        }
+    }
+
+    /// Get the version for a table.
+    pub fn version_of(&self, table: &str) -> u64 {
+        self.versions.get(table).copied().unwrap_or(0)
+    }
+
+    /// Check if this vector dominates another (all versions >=).
+    pub fn dominates(&self, other: &VersionVector) -> bool {
+        for (table, &ver) in &other.versions {
+            if self.version_of(table) < ver {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Merge with another vector, taking the max of each component.
+    pub fn merge(&mut self, other: &VersionVector) {
+        for (table, &ver) in &other.versions {
+            self.advance(table, ver);
+        }
+    }
+
+    /// Tables tracked by this vector.
+    pub fn tables(&self) -> Vec<String> {
+        self.versions.keys().cloned().collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental executor — applies delta transforms to batches
+// ---------------------------------------------------------------------------
+
+/// Executes incremental delta transforms on RecordBatch data.
+///
+/// Given a `DeltaTransform` and incoming delta batches, this executor
+/// applies the appropriate filter/project operations to produce
+/// the delta output for a materialized view.
+pub struct IncrementalExecutor;
+
+impl IncrementalExecutor {
+    /// Apply a delta transform to incoming batches.
+    ///
+    /// - `Identity`: pass through unchanged
+    /// - `Filter`: evaluate predicate and keep matching rows
+    /// - `Project`: select specified columns
+    /// - `FilterProject`: filter then project
+    /// - `JoinDelta`: returns None (requires full recompute currently)
+    /// - `FullRecompute`: returns None (caller must do full refresh)
+    pub fn apply_transform(
+        transform: &DeltaTransform,
+        delta: &[RecordBatch],
+        _catalog_list: Option<&CatalogList>,
+    ) -> Result<Option<Vec<RecordBatch>>> {
+        match transform {
+            DeltaTransform::Identity => Ok(Some(delta.to_vec())),
+
+            DeltaTransform::Filter { predicate } => {
+                let mut result = Vec::new();
+                for batch in delta {
+                    if let Some(filtered) = Self::apply_filter(batch, predicate)? {
+                        if filtered.num_rows() > 0 {
+                            result.push(filtered);
+                        }
+                    }
+                }
+                Ok(Some(result))
+            }
+
+            DeltaTransform::Project { columns } => {
+                let mut result = Vec::new();
+                for batch in delta {
+                    result.push(Self::apply_projection(batch, columns)?);
+                }
+                Ok(Some(result))
+            }
+
+            DeltaTransform::FilterProject { predicate, columns } => {
+                let mut result = Vec::new();
+                for batch in delta {
+                    if let Some(filtered) = Self::apply_filter(batch, predicate)? {
+                        if filtered.num_rows() > 0 {
+                            result.push(Self::apply_projection(&filtered, columns)?);
+                        }
+                    }
+                }
+                Ok(Some(result))
+            }
+
+            // Join deltas require full query execution — fall back to full recompute
+            DeltaTransform::JoinDelta { .. } | DeltaTransform::FullRecompute => Ok(None),
+        }
+    }
+
+    /// Apply a simple comparison filter to a batch.
+    /// Supports: col > val, col < val, col = val, col >= val, col <= val
+    fn apply_filter(batch: &RecordBatch, predicate: &str) -> Result<Option<RecordBatch>> {
+        use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
+        use arrow::compute::filter_record_batch;
+
+        let parts: Vec<&str> = predicate.splitn(3, |c: char| c.is_whitespace()).collect();
+        if parts.len() < 3 {
+            // Try equality format: "col=value"
+            if predicate.contains('=') {
+                let eq_parts: Vec<&str> = predicate.split('=').collect();
+                if eq_parts.len() == 2 {
+                    let col_name = eq_parts[0].trim();
+                    let value = eq_parts[1].trim();
+                    return Self::apply_equality_filter(batch, col_name, value);
+                }
+            }
+            return Ok(Some(batch.clone()));
+        }
+
+        let col_name = parts[0].trim();
+        let op = parts[1].trim();
+        let value_str = parts[2].trim();
+
+        let schema = batch.schema();
+        let col_idx = match schema.fields().iter().position(|f| f.name() == col_name) {
+            Some(idx) => idx,
+            None => return Ok(Some(batch.clone())),
+        };
+
+        let col = batch.column(col_idx);
+
+        if let Some(int_arr) = col.as_any().downcast_ref::<Int64Array>() {
+            if let Ok(threshold) = value_str.parse::<i64>() {
+                let mask: BooleanArray = match op {
+                    ">" => int_arr.iter().map(|v| v.map(|x| x > threshold)).collect(),
+                    ">=" => int_arr.iter().map(|v| v.map(|x| x >= threshold)).collect(),
+                    "<" => int_arr.iter().map(|v| v.map(|x| x < threshold)).collect(),
+                    "<=" => int_arr.iter().map(|v| v.map(|x| x <= threshold)).collect(),
+                    "=" | "==" => {
+                        int_arr.iter().map(|v| v.map(|x| x == threshold)).collect()
+                    }
+                    "!=" | "<>" => {
+                        int_arr.iter().map(|v| v.map(|x| x != threshold)).collect()
+                    }
+                    _ => return Ok(Some(batch.clone())),
+                };
+                return Ok(Some(filter_record_batch(batch, &mask)?));
+            }
+        }
+
+        if let Some(f64_arr) = col.as_any().downcast_ref::<Float64Array>() {
+            if let Ok(threshold) = value_str.parse::<f64>() {
+                let mask: BooleanArray = match op {
+                    ">" => f64_arr.iter().map(|v| v.map(|x| x > threshold)).collect(),
+                    ">=" => f64_arr.iter().map(|v| v.map(|x| x >= threshold)).collect(),
+                    "<" => f64_arr.iter().map(|v| v.map(|x| x < threshold)).collect(),
+                    "<=" => f64_arr.iter().map(|v| v.map(|x| x <= threshold)).collect(),
+                    "=" | "==" => f64_arr
+                        .iter()
+                        .map(|v| v.map(|x| (x - threshold).abs() < f64::EPSILON))
+                        .collect(),
+                    _ => return Ok(Some(batch.clone())),
+                };
+                return Ok(Some(filter_record_batch(batch, &mask)?));
+            }
+        }
+
+        if let Some(str_arr) = col.as_any().downcast_ref::<StringArray>() {
+            let mask: BooleanArray = match op {
+                "=" | "==" => str_arr.iter().map(|v| v.map(|x| x == value_str)).collect(),
+                "!=" | "<>" => str_arr.iter().map(|v| v.map(|x| x != value_str)).collect(),
+                _ => return Ok(Some(batch.clone())),
+            };
+            return Ok(Some(filter_record_batch(batch, &mask)?));
+        }
+
+        Ok(Some(batch.clone()))
+    }
+
+    fn apply_equality_filter(
+        batch: &RecordBatch,
+        col_name: &str,
+        value: &str,
+    ) -> Result<Option<RecordBatch>> {
+        use arrow::array::{BooleanArray, Int64Array, StringArray};
+        use arrow::compute::filter_record_batch;
+
+        let schema = batch.schema();
+        let col_idx = match schema.fields().iter().position(|f| f.name() == col_name) {
+            Some(idx) => idx,
+            None => return Ok(Some(batch.clone())),
+        };
+
+        let col = batch.column(col_idx);
+
+        if value == "true" || value == "false" {
+            let target = value == "true";
+            if let Some(bool_arr) = col.as_any().downcast_ref::<BooleanArray>() {
+                let mask: BooleanArray =
+                    bool_arr.iter().map(|v| v.map(|x| x == target)).collect();
+                return Ok(Some(filter_record_batch(batch, &mask)?));
+            }
+        }
+
+        if let Ok(int_val) = value.parse::<i64>() {
+            if let Some(int_arr) = col.as_any().downcast_ref::<Int64Array>() {
+                let mask: BooleanArray =
+                    int_arr.iter().map(|v| v.map(|x| x == int_val)).collect();
+                return Ok(Some(filter_record_batch(batch, &mask)?));
+            }
+        }
+
+        if let Some(str_arr) = col.as_any().downcast_ref::<StringArray>() {
+            let mask: BooleanArray = str_arr.iter().map(|v| v.map(|x| x == value)).collect();
+            return Ok(Some(filter_record_batch(batch, &mask)?));
+        }
+
+        Ok(Some(batch.clone()))
+    }
+
+    /// Apply column projection to a batch.
+    fn apply_projection(batch: &RecordBatch, columns: &[String]) -> Result<RecordBatch> {
+        let schema = batch.schema();
+        let mut indices = Vec::new();
+        for col_name in columns {
+            let trimmed = col_name.trim();
+            if let Some(idx) = schema.fields().iter().position(|f| f.name() == trimmed) {
+                indices.push(idx);
+            }
+        }
+
+        if indices.is_empty() {
+            return Err(BlazeError::execution(
+                "No matching columns found for projection",
+            ));
+        }
+
+        let projected_columns: Vec<_> = indices.iter().map(|&i| batch.column(i).clone()).collect();
+        let projected_fields: Vec<_> = indices
+            .iter()
+            .map(|&i| Arc::clone(&schema.fields()[i]))
+            .collect();
+        let new_schema = Arc::new(arrow::datatypes::Schema::new(projected_fields));
+
+        RecordBatch::try_new(new_schema, projected_columns)
+            .map_err(|e| BlazeError::execution(format!("Projection failed: {}", e)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-trigger refresh and background scheduling
+// ---------------------------------------------------------------------------
+
+/// Configuration for automatic view refresh triggers.
+#[derive(Debug, Clone)]
+pub enum RefreshTrigger {
+    /// Refresh on every commit (ON COMMIT)
+    OnCommit,
+    /// Refresh after N changes to source tables
+    AfterChanges { threshold: u64 },
+    /// Refresh on periodic interval
+    Periodic { interval_secs: u64 },
+    /// Manual refresh only
+    Manual,
+}
+
+impl RefreshTrigger {
+    pub fn should_trigger(&self, changes_since_refresh: u64, secs_since_refresh: f64) -> bool {
+        match self {
+            RefreshTrigger::OnCommit => true,
+            RefreshTrigger::AfterChanges { threshold } => changes_since_refresh >= *threshold,
+            RefreshTrigger::Periodic { interval_secs } => {
+                secs_since_refresh >= *interval_secs as f64
+            }
+            RefreshTrigger::Manual => false,
+        }
+    }
+}
+
+/// Priority level for queued refreshes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefreshPriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+    Critical = 3,
+}
+
+/// A single entry in the refresh queue.
+#[derive(Debug, Clone)]
+pub struct RefreshQueueEntry {
+    pub view_name: String,
+    pub priority: RefreshPriority,
+    pub enqueued_at: std::time::Instant,
+    pub trigger_reason: String,
+}
+
+/// Priority queue for pending materialized view refreshes.
+#[derive(Default)]
+pub struct RefreshQueue {
+    queue: Mutex<Vec<RefreshQueueEntry>>,
+}
+
+impl RefreshQueue {
+    pub fn new() -> Self {
+        Self {
+            queue: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn enqueue(
+        &self,
+        view_name: impl Into<String>,
+        priority: RefreshPriority,
+        reason: impl Into<String>,
+    ) {
+        let entry = RefreshQueueEntry {
+            view_name: view_name.into(),
+            priority,
+            enqueued_at: std::time::Instant::now(),
+            trigger_reason: reason.into(),
+        };
+        self.queue.lock().push(entry);
+    }
+
+    /// Dequeue the highest-priority, oldest entry.
+    pub fn dequeue(&self) -> Option<RefreshQueueEntry> {
+        let mut q = self.queue.lock();
+        if q.is_empty() {
+            return None;
+        }
+        // Find index of best candidate: highest priority, then earliest enqueued_at.
+        let mut best = 0;
+        for i in 1..q.len() {
+            if q[i].priority > q[best].priority
+                || (q[i].priority == q[best].priority && q[i].enqueued_at < q[best].enqueued_at)
+            {
+                best = i;
+            }
+        }
+        Some(q.remove(best))
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().is_empty()
+    }
+
+    pub fn pending_views(&self) -> Vec<String> {
+        self.queue
+            .lock()
+            .iter()
+            .map(|e| e.view_name.clone())
+            .collect()
+    }
+}
+
+/// Metrics tracking for materialized view refresh operations.
+#[derive(Debug, Clone, Default)]
+pub struct RefreshMetrics {
+    pub total_refreshes: u64,
+    pub total_incremental_refreshes: u64,
+    pub total_full_refreshes: u64,
+    pub total_refresh_time_ms: u64,
+    pub total_rows_processed: u64,
+    pub failed_refreshes: u64,
+    pub skipped_refreshes: u64,
+}
+
+impl RefreshMetrics {
+    pub fn record_refresh(&mut self, incremental: bool, duration_ms: u64, rows: u64) {
+        self.total_refreshes += 1;
+        if incremental {
+            self.total_incremental_refreshes += 1;
+        } else {
+            self.total_full_refreshes += 1;
+        }
+        self.total_refresh_time_ms += duration_ms;
+        self.total_rows_processed += rows;
+    }
+
+    pub fn record_failure(&mut self) {
+        self.failed_refreshes += 1;
+    }
+
+    pub fn record_skip(&mut self) {
+        self.skipped_refreshes += 1;
+    }
+
+    /// Fraction of incremental refreshes vs total.
+    pub fn incremental_ratio(&self) -> f64 {
+        if self.total_refreshes == 0 {
+            return 0.0;
+        }
+        self.total_incremental_refreshes as f64 / self.total_refreshes as f64
+    }
+
+    pub fn avg_refresh_time_ms(&self) -> f64 {
+        if self.total_refreshes == 0 {
+            return 0.0;
+        }
+        self.total_refresh_time_ms as f64 / self.total_refreshes as f64
+    }
+
+    pub fn success_rate(&self) -> f64 {
+        let total = self.total_refreshes + self.failed_refreshes;
+        if total == 0 {
+            return 1.0;
+        }
+        self.total_refreshes as f64 / total as f64
+    }
+}
+
+/// Result of a consistency check on a materialized view.
+#[derive(Debug, Clone)]
+pub struct ConsistencyReport {
+    pub view_name: String,
+    pub is_consistent: bool,
+    pub row_count_match: bool,
+    pub view_row_count: usize,
+    pub expected_row_count: usize,
+    pub staleness_secs: f64,
+}
+
+/// Checks consistency between a materialized view and its source data.
+pub struct ViewConsistencyChecker;
+
+impl ViewConsistencyChecker {
+    pub fn check_row_count(
+        view_name: &str,
+        view_rows: usize,
+        source_rows: usize,
+        staleness_secs: f64,
+    ) -> ConsistencyReport {
+        let row_count_match = view_rows == source_rows;
+        ConsistencyReport {
+            view_name: view_name.to_string(),
+            is_consistent: row_count_match && staleness_secs < 60.0,
+            row_count_match,
+            view_row_count: view_rows,
+            expected_row_count: source_rows,
+            staleness_secs,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Join Delta Computer + Streaming Delta Pipeline
+// ---------------------------------------------------------------------------
+
+/// Computes incremental deltas for join operations.
+pub struct JoinDeltaComputer {
+    join_type: JoinDeltaType,
+}
+
+/// Type of join for delta computation.
+#[derive(Debug, Clone, Copy)]
+pub enum JoinDeltaType {
+    Inner,
+    LeftOuter,
+    RightOuter,
+    FullOuter,
+}
+
+impl JoinDeltaComputer {
+    pub fn new(join_type: JoinDeltaType) -> Self {
+        Self { join_type }
+    }
+
+    /// Given changes to the left table, compute the resulting changes to the join output.
+    /// Returns: (new rows to add, rows to remove) based on join with right table.
+    pub fn compute_left_delta(
+        &self,
+        left_inserts: usize,
+        left_deletes: usize,
+        right_row_count: usize,
+    ) -> (usize, usize) {
+        match self.join_type {
+            JoinDeltaType::Inner => {
+                // Each left insert could match all right rows (worst case)
+                (left_inserts * right_row_count / 10_usize.max(1), left_deletes)
+            }
+            JoinDeltaType::LeftOuter => {
+                (left_inserts, left_deletes)
+            }
+            JoinDeltaType::RightOuter => {
+                (left_inserts * right_row_count / 10_usize.max(1), left_deletes)
+            }
+            JoinDeltaType::FullOuter => {
+                (left_inserts, left_deletes)
+            }
+        }
+    }
+
+    /// Estimate the cost of incremental vs full recomputation.
+    pub fn should_use_incremental(
+        &self,
+        delta_size: usize,
+        total_left: usize,
+        total_right: usize,
+    ) -> bool {
+        let full_cost = total_left * total_right;
+        let incremental_cost = delta_size * total_right;
+        incremental_cost < full_cost / 2
+    }
+}
+
+/// Streaming delta pipeline for continuous materialized view maintenance.
+pub struct StreamingDeltaPipeline {
+    stages: Vec<DeltaStage>,
+    processed_deltas: u64,
+    total_rows_propagated: u64,
+}
+
+/// A stage in the delta propagation pipeline.
+#[derive(Debug, Clone)]
+pub struct DeltaStage {
+    pub name: String,
+    pub stage_type: DeltaStageType,
+    pub processed: u64,
+}
+
+/// Types of delta processing stages.
+#[derive(Debug, Clone)]
+pub enum DeltaStageType {
+    Filter,
+    Project,
+    Aggregate,
+    Join,
+}
+
+impl StreamingDeltaPipeline {
+    pub fn new() -> Self {
+        Self {
+            stages: Vec::new(),
+            processed_deltas: 0,
+            total_rows_propagated: 0,
+        }
+    }
+
+    /// Add a stage to the pipeline.
+    pub fn add_stage(&mut self, name: &str, stage_type: DeltaStageType) {
+        self.stages.push(DeltaStage {
+            name: name.to_string(),
+            stage_type,
+            processed: 0,
+        });
+    }
+
+    /// Process a delta through the pipeline.
+    pub fn process_delta(&mut self, input_rows: usize) -> usize {
+        self.processed_deltas += 1;
+        let mut current_rows = input_rows;
+        for stage in &mut self.stages {
+            current_rows = match stage.stage_type {
+                DeltaStageType::Filter => current_rows * 7 / 10, // ~70% selectivity
+                DeltaStageType::Project => current_rows,
+                DeltaStageType::Aggregate => (current_rows / 10).max(1),
+                DeltaStageType::Join => current_rows * 3 / 2, // ~1.5x expansion
+            };
+            stage.processed += current_rows as u64;
+        }
+        self.total_rows_propagated += current_rows as u64;
+        current_rows
+    }
+
+    pub fn stages(&self) -> &[DeltaStage] { &self.stages }
+    pub fn total_deltas(&self) -> u64 { self.processed_deltas }
+    pub fn total_rows(&self) -> u64 { self.total_rows_propagated }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: Trigger-based Auto-Refresh + Async Background Scheduler
+// ---------------------------------------------------------------------------
+
+/// Trigger that fires when data changes to initiate auto-refresh.
+#[derive(Debug, Clone)]
+pub struct RefreshTriggerRule {
+    pub view_name: String,
+    pub source_table: String,
+    pub trigger_type: TriggerType,
+    pub min_delta_rows: usize,
+    pub max_staleness_secs: u64,
+}
+
+/// When a trigger should fire.
+#[derive(Debug, Clone)]
+pub enum TriggerType {
+    /// Refresh immediately on any change.
+    Immediate,
+    /// Refresh after accumulating N delta rows.
+    Threshold(usize),
+    /// Refresh on a time interval.
+    Periodic(u64),
+    /// Refresh when staleness exceeds a limit.
+    Staleness(u64),
+}
+
+/// Manager for refresh triggers.
+pub struct TriggerManager {
+    rules: Vec<RefreshTriggerRule>,
+    pending_deltas: std::collections::HashMap<String, usize>,
+}
+
+impl TriggerManager {
+    pub fn new() -> Self {
+        Self {
+            rules: Vec::new(),
+            pending_deltas: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Register a trigger rule.
+    pub fn register(&mut self, rule: RefreshTriggerRule) {
+        self.rules.push(rule);
+    }
+
+    /// Record that rows were changed in a source table.
+    pub fn record_change(&mut self, table: &str, row_count: usize) {
+        *self.pending_deltas.entry(table.to_string()).or_insert(0) += row_count;
+    }
+
+    /// Check which views need refresh based on current state.
+    pub fn views_needing_refresh(&self) -> Vec<&str> {
+        self.rules.iter()
+            .filter(|rule| {
+                let delta = self.pending_deltas.get(&rule.source_table).copied().unwrap_or(0);
+                match rule.trigger_type {
+                    TriggerType::Immediate => delta > 0,
+                    TriggerType::Threshold(n) => delta >= n,
+                    TriggerType::Periodic(_) => false, // Time-based, not delta-based
+                    TriggerType::Staleness(_) => false, // Time-based
+                }
+            })
+            .map(|rule| rule.view_name.as_str())
+            .collect()
+    }
+
+    /// Clear pending deltas for a table after refresh.
+    pub fn clear_deltas(&mut self, table: &str) {
+        self.pending_deltas.remove(table);
+    }
+
+    pub fn num_rules(&self) -> usize { self.rules.len() }
+}
+
+/// Background refresh scheduler with priority queue.
+pub struct BackgroundRefreshScheduler {
+    queue: Vec<ScheduledRefresh>,
+    max_concurrent: usize,
+    active_count: usize,
+    completed_count: u64,
+}
+
+/// A scheduled refresh task.
+#[derive(Debug, Clone)]
+pub struct ScheduledRefresh {
+    pub view_name: String,
+    pub priority: u32,
+    pub scheduled_at: std::time::Instant,
+    pub status: RefreshJobStatus,
+}
+
+/// Status of a refresh job.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefreshJobStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed(String),
+}
+
+impl BackgroundRefreshScheduler {
+    pub fn new(max_concurrent: usize) -> Self {
+        Self {
+            queue: Vec::new(),
+            max_concurrent,
+            active_count: 0,
+            completed_count: 0,
+        }
+    }
+
+    /// Schedule a view for refresh.
+    pub fn schedule(&mut self, view_name: &str, priority: u32) {
+        // Don't schedule if already pending
+        if self.queue.iter().any(|r| r.view_name == view_name && r.status == RefreshJobStatus::Pending) {
+            return;
+        }
+        self.queue.push(ScheduledRefresh {
+            view_name: view_name.to_string(),
+            priority,
+            scheduled_at: std::time::Instant::now(),
+            status: RefreshJobStatus::Pending,
+        });
+        self.queue.sort_by(|a, b| b.priority.cmp(&a.priority));
+    }
+
+    /// Get the next job to execute (if capacity allows).
+    pub fn next_job(&mut self) -> Option<&str> {
+        if self.active_count >= self.max_concurrent {
+            return None;
+        }
+        if let Some(job) = self.queue.iter_mut().find(|r| r.status == RefreshJobStatus::Pending) {
+            job.status = RefreshJobStatus::Running;
+            self.active_count += 1;
+            Some(&job.view_name)
+        } else {
+            None
+        }
+    }
+
+    /// Mark a job as completed.
+    pub fn complete(&mut self, view_name: &str) {
+        if let Some(job) = self.queue.iter_mut().find(|r| r.view_name == view_name && r.status == RefreshJobStatus::Running) {
+            job.status = RefreshJobStatus::Completed;
+            self.active_count = self.active_count.saturating_sub(1);
+            self.completed_count += 1;
+        }
+    }
+
+    /// Mark a job as failed.
+    pub fn fail(&mut self, view_name: &str, error: &str) {
+        if let Some(job) = self.queue.iter_mut().find(|r| r.view_name == view_name && r.status == RefreshJobStatus::Running) {
+            job.status = RefreshJobStatus::Failed(error.to_string());
+            self.active_count = self.active_count.saturating_sub(1);
+        }
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.queue.iter().filter(|r| r.status == RefreshJobStatus::Pending).count()
+    }
+    pub fn active_count(&self) -> usize { self.active_count }
+    pub fn completed_count(&self) -> u64 { self.completed_count }
 }
 
 #[cfg(test)]
@@ -1952,5 +2726,436 @@ mod tests {
             }
             _ => panic!("Expected FilterProject, got {:?}", transform),
         }
+    }
+
+    // --- Version Vector tests ---
+
+    #[test]
+    fn test_version_vector_basic() {
+        let mut vv = VersionVector::new();
+        assert_eq!(vv.version_of("t1"), 0);
+
+        vv.advance("t1", 5);
+        assert_eq!(vv.version_of("t1"), 5);
+
+        // Advance only moves forward
+        vv.advance("t1", 3);
+        assert_eq!(vv.version_of("t1"), 5);
+
+        vv.advance("t1", 10);
+        assert_eq!(vv.version_of("t1"), 10);
+    }
+
+    #[test]
+    fn test_version_vector_dominates() {
+        let mut a = VersionVector::new();
+        a.advance("t1", 5);
+        a.advance("t2", 3);
+
+        let mut b = VersionVector::new();
+        b.advance("t1", 4);
+        b.advance("t2", 2);
+
+        assert!(a.dominates(&b));
+        assert!(!b.dominates(&a));
+
+        // Equal vectors dominate each other
+        let c = a.clone();
+        assert!(a.dominates(&c));
+        assert!(c.dominates(&a));
+    }
+
+    #[test]
+    fn test_version_vector_merge() {
+        let mut a = VersionVector::new();
+        a.advance("t1", 5);
+        a.advance("t2", 1);
+
+        let mut b = VersionVector::new();
+        b.advance("t1", 3);
+        b.advance("t2", 7);
+        b.advance("t3", 2);
+
+        a.merge(&b);
+        assert_eq!(a.version_of("t1"), 5); // max(5,3)
+        assert_eq!(a.version_of("t2"), 7); // max(1,7)
+        assert_eq!(a.version_of("t3"), 2); // new from b
+    }
+
+    // --- IncrementalExecutor tests ---
+
+    #[test]
+    fn test_executor_identity_transform() {
+        let batch = make_test_batch();
+        let result = IncrementalExecutor::apply_transform(
+            &DeltaTransform::Identity,
+            &[batch.clone()],
+            None,
+        )
+        .unwrap();
+        let output = result.unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_executor_filter_transform() {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("age", arrow::datatypes::DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::Int64Array::from(vec![10, 25, 30, 15, 40])) as ArrayRef],
+        )
+        .unwrap();
+
+        let result = IncrementalExecutor::apply_transform(
+            &DeltaTransform::Filter {
+                predicate: "age > 20".to_string(),
+            },
+            &[batch],
+            None,
+        )
+        .unwrap();
+
+        let output = result.unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].num_rows(), 3); // 25, 30, 40
+    }
+
+    #[test]
+    fn test_executor_project_transform() {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new("age", arrow::datatypes::DataType::Int64, false),
+            arrow::datatypes::Field::new("city", arrow::datatypes::DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["Alice", "Bob"])) as ArrayRef,
+                Arc::new(arrow::array::Int64Array::from(vec![30, 25])) as ArrayRef,
+                Arc::new(arrow::array::StringArray::from(vec!["NYC", "LA"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let result = IncrementalExecutor::apply_transform(
+            &DeltaTransform::Project {
+                columns: vec!["name".to_string(), "age".to_string()],
+            },
+            &[batch],
+            None,
+        )
+        .unwrap();
+
+        let output = result.unwrap();
+        assert_eq!(output[0].num_columns(), 2);
+        assert_eq!(output[0].schema().field(0).name(), "name");
+        assert_eq!(output[0].schema().field(1).name(), "age");
+    }
+
+    #[test]
+    fn test_executor_filter_project_transform() {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new("age", arrow::datatypes::DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["Alice", "Bob", "Eve"])) as ArrayRef,
+                Arc::new(arrow::array::Int64Array::from(vec![30, 15, 25])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let result = IncrementalExecutor::apply_transform(
+            &DeltaTransform::FilterProject {
+                predicate: "age > 20".to_string(),
+                columns: vec!["name".to_string()],
+            },
+            &[batch],
+            None,
+        )
+        .unwrap();
+
+        let output = result.unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].num_rows(), 2); // Alice(30) and Eve(25)
+        assert_eq!(output[0].num_columns(), 1); // only name
+    }
+
+    #[test]
+    fn test_executor_full_recompute_returns_none() {
+        let batch = make_test_batch();
+        let result = IncrementalExecutor::apply_transform(
+            &DeltaTransform::FullRecompute,
+            &[batch],
+            None,
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_apply_incremental() {
+        let pipeline = IncrementalPipeline::new();
+        pipeline.register_view(
+            "young_users",
+            "SELECT name FROM users WHERE age > 18",
+            &["users".to_string()],
+        );
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new("age", arrow::datatypes::DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["Alice", "Bob"])) as ArrayRef,
+                Arc::new(arrow::array::Int64Array::from(vec![25, 15])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let result = pipeline
+            .apply_incremental("young_users", &[batch], None)
+            .unwrap();
+        let output = result.unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].num_rows(), 1); // Only Alice (age 25 > 18)
+        assert_eq!(output[0].num_columns(), 1); // Only name column
+    }
+
+    // --- RefreshTrigger tests ---
+
+    #[test]
+    fn test_refresh_trigger_on_commit() {
+        let trigger = RefreshTrigger::OnCommit;
+        assert!(trigger.should_trigger(0, 0.0));
+        assert!(trigger.should_trigger(100, 999.0));
+    }
+
+    #[test]
+    fn test_refresh_trigger_after_changes() {
+        let trigger = RefreshTrigger::AfterChanges { threshold: 10 };
+        assert!(!trigger.should_trigger(5, 0.0));
+        assert!(!trigger.should_trigger(9, 100.0));
+        assert!(trigger.should_trigger(10, 0.0));
+        assert!(trigger.should_trigger(20, 0.0));
+    }
+
+    #[test]
+    fn test_refresh_trigger_periodic() {
+        let trigger = RefreshTrigger::Periodic { interval_secs: 60 };
+        assert!(!trigger.should_trigger(100, 30.0));
+        assert!(trigger.should_trigger(0, 60.0));
+        assert!(trigger.should_trigger(0, 120.0));
+
+        let manual = RefreshTrigger::Manual;
+        assert!(!manual.should_trigger(1000, 9999.0));
+    }
+
+    // --- RefreshQueue tests ---
+
+    #[test]
+    fn test_refresh_queue_priority_ordering() {
+        let queue = RefreshQueue::new();
+        assert!(queue.is_empty());
+
+        queue.enqueue("view_low", RefreshPriority::Low, "low priority");
+        queue.enqueue("view_high", RefreshPriority::High, "high priority");
+        queue.enqueue("view_normal", RefreshPriority::Normal, "normal priority");
+
+        assert_eq!(queue.len(), 3);
+
+        let first = queue.dequeue().unwrap();
+        assert_eq!(first.view_name, "view_high");
+
+        let second = queue.dequeue().unwrap();
+        assert_eq!(second.view_name, "view_normal");
+
+        let third = queue.dequeue().unwrap();
+        assert_eq!(third.view_name, "view_low");
+
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_refresh_queue_dequeue() {
+        let queue = RefreshQueue::new();
+        assert!(queue.dequeue().is_none());
+
+        queue.enqueue("v1", RefreshPriority::Normal, "reason1");
+        queue.enqueue("v2", RefreshPriority::Critical, "reason2");
+
+        let views = queue.pending_views();
+        assert_eq!(views.len(), 2);
+        assert!(views.contains(&"v1".to_string()));
+        assert!(views.contains(&"v2".to_string()));
+
+        let entry = queue.dequeue().unwrap();
+        assert_eq!(entry.view_name, "v2");
+        assert_eq!(entry.priority, RefreshPriority::Critical);
+        assert_eq!(entry.trigger_reason, "reason2");
+
+        assert_eq!(queue.len(), 1);
+    }
+
+    // --- RefreshMetrics tests ---
+
+    #[test]
+    fn test_refresh_metrics_recording() {
+        let mut metrics = RefreshMetrics::default();
+        assert_eq!(metrics.total_refreshes, 0);
+
+        metrics.record_refresh(true, 100, 500);
+        assert_eq!(metrics.total_refreshes, 1);
+        assert_eq!(metrics.total_incremental_refreshes, 1);
+        assert_eq!(metrics.total_full_refreshes, 0);
+        assert_eq!(metrics.total_refresh_time_ms, 100);
+        assert_eq!(metrics.total_rows_processed, 500);
+
+        metrics.record_refresh(false, 200, 1000);
+        assert_eq!(metrics.total_refreshes, 2);
+        assert_eq!(metrics.total_incremental_refreshes, 1);
+        assert_eq!(metrics.total_full_refreshes, 1);
+
+        metrics.record_failure();
+        assert_eq!(metrics.failed_refreshes, 1);
+
+        metrics.record_skip();
+        assert_eq!(metrics.skipped_refreshes, 1);
+    }
+
+    #[test]
+    fn test_refresh_metrics_ratios() {
+        let mut metrics = RefreshMetrics::default();
+
+        // Edge case: no refreshes yet
+        assert_eq!(metrics.incremental_ratio(), 0.0);
+        assert_eq!(metrics.avg_refresh_time_ms(), 0.0);
+        assert_eq!(metrics.success_rate(), 1.0);
+
+        metrics.record_refresh(true, 100, 50);
+        metrics.record_refresh(true, 200, 100);
+        metrics.record_refresh(false, 300, 200);
+
+        // 2 incremental out of 3 total
+        let ratio = metrics.incremental_ratio();
+        assert!((ratio - 2.0 / 3.0).abs() < 1e-9);
+
+        // avg time = (100 + 200 + 300) / 3 = 200
+        assert!((metrics.avg_refresh_time_ms() - 200.0).abs() < 1e-9);
+
+        // 3 successes, 0 failures
+        assert!((metrics.success_rate() - 1.0).abs() < 1e-9);
+
+        metrics.record_failure();
+        // 3 successes out of 4 total (3 + 1 failure)
+        assert!((metrics.success_rate() - 0.75).abs() < 1e-9);
+    }
+
+    // --- ViewConsistencyChecker tests ---
+
+    #[test]
+    fn test_consistency_checker() {
+        // Consistent: rows match and staleness low
+        let report = ViewConsistencyChecker::check_row_count("mv_sales", 100, 100, 5.0);
+        assert_eq!(report.view_name, "mv_sales");
+        assert!(report.is_consistent);
+        assert!(report.row_count_match);
+        assert_eq!(report.view_row_count, 100);
+        assert_eq!(report.expected_row_count, 100);
+
+        // Inconsistent: row count mismatch
+        let report = ViewConsistencyChecker::check_row_count("mv_sales", 90, 100, 5.0);
+        assert!(!report.is_consistent);
+        assert!(!report.row_count_match);
+
+        // Inconsistent: staleness too high even if rows match
+        let report = ViewConsistencyChecker::check_row_count("mv_sales", 100, 100, 120.0);
+        assert!(!report.is_consistent);
+        assert!(report.row_count_match);
+    }
+
+    #[test]
+    fn test_join_delta_inner() {
+        let computer = JoinDeltaComputer::new(JoinDeltaType::Inner);
+        let (adds, dels) = computer.compute_left_delta(10, 2, 1000);
+        assert!(adds > 0);
+        assert_eq!(dels, 2);
+    }
+
+    #[test]
+    fn test_join_delta_should_incremental() {
+        let computer = JoinDeltaComputer::new(JoinDeltaType::Inner);
+        assert!(computer.should_use_incremental(10, 10000, 10000));
+        assert!(!computer.should_use_incremental(8000, 10000, 10000));
+    }
+
+    #[test]
+    fn test_streaming_delta_pipeline() {
+        let mut pipeline = StreamingDeltaPipeline::new();
+        pipeline.add_stage("filter", DeltaStageType::Filter);
+        pipeline.add_stage("aggregate", DeltaStageType::Aggregate);
+        let output = pipeline.process_delta(1000);
+        assert!(output < 1000); // Should reduce
+        assert_eq!(pipeline.total_deltas(), 1);
+    }
+
+    #[test]
+    fn test_trigger_manager() {
+        let mut mgr = TriggerManager::new();
+        mgr.register(RefreshTriggerRule {
+            view_name: "mv_sales".to_string(),
+            source_table: "sales".to_string(),
+            trigger_type: TriggerType::Threshold(100),
+            min_delta_rows: 0,
+            max_staleness_secs: 0,
+        });
+        mgr.record_change("sales", 50);
+        assert!(mgr.views_needing_refresh().is_empty());
+        mgr.record_change("sales", 60);
+        assert!(mgr.views_needing_refresh().contains(&"mv_sales"));
+    }
+
+    #[test]
+    fn test_trigger_manager_immediate() {
+        let mut mgr = TriggerManager::new();
+        mgr.register(RefreshTriggerRule {
+            view_name: "mv_users".to_string(),
+            source_table: "users".to_string(),
+            trigger_type: TriggerType::Immediate,
+            min_delta_rows: 0,
+            max_staleness_secs: 0,
+        });
+        mgr.record_change("users", 1);
+        assert_eq!(mgr.views_needing_refresh(), vec!["mv_users"]);
+    }
+
+    #[test]
+    fn test_background_scheduler() {
+        let mut scheduler = BackgroundRefreshScheduler::new(2);
+        scheduler.schedule("view_a", 1);
+        scheduler.schedule("view_b", 10);
+        assert_eq!(scheduler.pending_count(), 2);
+        
+        // Higher priority first
+        let next = scheduler.next_job().map(|s| s.to_string());
+        assert_eq!(next.as_deref(), Some("view_b"));
+        assert_eq!(scheduler.active_count(), 1);
+    }
+
+    #[test]
+    fn test_background_scheduler_complete() {
+        let mut scheduler = BackgroundRefreshScheduler::new(2);
+        scheduler.schedule("view_a", 1);
+        let _ = scheduler.next_job().map(|s| s.to_string());
+        scheduler.complete("view_a");
+        assert_eq!(scheduler.completed_count(), 1);
+        assert_eq!(scheduler.active_count(), 0);
     }
 }
