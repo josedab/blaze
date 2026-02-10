@@ -1175,6 +1175,472 @@ impl StreamRegistry {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Watermark Manager
+// ---------------------------------------------------------------------------
+
+/// Strategy for watermark generation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WatermarkStrategy {
+    /// Assumes event times arrive in monotonically increasing order.
+    Monotonic,
+    /// Tolerates events arriving up to `max_lateness` out of order.
+    BoundedOutOfOrder,
+    /// Watermark advances only on explicit punctuation events.
+    PunctuatedWatermark,
+}
+
+/// Manages watermarks for streaming event-time processing.
+#[derive(Debug)]
+pub struct WatermarkManager {
+    max_lateness_ms: i64,
+    max_observed: i64,
+    strategy: WatermarkStrategy,
+}
+
+impl WatermarkManager {
+    /// Create a new `WatermarkManager` with the given maximum lateness.
+    pub fn new(max_lateness: std::time::Duration) -> Self {
+        Self {
+            max_lateness_ms: max_lateness.as_millis() as i64,
+            max_observed: i64::MIN,
+            strategy: WatermarkStrategy::BoundedOutOfOrder,
+        }
+    }
+
+    /// Create a manager with an explicit strategy.
+    pub fn with_strategy(max_lateness: std::time::Duration, strategy: WatermarkStrategy) -> Self {
+        Self {
+            max_lateness_ms: max_lateness.as_millis() as i64,
+            max_observed: i64::MIN,
+            strategy,
+        }
+    }
+
+    /// Observe an event time and return the updated watermark.
+    pub fn update_watermark(&mut self, event_time: i64) -> i64 {
+        match self.strategy {
+            WatermarkStrategy::Monotonic => {
+                self.max_observed = self.max_observed.max(event_time);
+                self.max_observed
+            }
+            WatermarkStrategy::BoundedOutOfOrder => {
+                self.max_observed = self.max_observed.max(event_time);
+                self.max_observed.saturating_sub(self.max_lateness_ms)
+            }
+            WatermarkStrategy::PunctuatedWatermark => {
+                // Only advance on explicit punctuation; callers should use
+                // `advance_punctuation` for actual advances.
+                self.max_observed
+            }
+        }
+    }
+
+    /// Explicitly advance the watermark (used with `PunctuatedWatermark`).
+    pub fn advance_punctuation(&mut self, watermark: i64) {
+        self.max_observed = self.max_observed.max(watermark);
+    }
+
+    /// Return the current watermark value.
+    pub fn current_watermark(&self) -> i64 {
+        match self.strategy {
+            WatermarkStrategy::Monotonic => self.max_observed,
+            WatermarkStrategy::BoundedOutOfOrder => {
+                self.max_observed.saturating_sub(self.max_lateness_ms)
+            }
+            WatermarkStrategy::PunctuatedWatermark => self.max_observed,
+        }
+    }
+
+    /// Returns `true` if the given event time is below the current watermark.
+    pub fn is_late(&self, event_time: i64) -> bool {
+        event_time < self.current_watermark()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event-Time Windowing
+// ---------------------------------------------------------------------------
+
+/// A time window with inclusive start and exclusive end (milliseconds).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TimeWindow {
+    pub start: i64,
+    pub end: i64,
+}
+
+impl TimeWindow {
+    /// Returns `true` if this window overlaps with `other`.
+    pub fn overlaps(&self, other: &TimeWindow) -> bool {
+        self.start < other.end && other.start < self.end
+    }
+
+    /// Merge two overlapping windows into a single window.
+    pub fn merge(&self, other: &TimeWindow) -> TimeWindow {
+        TimeWindow {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
+    }
+}
+
+/// Type of window to assign events to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WindowType {
+    /// Fixed-size, non-overlapping windows.
+    Tumbling { size_ms: i64 },
+    /// Fixed-size windows that slide by a given interval.
+    Sliding { size_ms: i64, slide_ms: i64 },
+    /// Windows that close after a gap of inactivity.
+    Session { gap_ms: i64 },
+}
+
+/// Assigns events to windows based on their timestamp.
+#[derive(Debug)]
+pub struct WindowAssigner {
+    window_type: WindowType,
+}
+
+impl WindowAssigner {
+    pub fn new(window_type: WindowType) -> Self {
+        Self { window_type }
+    }
+
+    /// Assign the given timestamp to one or more windows.
+    pub fn assign_windows(&self, timestamp: i64) -> Vec<TimeWindow> {
+        match &self.window_type {
+            WindowType::Tumbling { size_ms } => {
+                let start = (timestamp / size_ms) * size_ms;
+                vec![TimeWindow { start, end: start + size_ms }]
+            }
+            WindowType::Sliding { size_ms, slide_ms } => {
+                let mut windows = Vec::new();
+                let first_start = timestamp - size_ms + slide_ms;
+                let aligned = (first_start / slide_ms) * slide_ms;
+                let mut start = aligned;
+                while start <= timestamp {
+                    let end = start + size_ms;
+                    if timestamp >= start && timestamp < end {
+                        windows.push(TimeWindow { start, end });
+                    }
+                    start += slide_ms;
+                }
+                windows
+            }
+            WindowType::Session { gap_ms } => {
+                vec![TimeWindow {
+                    start: timestamp,
+                    end: timestamp + gap_ms,
+                }]
+            }
+        }
+    }
+
+    /// Merge overlapping windows (useful for session windows).
+    pub fn merge_windows(windows: &[TimeWindow]) -> Vec<TimeWindow> {
+        if windows.is_empty() {
+            return Vec::new();
+        }
+        let mut sorted: Vec<TimeWindow> = windows.to_vec();
+        sorted.sort_by_key(|w| w.start);
+
+        let mut merged: Vec<TimeWindow> = vec![sorted[0].clone()];
+        for w in &sorted[1..] {
+            let last = merged.last_mut().unwrap();
+            if w.start <= last.end {
+                last.end = last.end.max(w.end);
+            } else {
+                merged.push(w.clone());
+            }
+        }
+        merged
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming Join Operator
+// ---------------------------------------------------------------------------
+
+/// Join types supported by the streaming join operator.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamingJoinType {
+    Inner,
+    LeftOuter,
+    /// Time-bounded join: match rows within a time tolerance.
+    Temporal,
+}
+
+/// A streaming join operator that maintains state buffers for both sides.
+///
+/// Records are kept in memory and expired based on a TTL derived from
+/// `time_tolerance_ms`.
+#[derive(Debug)]
+pub struct StreamingJoinOperator {
+    join_type: StreamingJoinType,
+    left_key_col: usize,
+    right_key_col: usize,
+    time_tolerance_ms: i64,
+    left_buffer: Vec<(i64, RecordBatch)>,
+    right_buffer: Vec<(i64, RecordBatch)>,
+}
+
+impl StreamingJoinOperator {
+    /// Create a new streaming join operator.
+    pub fn new(
+        join_type: StreamingJoinType,
+        left_key_col: usize,
+        right_key_col: usize,
+        time_tolerance_ms: i64,
+    ) -> Self {
+        Self {
+            join_type,
+            left_key_col,
+            right_key_col,
+            time_tolerance_ms,
+            left_buffer: Vec::new(),
+            right_buffer: Vec::new(),
+        }
+    }
+
+    /// Process a batch arriving on the left stream.
+    pub fn process_left(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
+        let max_time = Self::max_time(&batch, self.left_key_col)?;
+        self.left_buffer.push((max_time, batch.clone()));
+        let results =
+            self.probe_against(&batch, self.left_key_col, &self.right_buffer.clone(), self.right_key_col)?;
+        self.cleanup(max_time);
+        Ok(results)
+    }
+
+    /// Process a batch arriving on the right stream.
+    pub fn process_right(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
+        let max_time = Self::max_time(&batch, self.right_key_col)?;
+        self.right_buffer.push((max_time, batch.clone()));
+        let results =
+            self.probe_against(&batch, self.right_key_col, &self.left_buffer.clone(), self.left_key_col)?;
+        self.cleanup(max_time);
+        Ok(results)
+    }
+
+    fn probe_against(
+        &self,
+        incoming: &RecordBatch,
+        incoming_key: usize,
+        buffer: &[(i64, RecordBatch)],
+        buffer_key: usize,
+    ) -> Result<Vec<RecordBatch>> {
+        use arrow::array::{Int64Array, UInt32Array};
+        use arrow::compute::take;
+        use arrow::datatypes::Field as ArrowField;
+
+        let incoming_keys = incoming
+            .column(incoming_key)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| BlazeError::execution("Key column must be Int64"))?;
+
+        let mut results = Vec::new();
+        for (_ts, buf_batch) in buffer {
+            let buf_keys = buf_batch
+                .column(buffer_key)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| BlazeError::execution("Key column must be Int64"))?;
+
+            let mut inc_indices = Vec::new();
+            let mut buf_indices = Vec::new();
+
+            for i in 0..incoming_keys.len() {
+                let ik = incoming_keys.value(i);
+                for j in 0..buf_keys.len() {
+                    let bk = buf_keys.value(j);
+                    let matched = match self.join_type {
+                        StreamingJoinType::Temporal => (ik - bk).abs() <= self.time_tolerance_ms,
+                        _ => ik == bk,
+                    };
+                    if matched {
+                        inc_indices.push(i as u32);
+                        buf_indices.push(j as u32);
+                    }
+                }
+            }
+
+            if !inc_indices.is_empty() {
+                let inc_idx = UInt32Array::from(inc_indices);
+                let buf_idx = UInt32Array::from(buf_indices);
+
+                let mut columns = Vec::new();
+                let mut fields: Vec<Arc<arrow::datatypes::Field>> = Vec::new();
+
+                for (c, field) in incoming.schema().fields().iter().enumerate() {
+                    fields.push(field.clone());
+                    columns.push(take(incoming.column(c), &inc_idx, None)?);
+                }
+                for (c, field) in buf_batch.schema().fields().iter().enumerate() {
+                    let new_field = ArrowField::new(
+                        &format!("right_{}", field.name()),
+                        field.data_type().clone(),
+                        field.is_nullable(),
+                    );
+                    fields.push(Arc::new(new_field));
+                    columns.push(take(buf_batch.column(c), &buf_idx, None)?);
+                }
+
+                let schema = Arc::new(ArrowSchema::new(
+                    fields.into_iter().map(|f| (*f).clone()).collect::<Vec<_>>(),
+                ));
+                results.push(RecordBatch::try_new(schema, columns)?);
+            }
+        }
+        Ok(results)
+    }
+
+    /// TTL-based cleanup of expired buffers.
+    fn cleanup(&mut self, current_time: i64) {
+        let cutoff = current_time - self.time_tolerance_ms;
+        self.left_buffer.retain(|(ts, _)| *ts >= cutoff);
+        self.right_buffer.retain(|(ts, _)| *ts >= cutoff);
+    }
+
+    fn max_time(batch: &RecordBatch, col: usize) -> Result<i64> {
+        use arrow::array::Int64Array;
+        let arr = batch
+            .column(col)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| BlazeError::execution("Key column must be Int64"))?;
+        Ok((0..arr.len()).map(|i| arr.value(i)).max().unwrap_or(0))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CDC (Change Data Capture) Processor
+// ---------------------------------------------------------------------------
+
+/// CDC operation type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CdcOperation {
+    Insert,
+    Update,
+    Delete,
+    Snapshot,
+}
+
+/// A single CDC record.
+#[derive(Debug, Clone)]
+pub struct CdcRecord {
+    pub operation: CdcOperation,
+    pub table: String,
+    pub timestamp: i64,
+    pub key: Vec<u8>,
+    pub data: HashMap<String, String>,
+}
+
+/// Cumulative CDC statistics.
+#[derive(Debug, Clone, Default)]
+pub struct CdcStats {
+    pub inserts: u64,
+    pub updates: u64,
+    pub deletes: u64,
+    pub snapshots: u64,
+}
+
+/// Processes CDC events and maintains an in-memory state table.
+#[derive(Debug)]
+pub struct CdcProcessor {
+    state: HashMap<Vec<u8>, HashMap<String, String>>,
+    columns: Vec<String>,
+    stats: CdcStats,
+}
+
+impl CdcProcessor {
+    pub fn new() -> Self {
+        Self {
+            state: HashMap::new(),
+            columns: Vec::new(),
+            stats: CdcStats::default(),
+        }
+    }
+
+    /// Process a single CDC record and return a snapshot batch if the state changed.
+    pub fn process(&mut self, record: CdcRecord) -> Result<Option<RecordBatch>> {
+        if self.columns.is_empty() && !record.data.is_empty() {
+            self.columns = record.data.keys().cloned().collect();
+            self.columns.sort();
+        }
+
+        match record.operation {
+            CdcOperation::Insert => {
+                self.state.insert(record.key, record.data);
+                self.stats.inserts += 1;
+            }
+            CdcOperation::Update => {
+                if let Some(existing) = self.state.get_mut(&record.key) {
+                    for (k, v) in &record.data {
+                        existing.insert(k.clone(), v.clone());
+                    }
+                } else {
+                    self.state.insert(record.key, record.data);
+                }
+                self.stats.updates += 1;
+            }
+            CdcOperation::Delete => {
+                self.state.remove(&record.key);
+                self.stats.deletes += 1;
+            }
+            CdcOperation::Snapshot => {
+                self.state.insert(record.key, record.data);
+                self.stats.snapshots += 1;
+            }
+        }
+
+        self.build_snapshot()
+    }
+
+    /// Return current CDC statistics.
+    pub fn stats(&self) -> &CdcStats {
+        &self.stats
+    }
+
+    /// Number of rows currently in state.
+    pub fn state_len(&self) -> usize {
+        self.state.len()
+    }
+
+    fn build_snapshot(&self) -> Result<Option<RecordBatch>> {
+        if self.columns.is_empty() || self.state.is_empty() {
+            return Ok(None);
+        }
+
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
+
+        let fields: Vec<ArrowField> = self
+            .columns
+            .iter()
+            .map(|c| ArrowField::new(c.as_str(), ArrowDataType::Utf8, true))
+            .collect();
+        let schema = Arc::new(ArrowSchema::new(fields));
+
+        let mut col_builders: Vec<Vec<Option<&str>>> =
+            vec![Vec::with_capacity(self.state.len()); self.columns.len()];
+
+        for row in self.state.values() {
+            for (i, col_name) in self.columns.iter().enumerate() {
+                col_builders[i].push(row.get(col_name).map(|s| s.as_str()));
+            }
+        }
+
+        let arrays: Vec<Arc<dyn arrow::array::Array>> = col_builders
+            .into_iter()
+            .map(|vals| Arc::new(StringArray::from(vals)) as Arc<dyn arrow::array::Array>)
+            .collect();
+
+        Ok(Some(RecordBatch::try_new(schema, arrays)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1539,4 +2005,232 @@ mod tests {
         assert_eq!(registry.active_query_count(), 0);
         assert!(registry.stop_query("my_query").is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // WatermarkManager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_watermark_manager_bounded_out_of_order() {
+        let mut wm = WatermarkManager::new(std::time::Duration::from_millis(100));
+        let w = wm.update_watermark(500);
+        assert_eq!(w, 400); // 500 - 100
+        assert_eq!(wm.current_watermark(), 400);
+    }
+
+    #[test]
+    fn test_watermark_manager_monotonic() {
+        let mut wm = WatermarkManager::with_strategy(
+            std::time::Duration::from_millis(0),
+            WatermarkStrategy::Monotonic,
+        );
+        wm.update_watermark(100);
+        wm.update_watermark(50); // out of order, ignored
+        assert_eq!(wm.current_watermark(), 100);
+    }
+
+    #[test]
+    fn test_watermark_manager_is_late() {
+        let mut wm = WatermarkManager::new(std::time::Duration::from_millis(50));
+        wm.update_watermark(200);
+        // watermark = 200 - 50 = 150
+        assert!(wm.is_late(100));
+        assert!(!wm.is_late(150));
+        assert!(!wm.is_late(200));
+    }
+
+    #[test]
+    fn test_watermark_punctuated() {
+        let mut wm = WatermarkManager::with_strategy(
+            std::time::Duration::from_millis(0),
+            WatermarkStrategy::PunctuatedWatermark,
+        );
+        // Regular updates don't advance the watermark.
+        wm.update_watermark(1000);
+        assert_eq!(wm.current_watermark(), i64::MIN);
+
+        // Explicit punctuation does.
+        wm.advance_punctuation(500);
+        assert_eq!(wm.current_watermark(), 500);
+    }
+
+    // -----------------------------------------------------------------------
+    // WindowAssigner tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tumbling_window_assignment() {
+        let wa = WindowAssigner::new(WindowType::Tumbling { size_ms: 1000 });
+        let windows = wa.assign_windows(2500);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0], TimeWindow { start: 2000, end: 3000 });
+    }
+
+    #[test]
+    fn test_sliding_window_assignment() {
+        let wa = WindowAssigner::new(WindowType::Sliding {
+            size_ms: 1000,
+            slide_ms: 500,
+        });
+        let windows = wa.assign_windows(1200);
+        assert!(windows.len() >= 2);
+        assert!(windows.contains(&TimeWindow { start: 1000, end: 2000 }));
+        assert!(windows.contains(&TimeWindow { start: 500, end: 1500 }));
+    }
+
+    #[test]
+    fn test_session_window_assignment() {
+        let wa = WindowAssigner::new(WindowType::Session { gap_ms: 300 });
+        let w = wa.assign_windows(1000);
+        assert_eq!(w, vec![TimeWindow { start: 1000, end: 1300 }]);
+    }
+
+    #[test]
+    fn test_merge_windows() {
+        let windows = vec![
+            TimeWindow { start: 0, end: 100 },
+            TimeWindow { start: 50, end: 150 },
+            TimeWindow { start: 200, end: 300 },
+        ];
+        let merged = WindowAssigner::merge_windows(&windows);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0], TimeWindow { start: 0, end: 150 });
+        assert_eq!(merged[1], TimeWindow { start: 200, end: 300 });
+    }
+
+    // -----------------------------------------------------------------------
+    // StreamingJoinOperator tests
+    // -----------------------------------------------------------------------
+
+    fn create_int64_batch(col_name: &str, values: Vec<i64>) -> RecordBatch {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new(col_name, ArrowDataType::Int64, false),
+        ]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap()
+    }
+
+    #[test]
+    fn test_streaming_join_inner() {
+        let mut op = StreamingJoinOperator::new(StreamingJoinType::Inner, 0, 0, 10_000);
+        let left = create_int64_batch("key", vec![1, 2, 3]);
+        let right = create_int64_batch("key", vec![2, 3, 4]);
+
+        let _ = op.process_left(left).unwrap();
+        let results = op.process_right(right).unwrap();
+        // keys 2 and 3 match
+        let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn test_streaming_join_temporal() {
+        let mut op = StreamingJoinOperator::new(StreamingJoinType::Temporal, 0, 0, 5);
+        let left = create_int64_batch("ts", vec![100, 200]);
+        let right = create_int64_batch("ts", vec![103, 250]);
+
+        let _ = op.process_left(left).unwrap();
+        let results = op.process_right(right).unwrap();
+        // |100-103| = 3 <= 5 match; |200-103| = 97 > 5; |200-250| = 50 > 5; |100-250| = 150 > 5
+        let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1);
+    }
+
+    #[test]
+    fn test_streaming_join_ttl_cleanup() {
+        let mut op = StreamingJoinOperator::new(StreamingJoinType::Inner, 0, 0, 100);
+        let b1 = create_int64_batch("key", vec![10, 20]);
+        let b2 = create_int64_batch("key", vec![500]);
+
+        let _ = op.process_left(b1).unwrap();
+        assert_eq!(op.left_buffer.len(), 1);
+        // Processing b2 on right triggers cleanup; b1 max_time=20, cutoff=500-100=400 → evicted
+        let _ = op.process_right(b2).unwrap();
+        assert_eq!(op.left_buffer.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // CdcProcessor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cdc_insert_and_snapshot() {
+        let mut cdc = CdcProcessor::new();
+        let record = CdcRecord {
+            operation: CdcOperation::Insert,
+            table: "users".into(),
+            timestamp: 1000,
+            key: b"u1".to_vec(),
+            data: HashMap::from([("name".into(), "Alice".into()), ("age".into(), "30".into())]),
+        };
+        let batch = cdc.process(record).unwrap();
+        assert!(batch.is_some());
+        assert_eq!(cdc.state_len(), 1);
+        assert_eq!(cdc.stats().inserts, 1);
+    }
+
+    #[test]
+    fn test_cdc_update() {
+        let mut cdc = CdcProcessor::new();
+        cdc.process(CdcRecord {
+            operation: CdcOperation::Insert,
+            table: "t".into(),
+            timestamp: 1,
+            key: b"k1".to_vec(),
+            data: HashMap::from([("v".into(), "old".into())]),
+        })
+        .unwrap();
+        cdc.process(CdcRecord {
+            operation: CdcOperation::Update,
+            table: "t".into(),
+            timestamp: 2,
+            key: b"k1".to_vec(),
+            data: HashMap::from([("v".into(), "new".into())]),
+        })
+        .unwrap();
+        assert_eq!(cdc.stats().updates, 1);
+        assert_eq!(cdc.state_len(), 1);
+    }
+
+    #[test]
+    fn test_cdc_delete() {
+        let mut cdc = CdcProcessor::new();
+        cdc.process(CdcRecord {
+            operation: CdcOperation::Insert,
+            table: "t".into(),
+            timestamp: 1,
+            key: b"k1".to_vec(),
+            data: HashMap::from([("v".into(), "x".into())]),
+        })
+        .unwrap();
+        let batch = cdc.process(CdcRecord {
+            operation: CdcOperation::Delete,
+            table: "t".into(),
+            timestamp: 2,
+            key: b"k1".to_vec(),
+            data: HashMap::new(),
+        })
+        .unwrap();
+        assert!(batch.is_none()); // state is empty after delete
+        assert_eq!(cdc.stats().deletes, 1);
+        assert_eq!(cdc.state_len(), 0);
+    }
+
+    #[test]
+    fn test_cdc_snapshot_operation() {
+        let mut cdc = CdcProcessor::new();
+        let result = cdc
+            .process(CdcRecord {
+                operation: CdcOperation::Snapshot,
+                table: "t".into(),
+                timestamp: 1,
+                key: b"s1".to_vec(),
+                data: HashMap::from([("col".into(), "val".into())]),
+            })
+            .unwrap();
+        assert!(result.is_some());
+        assert_eq!(cdc.stats().snapshots, 1);
+    }
+
 }
