@@ -473,27 +473,77 @@ Decimal types are not yet supported as join keys.
 
 ```
 src/
-├── lib.rs           # Connection API and main entry point
-├── main.rs          # CLI binary
-├── prepared.rs      # Prepared statements and caching
-├── catalog/         # Table and schema management
-├── executor/        # Query execution engine
-├── planner/         # Query planning and optimization
-├── sql/             # SQL parsing
-├── storage/         # CSV, Parquet, in-memory tables
-├── types/           # Type system
-├── optimizer/       # Query optimization rules
-├── parallel/        # Parallel execution
-├── simd/            # SIMD optimizations
-├── ffi/             # C FFI bindings
-├── wasm/            # WASM bindings
-└── python/          # Python bindings (PyO3)
+├── lib.rs              # Connection API and main entry point
+├── main.rs             # CLI binary
+│
+│   # Core Modules
+├── catalog/            # Table and schema management
+├── error.rs            # Error types (BlazeError, Result)
+├── executor/           # Query execution engine
+├── optimizer/          # Cost-based query optimization
+├── output.rs           # Output formatting (table, CSV, JSON, Arrow)
+├── planner/            # Query planning (binder, logical/physical plans)
+├── pool.rs             # Connection pooling
+├── prepared.rs         # Prepared statements and caching
+├── profiler.rs         # Query profiling
+├── sql/                # SQL parsing
+├── storage/            # CSV, Parquet, in-memory tables
+├── transaction.rs      # Transaction management (BEGIN/COMMIT/ROLLBACK)
+├── types/              # Type system (DataType, Schema, ScalarValue)
+├── udf.rs              # User-defined functions
+│
+│   # Query Features
+├── approx.rs           # Approximate query processing (HyperLogLog, sketches)
+├── cache.rs            # Query result caching with LRU eviction
+├── dataframe.rs        # Native DataFrame API
+├── fts.rs              # Full-text search (BM25 ranking)
+├── jit.rs              # Expression JIT compilation & fusion
+├── json.rs             # JSON processing functions
+├── materialized.rs     # Materialized views with incremental refresh
+├── parallel/           # Parallel query execution
+├── progress.rs         # Query progress tracking and cancellation
+├── recursive_cte.rs    # Recursive CTE execution
+├── tvf.rs              # Table-valued functions (generate_series, unnest)
+├── vector.rs           # Vector similarity search (k-NN)
+├── visualization.rs    # Embedded chart rendering
+│
+│   # Infrastructure
+├── benchmark.rs        # Benchmark comparison framework
+├── git_warehouse.rs    # Git-native data warehouse
+├── ingestion.rs        # Real-time ingestion pipeline (WAL-backed)
+├── ipc.rs              # Zero-copy IPC protocol
+├── lsp.rs              # SQL Language Server Protocol support
+├── migration.rs        # DuckDB migration toolkit
+├── persistence.rs      # Persistent storage (WAL + snapshots)
+├── plugin.rs           # Plugin SDK with hot-reload
+├── query_advisor.rs    # Rule-based query analysis
+├── resource_governor.rs # Multi-tenant resource isolation
+├── rest.rs             # Embedded REST API server
+├── security.rs         # RBAC, row-level security, audit logging
+│
+│   # Extension Modules (feature-gated)
+├── adaptive/           # Adaptive query execution (feature: adaptive)
+├── distributed.rs      # Distributed query execution (feature: flight)
+├── federation.rs       # Federated query support (feature: federation)
+├── flight.rs           # Arrow Flight protocol (feature: flight)
+├── gpu/                # GPU acceleration (feature: gpu)
+├── lakehouse/          # Delta Lake / Iceberg support (feature: lakehouse)
+├── learned_optimizer.rs # ML-based optimization (feature: learned-optimizer)
+├── nlq/                # Natural language queries (feature: nlq)
+├── simd/               # SIMD optimizations (feature: simd)
+├── streaming.rs        # Streaming query execution (feature: streaming)
+├── timeseries.rs       # Time-series operations (feature: timeseries)
+│
+│   # Platform Bindings (feature-gated)
+├── ffi/                # C FFI bindings (feature: c-ffi)
+├── python.rs           # Python bindings via PyO3 (feature: python)
+└── wasm/               # WASM bindings (always compiled)
 
-wasm/                # @blaze-sql/wasm npm package
-node/                # @blaze-sql/node npm package
-include/             # C header files
-benches/             # Criterion benchmarks
-examples/            # Usage examples
+wasm/                   # @blaze-sql/wasm npm package
+node/                   # @blaze-sql/node npm package
+include/                # C header files
+benches/                # Criterion benchmarks
+examples/               # Usage examples
 ```
 
 ## Documentation
