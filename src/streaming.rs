@@ -2222,6 +2222,424 @@ impl CheckpointBarrier {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Change Data Capture (CDC) Change Log
+// ---------------------------------------------------------------------------
+
+/// Log Sequence Number for ordering CDC events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Lsn(pub u64);
+
+impl Lsn {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn next(&self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
+/// A CDC change event with before/after images.
+#[derive(Debug, Clone)]
+pub struct ChangeEvent {
+    /// Log sequence number for ordering.
+    pub lsn: Lsn,
+    /// Operation type.
+    pub operation: CdcOperation,
+    /// Table name.
+    pub table: String,
+    /// Timestamp of the change (epoch millis).
+    pub timestamp_ms: i64,
+    /// Row state before the change (for UPDATE/DELETE).
+    pub before: Option<RecordBatch>,
+    /// Row state after the change (for INSERT/UPDATE).
+    pub after: Option<RecordBatch>,
+}
+
+/// Per-table change log with LSN-ordered events.
+#[derive(Debug)]
+pub struct ChangeLog {
+    table_name: String,
+    events: Vec<ChangeEvent>,
+    next_lsn: std::sync::atomic::AtomicU64,
+    /// Maximum events to retain (0 = unlimited).
+    max_events: usize,
+}
+
+impl ChangeLog {
+    /// Create a new change log for a table.
+    pub fn new(table_name: impl Into<String>) -> Self {
+        Self {
+            table_name: table_name.into(),
+            events: Vec::new(),
+            next_lsn: std::sync::atomic::AtomicU64::new(1),
+            max_events: 100_000,
+        }
+    }
+
+    /// Set the maximum number of events to retain.
+    pub fn with_max_events(mut self, max: usize) -> Self {
+        self.max_events = max;
+        self
+    }
+
+    /// Record an INSERT event.
+    pub fn record_insert(&mut self, after: RecordBatch) -> Lsn {
+        self.record_event(CdcOperation::Insert, None, Some(after))
+    }
+
+    /// Record an UPDATE event.
+    pub fn record_update(&mut self, before: RecordBatch, after: RecordBatch) -> Lsn {
+        self.record_event(CdcOperation::Update, Some(before), Some(after))
+    }
+
+    /// Record a DELETE event.
+    pub fn record_delete(&mut self, before: RecordBatch) -> Lsn {
+        self.record_event(CdcOperation::Delete, Some(before), None)
+    }
+
+    fn record_event(
+        &mut self,
+        operation: CdcOperation,
+        before: Option<RecordBatch>,
+        after: Option<RecordBatch>,
+    ) -> Lsn {
+        let lsn = Lsn::new(
+            self.next_lsn
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        );
+        let event = ChangeEvent {
+            lsn,
+            operation,
+            table: self.table_name.clone(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            before,
+            after,
+        };
+        self.events.push(event);
+
+        // Trim old events if over capacity
+        if self.max_events > 0 && self.events.len() > self.max_events {
+            let excess = self.events.len() - self.max_events;
+            self.events.drain(..excess);
+        }
+
+        lsn
+    }
+
+    /// Get events since a given LSN (exclusive).
+    pub fn events_since(&self, lsn: Lsn) -> Vec<&ChangeEvent> {
+        self.events.iter().filter(|e| e.lsn > lsn).collect()
+    }
+
+    /// Get all events.
+    pub fn events(&self) -> &[ChangeEvent] {
+        &self.events
+    }
+
+    /// Current LSN (the most recent event's LSN).
+    pub fn current_lsn(&self) -> Lsn {
+        self.events
+            .last()
+            .map(|e| e.lsn)
+            .unwrap_or(Lsn::new(0))
+    }
+
+    /// Table name.
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    /// Number of events in the log.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Whether the log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream Emit Semantics
+// ---------------------------------------------------------------------------
+
+/// When to emit results from a continuous query.
+#[derive(Debug, Clone)]
+pub enum EmitOn {
+    /// Emit on every row change.
+    Row,
+    /// Emit when watermark advances.
+    Watermark,
+    /// Emit at fixed intervals.
+    Interval(std::time::Duration),
+}
+
+// ---------------------------------------------------------------------------
+// CDC Output Sinks
+// ---------------------------------------------------------------------------
+
+/// Trait for CDC output sinks.
+pub trait CdcSink: Send + Sync {
+    /// Write a batch of change events to the sink.
+    fn write(&self, events: &[ChangeEvent]) -> Result<usize>;
+    /// Flush pending writes.
+    fn flush(&self) -> Result<()>;
+    /// Sink name for logging.
+    fn name(&self) -> &str;
+}
+
+/// In-memory sink for testing.
+pub struct MemorySink {
+    events: parking_lot::Mutex<Vec<ChangeEvent>>,
+}
+
+impl MemorySink {
+    pub fn new() -> Self {
+        Self {
+            events: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn events(&self) -> Vec<ChangeEvent> {
+        self.events.lock().clone()
+    }
+
+    pub fn event_count(&self) -> usize {
+        self.events.lock().len()
+    }
+}
+
+impl Default for MemorySink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CdcSink for MemorySink {
+    fn write(&self, events: &[ChangeEvent]) -> Result<usize> {
+        let mut sink_events = self.events.lock();
+        let count = events.len();
+        sink_events.extend(events.iter().cloned());
+        Ok(count)
+    }
+
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "memory"
+    }
+}
+
+/// File-based CDC sink writing events as JSON lines.
+pub struct FileSink {
+    path: std::path::PathBuf,
+    buffer: parking_lot::Mutex<Vec<String>>,
+}
+
+impl FileSink {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            buffer: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl CdcSink for FileSink {
+    fn write(&self, events: &[ChangeEvent]) -> Result<usize> {
+        let mut buffer = self.buffer.lock();
+        for event in events {
+            let op = match event.operation {
+                CdcOperation::Insert => "INSERT",
+                CdcOperation::Update => "UPDATE",
+                CdcOperation::Delete => "DELETE",
+                CdcOperation::Snapshot => "SNAPSHOT",
+            };
+            let line = format!(
+                r#"{{"lsn":{},"op":"{}","table":"{}","ts":{}}}"#,
+                event.lsn.0, op, event.table, event.timestamp_ms
+            );
+            buffer.push(line);
+        }
+        Ok(events.len())
+    }
+
+    fn flush(&self) -> Result<()> {
+        let mut buffer = self.buffer.lock();
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        let content = buffer.join("\n") + "\n";
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
+            .map_err(|e| BlazeError::execution(format!("Failed to write CDC file: {}", e)))?;
+        buffer.clear();
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "file"
+    }
+}
+
+/// CDC stream checkpoint for exactly-once delivery.
+#[derive(Debug, Clone)]
+pub struct CdcCheckpoint {
+    /// Last successfully processed LSN per table.
+    pub offsets: HashMap<String, Lsn>,
+    /// Checkpoint ID.
+    pub checkpoint_id: u64,
+    /// Timestamp of the checkpoint.
+    pub timestamp_ms: i64,
+}
+
+impl CdcCheckpoint {
+    /// Create a new empty checkpoint.
+    pub fn new(checkpoint_id: u64) -> Self {
+        Self {
+            offsets: HashMap::new(),
+            checkpoint_id,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        }
+    }
+
+    /// Record the last processed LSN for a table.
+    pub fn record_offset(&mut self, table: &str, lsn: Lsn) {
+        self.offsets.insert(table.to_string(), lsn);
+    }
+
+    /// Get the last processed LSN for a table.
+    pub fn get_offset(&self, table: &str) -> Option<Lsn> {
+        self.offsets.get(table).copied()
+    }
+}
+
+/// Manages CDC stream subscriptions and checkpoints.
+pub struct CdcStreamManager {
+    change_logs: parking_lot::RwLock<HashMap<String, ChangeLog>>,
+    sinks: parking_lot::RwLock<Vec<Box<dyn CdcSink>>>,
+    latest_checkpoint: parking_lot::Mutex<Option<CdcCheckpoint>>,
+    next_checkpoint_id: std::sync::atomic::AtomicU64,
+}
+
+impl Default for CdcStreamManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CdcStreamManager {
+    /// Create a new CDC stream manager.
+    pub fn new() -> Self {
+        Self {
+            change_logs: parking_lot::RwLock::new(HashMap::new()),
+            sinks: parking_lot::RwLock::new(Vec::new()),
+            latest_checkpoint: parking_lot::Mutex::new(None),
+            next_checkpoint_id: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// Get or create a change log for a table.
+    pub fn change_log_for(&self, table: &str) -> bool {
+        let logs = self.change_logs.read();
+        logs.contains_key(table)
+    }
+
+    /// Create a change log for a table.
+    pub fn create_change_log(&self, table: &str) {
+        self.change_logs
+            .write()
+            .entry(table.to_string())
+            .or_insert_with(|| ChangeLog::new(table));
+    }
+
+    /// Record an INSERT event.
+    pub fn record_insert(&self, table: &str, after: RecordBatch) -> Option<Lsn> {
+        self.change_logs
+            .write()
+            .get_mut(table)
+            .map(|log| log.record_insert(after))
+    }
+
+    /// Record an UPDATE event.
+    pub fn record_update(
+        &self,
+        table: &str,
+        before: RecordBatch,
+        after: RecordBatch,
+    ) -> Option<Lsn> {
+        self.change_logs
+            .write()
+            .get_mut(table)
+            .map(|log| log.record_update(before, after))
+    }
+
+    /// Record a DELETE event.
+    pub fn record_delete(&self, table: &str, before: RecordBatch) -> Option<Lsn> {
+        self.change_logs
+            .write()
+            .get_mut(table)
+            .map(|log| log.record_delete(before))
+    }
+
+    /// Register an output sink.
+    pub fn add_sink(&self, sink: Box<dyn CdcSink>) {
+        self.sinks.write().push(sink);
+    }
+
+    /// Flush all pending changes to registered sinks.
+    pub fn flush_to_sinks(&self) -> Result<usize> {
+        let logs = self.change_logs.read();
+        let sinks = self.sinks.read();
+        let checkpoint = self.latest_checkpoint.lock();
+
+        let mut total = 0;
+        for (table_name, log) in logs.iter() {
+            let since_lsn = checkpoint
+                .as_ref()
+                .and_then(|cp| cp.get_offset(table_name))
+                .unwrap_or(Lsn::new(0));
+            let events: Vec<ChangeEvent> =
+                log.events_since(since_lsn).into_iter().cloned().collect();
+            if events.is_empty() {
+                continue;
+            }
+            for sink in sinks.iter() {
+                total += sink.write(&events)?;
+                sink.flush()?;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Create a checkpoint.
+    pub fn checkpoint(&self) -> CdcCheckpoint {
+        let id = self
+            .next_checkpoint_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut cp = CdcCheckpoint::new(id);
+        let logs = self.change_logs.read();
+        for (table, log) in logs.iter() {
+            cp.record_offset(table, log.current_lsn());
+        }
+        *self.latest_checkpoint.lock() = Some(cp.clone());
+        cp
+    }
+
+    /// Get the latest checkpoint.
+    pub fn latest_checkpoint(&self) -> Option<CdcCheckpoint> {
+        self.latest_checkpoint.lock().clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
