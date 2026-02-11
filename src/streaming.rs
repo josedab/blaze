@@ -1641,6 +1641,235 @@ impl CdcProcessor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming Checkpoint / Exactly-Once
+// ---------------------------------------------------------------------------
+
+/// Checkpoint state for streaming queries to support exactly-once semantics.
+#[derive(Debug, Clone)]
+pub struct StreamCheckpoint {
+    pub checkpoint_id: u64,
+    pub watermark: i64,
+    pub offsets: HashMap<String, i64>,
+    pub window_state: Vec<CheckpointedWindow>,
+    pub created_at: std::time::Instant,
+}
+
+/// Checkpointed window state for recovery.
+#[derive(Debug, Clone)]
+pub struct CheckpointedWindow {
+    pub start: i64,
+    pub end: i64,
+    pub row_count: usize,
+}
+
+/// Manages periodic checkpointing for streaming queries.
+#[derive(Debug)]
+pub struct CheckpointManager {
+    checkpoints: Vec<StreamCheckpoint>,
+    max_retained: usize,
+    next_id: u64,
+    interval: std::time::Duration,
+    last_checkpoint: std::time::Instant,
+}
+
+impl CheckpointManager {
+    pub fn new(interval: std::time::Duration, max_retained: usize) -> Self {
+        Self {
+            checkpoints: Vec::new(),
+            max_retained,
+            next_id: 1,
+            interval,
+            last_checkpoint: std::time::Instant::now(),
+        }
+    }
+
+    /// Check if a checkpoint is due based on the configured interval.
+    pub fn should_checkpoint(&self) -> bool {
+        self.last_checkpoint.elapsed() >= self.interval
+    }
+
+    /// Create a checkpoint capturing the current streaming state.
+    pub fn create_checkpoint(
+        &mut self,
+        watermark: i64,
+        offsets: HashMap<String, i64>,
+        aggregator: &WindowedAggregator,
+    ) -> StreamCheckpoint {
+        let window_state = aggregator
+            .active_windows
+            .iter()
+            .map(|w| CheckpointedWindow {
+                start: w.start,
+                end: w.end,
+                row_count: w.row_count,
+            })
+            .collect();
+
+        let cp = StreamCheckpoint {
+            checkpoint_id: self.next_id,
+            watermark,
+            offsets,
+            window_state,
+            created_at: std::time::Instant::now(),
+        };
+        self.next_id += 1;
+        self.last_checkpoint = std::time::Instant::now();
+
+        self.checkpoints.push(cp.clone());
+        while self.checkpoints.len() > self.max_retained {
+            self.checkpoints.remove(0);
+        }
+        cp
+    }
+
+    /// Get the latest checkpoint for recovery.
+    pub fn latest_checkpoint(&self) -> Option<&StreamCheckpoint> {
+        self.checkpoints.last()
+    }
+
+    /// Get a specific checkpoint by ID.
+    pub fn get_checkpoint(&self, id: u64) -> Option<&StreamCheckpoint> {
+        self.checkpoints.iter().find(|c| c.checkpoint_id == id)
+    }
+
+    /// Number of retained checkpoints.
+    pub fn checkpoint_count(&self) -> usize {
+        self.checkpoints.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming State Backend
+// ---------------------------------------------------------------------------
+
+/// State backend for stateful streaming operators.
+#[derive(Debug)]
+pub struct StreamStateBackend {
+    state: HashMap<String, HashMap<Vec<u8>, Vec<u8>>>,
+    total_size: usize,
+    max_size: usize,
+}
+
+impl StreamStateBackend {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            state: HashMap::new(),
+            total_size: 0,
+            max_size,
+        }
+    }
+
+    /// Get a value from the named state namespace.
+    pub fn get(&self, namespace: &str, key: &[u8]) -> Option<&[u8]> {
+        self.state
+            .get(namespace)
+            .and_then(|ns| ns.get(key))
+            .map(|v| v.as_slice())
+    }
+
+    /// Put a value into the named state namespace.
+    pub fn put(&mut self, namespace: &str, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        let entry_size = key.len() + value.len();
+        if self.total_size + entry_size > self.max_size {
+            return Err(BlazeError::execution(
+                "Streaming state backend exceeded max size",
+            ));
+        }
+        let ns = self.state.entry(namespace.to_string()).or_default();
+        if let Some(old) = ns.insert(key, value) {
+            self.total_size -= old.len();
+        }
+        self.total_size += entry_size;
+        Ok(())
+    }
+
+    /// Delete a key from the named state namespace.
+    pub fn delete(&mut self, namespace: &str, key: &[u8]) -> bool {
+        if let Some(ns) = self.state.get_mut(namespace) {
+            if let Some(old) = ns.remove(key) {
+                self.total_size -= key.len() + old.len();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Clear all state in a namespace.
+    pub fn clear_namespace(&mut self, namespace: &str) {
+        if let Some(ns) = self.state.remove(namespace) {
+            for (k, v) in &ns {
+                self.total_size -= k.len() + v.len();
+            }
+        }
+    }
+
+    /// Total bytes used by state.
+    pub fn total_size(&self) -> usize {
+        self.total_size
+    }
+
+    /// Number of state namespaces.
+    pub fn namespace_count(&self) -> usize {
+        self.state.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Late Data Handler
+// ---------------------------------------------------------------------------
+
+/// Policy for handling late-arriving data in streaming windows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LateDataPolicy {
+    /// Drop late data silently.
+    Drop,
+    /// Route late data to a side output.
+    SideOutput,
+    /// Allow late data to update already-emitted windows.
+    AllowedLateness { max_lateness: std::time::Duration },
+}
+
+/// Tracks late data statistics.
+#[derive(Debug, Default)]
+pub struct LateDataTracker {
+    pub dropped: u64,
+    pub side_output: u64,
+    pub allowed: u64,
+    policy: Option<LateDataPolicy>,
+}
+
+impl LateDataTracker {
+    pub fn new(policy: LateDataPolicy) -> Self {
+        Self {
+            policy: Some(policy),
+            ..Default::default()
+        }
+    }
+
+    /// Handle a late event and return whether it should be processed.
+    pub fn handle_late_event(&mut self, _event_time: i64, _watermark: i64) -> bool {
+        match &self.policy {
+            Some(LateDataPolicy::Drop) | None => {
+                self.dropped += 1;
+                false
+            }
+            Some(LateDataPolicy::SideOutput) => {
+                self.side_output += 1;
+                false
+            }
+            Some(LateDataPolicy::AllowedLateness { .. }) => {
+                self.allowed += 1;
+                true
+            }
+        }
+    }
+
+    pub fn total_late(&self) -> u64 {
+        self.dropped + self.side_output + self.allowed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2233,4 +2462,95 @@ mod tests {
         assert_eq!(cdc.stats().snapshots, 1);
     }
 
+    // -----------------------------------------------------------------------
+    // CheckpointManager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_checkpoint_manager_basic() {
+        let mut cm = CheckpointManager::new(std::time::Duration::from_millis(0), 3);
+        let wm = Watermark::new("ts", std::time::Duration::from_millis(100));
+        let agg = WindowedAggregator::new(
+            StreamWindow::Tumbling { size: std::time::Duration::from_secs(1) },
+            wm,
+        );
+
+        let cp = cm.create_checkpoint(500, HashMap::from([("topic".into(), 42)]), &agg);
+        assert_eq!(cp.checkpoint_id, 1);
+        assert_eq!(cp.watermark, 500);
+        assert_eq!(*cp.offsets.get("topic").unwrap(), 42);
+        assert_eq!(cm.checkpoint_count(), 1);
+
+        let latest = cm.latest_checkpoint().unwrap();
+        assert_eq!(latest.checkpoint_id, 1);
+    }
+
+    #[test]
+    fn test_checkpoint_manager_retention() {
+        let mut cm = CheckpointManager::new(std::time::Duration::from_millis(0), 2);
+        let wm = Watermark::new("ts", std::time::Duration::from_millis(0));
+        let agg = WindowedAggregator::new(
+            StreamWindow::Tumbling { size: std::time::Duration::from_secs(1) },
+            wm,
+        );
+
+        cm.create_checkpoint(100, HashMap::new(), &agg);
+        cm.create_checkpoint(200, HashMap::new(), &agg);
+        cm.create_checkpoint(300, HashMap::new(), &agg);
+
+        assert_eq!(cm.checkpoint_count(), 2);
+        assert!(cm.get_checkpoint(1).is_none()); // evicted
+        assert!(cm.get_checkpoint(2).is_some());
+        assert!(cm.get_checkpoint(3).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // StreamStateBackend tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_state_backend_basic() {
+        let mut backend = StreamStateBackend::new(1024);
+        backend.put("ns1", b"key1".to_vec(), b"val1".to_vec()).unwrap();
+        assert_eq!(backend.get("ns1", b"key1"), Some(b"val1".as_ref()));
+        assert_eq!(backend.get("ns1", b"missing"), None);
+        assert_eq!(backend.namespace_count(), 1);
+    }
+
+    #[test]
+    fn test_state_backend_delete() {
+        let mut backend = StreamStateBackend::new(1024);
+        backend.put("ns1", b"k1".to_vec(), b"v1".to_vec()).unwrap();
+        assert!(backend.delete("ns1", b"k1"));
+        assert!(!backend.delete("ns1", b"k1"));
+        assert_eq!(backend.total_size(), 0);
+    }
+
+    #[test]
+    fn test_state_backend_overflow() {
+        let mut backend = StreamStateBackend::new(10);
+        backend.put("ns", b"k1".to_vec(), b"v1".to_vec()).unwrap();
+        assert!(backend.put("ns", b"big_key".to_vec(), b"big_val".to_vec()).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // LateDataTracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_late_data_drop_policy() {
+        let mut tracker = LateDataTracker::new(LateDataPolicy::Drop);
+        assert!(!tracker.handle_late_event(100, 200));
+        assert_eq!(tracker.dropped, 1);
+        assert_eq!(tracker.total_late(), 1);
+    }
+
+    #[test]
+    fn test_late_data_allowed_policy() {
+        let mut tracker = LateDataTracker::new(LateDataPolicy::AllowedLateness {
+            max_lateness: std::time::Duration::from_secs(60),
+        });
+        assert!(tracker.handle_late_event(100, 200));
+        assert_eq!(tracker.allowed, 1);
+    }
 }
