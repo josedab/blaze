@@ -672,7 +672,7 @@ classDiagram
 
 | Provider | Format | Filter Pushdown | Statistics |
 |----------|--------|-----------------|------------|
-| `MemoryTable` | In-memory | No | Yes |
+| `MemoryTable` | In-memory | Yes | Yes |
 | `CsvTable` | CSV files | Yes | No |
 | `ParquetTable` | Parquet files | Yes | Yes |
 | `DeltaTable` | Delta Lake | Yes | Yes |
@@ -850,10 +850,19 @@ BlazeError::not_implemented("LATERAL JOIN")
 - GPU memory management
 - Offloading compute-intensive operations
 
-### Planned Features
+#### Arrow Flight (`src/flight.rs`) ⚠️ Experimental
+- Arrow Flight protocol server and client
+- Flight SQL support for remote query execution
+- **Feature flag**: `flight` — also enables `distributed.rs` (distributed query execution)
 
-#### WebAssembly Support (`src/wasm/`) 📋 Planned
-- Browser-based query execution
+> **Dependency note**: Enabling `--features flight` compiles both `src/flight.rs` and
+> `src/distributed.rs`. The distributed module provides query partitioning and
+> coordination that the Flight server uses for remote execution.
+
+### Stable Extensions
+
+#### WebAssembly Support (`src/wasm/`) ✅ Stable
+- Browser-based query execution via `@blaze-sql/wasm`
 - Edge computing deployment
 - JavaScript/TypeScript integration
 
