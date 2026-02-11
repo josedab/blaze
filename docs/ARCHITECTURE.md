@@ -165,6 +165,7 @@ src/
 ├── error.rs                # Error types (BlazeError)
 │
 ├── sql/                    # SQL Parsing
+│   ├── mod.rs              # Public exports
 │   └── parser.rs           # sqlparser-rs wrapper
 │
 ├── planner/                # Query Planning
@@ -190,7 +191,10 @@ src/
 │   ├── memory.rs           # In-memory tables
 │   ├── csv.rs              # CSV format
 │   ├── parquet.rs          # Parquet format
-│   └── delta.rs            # Delta Lake format
+│   ├── delta.rs            # Delta Lake format
+│   ├── object_store.rs     # Object store abstraction
+│   ├── persistent.rs       # Persistent storage backend
+│   └── type_inference.rs   # Automatic type detection
 │
 ├── types/                  # Type System
 │   ├── mod.rs              # Public exports
@@ -198,11 +202,99 @@ src/
 │   ├── schema.rs           # Schema, Field
 │   └── value.rs            # ScalarValue
 │
-└── optimizer/              # Advanced Optimization
-    ├── cost_model.rs       # Cost estimation
-    ├── statistics.rs       # Table statistics
-    ├── cardinality.rs      # Cardinality estimation
-    └── join_ordering.rs    # Join order optimization
+├── optimizer/              # Advanced Optimization
+│   ├── mod.rs              # Cost-based optimizer
+│   ├── cost_model.rs       # Cost estimation
+│   ├── statistics.rs       # Table statistics
+│   ├── cardinality.rs      # Cardinality estimation
+│   └── join_ordering.rs    # Join order optimization
+│
+│   # Core Modules
+├── approx.rs               # Approximate query processing
+├── benchmark.rs            # Benchmark comparison framework
+├── cache.rs                # Query result caching (LRU)
+├── dataframe.rs            # Native DataFrame API
+├── fts.rs                  # Full-text search (BM25)
+├── git_warehouse.rs        # Git-native data warehouse
+├── ingestion.rs            # WAL-backed ingestion pipeline
+├── ipc.rs                  # Zero-copy IPC protocol
+├── jit.rs                  # Expression JIT compilation
+├── json.rs                 # JSON processing functions
+├── lsp.rs                  # SQL Language Server Protocol
+├── materialized.rs         # Materialized views
+├── migration.rs            # DuckDB migration toolkit
+├── output.rs               # Output formatting
+├── persistence.rs          # WAL + snapshot persistence
+├── plugin.rs               # Plugin SDK with hot-reload
+├── pool.rs                 # Connection pooling
+├── prepared.rs             # Prepared statements
+├── profiler.rs             # Query profiling
+├── progress.rs             # Progress tracking & cancellation
+├── query_advisor.rs        # Rule-based query analysis
+├── recursive_cte.rs        # Recursive CTE execution
+├── resource_governor.rs    # Multi-tenant resource isolation
+├── rest.rs                 # Embedded REST API server
+├── security.rs             # RBAC & row-level security
+├── transaction.rs          # MVCC transaction management
+├── tvf.rs                  # Table-valued functions
+├── udf.rs                  # User-defined functions
+├── vector.rs               # Vector similarity search
+├── visualization.rs        # Chart rendering
+│
+│   # Feature-Gated Extensions
+├── adaptive/               # Adaptive query execution
+│   ├── mod.rs
+│   ├── adaptive_planner.rs
+│   ├── partition_coalesce.rs
+│   ├── runtime_stats.rs
+│   └── skew_handler.rs
+├── distributed.rs          # Distributed execution (flight)
+├── federation.rs           # Federated queries
+├── flight.rs               # Arrow Flight protocol
+├── gpu/                    # GPU acceleration
+│   ├── mod.rs
+│   ├── device.rs
+│   ├── executor.rs
+│   ├── kernels.rs
+│   └── memory.rs
+├── lakehouse/              # Lakehouse formats
+│   ├── mod.rs
+│   ├── delta.rs
+│   ├── iceberg.rs
+│   └── snapshot.rs
+├── learned_optimizer.rs    # ML-based optimization
+├── nlq/                    # Natural language queries
+│   ├── mod.rs
+│   ├── generator.rs
+│   ├── intent.rs
+│   └── parser.rs
+├── parallel/               # Parallel execution
+│   ├── mod.rs
+│   ├── exchange.rs
+│   ├── partition.rs
+│   └── worker.rs
+├── simd/                   # SIMD vectorization
+│   ├── mod.rs
+│   ├── codegen.rs
+│   ├── jit.rs
+│   ├── strings.rs
+│   └── vectorize.rs
+├── streaming.rs            # Async streaming execution
+├── timeseries.rs           # Time-series functions
+│
+│   # Platform Bindings
+├── ffi/                    # C FFI bindings
+│   └── mod.rs
+├── python.rs               # Python bindings (PyO3)
+└── wasm/                   # WebAssembly bindings
+    ├── mod.rs
+    ├── bindings.rs
+    ├── http_reader.rs
+    ├── indexeddb.rs
+    ├── memory.rs
+    ├── serialization.rs
+    ├── vfs.rs
+    └── worker.rs
 ```
 
 ---
