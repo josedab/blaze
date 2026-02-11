@@ -2130,6 +2130,181 @@ impl BackgroundRefreshScheduler {
     pub fn completed_count(&self) -> u64 { self.completed_count }
 }
 
+// ---------------------------------------------------------------------------
+// Query Rewriting for Materialized View Routing
+// ---------------------------------------------------------------------------
+
+/// Analyzes queries and rewrites them to use materialized views when beneficial.
+#[derive(Debug)]
+pub struct MaterializedViewRewriter {
+    views: HashMap<String, MaterializedViewSignature>,
+}
+
+/// A signature describing what a materialized view computes.
+#[derive(Debug, Clone)]
+pub struct MaterializedViewSignature {
+    pub view_name: String,
+    pub source_tables: Vec<String>,
+    pub group_by_columns: Vec<String>,
+    pub aggregate_columns: Vec<String>,
+    pub filter_columns: Vec<String>,
+    pub is_fresh: bool,
+}
+
+/// Result of query rewrite analysis.
+#[derive(Debug)]
+pub struct RewriteResult {
+    pub rewritten: bool,
+    pub original_tables: Vec<String>,
+    pub rewrite_target: Option<String>,
+    pub estimated_speedup: f64,
+}
+
+impl MaterializedViewRewriter {
+    pub fn new() -> Self {
+        Self {
+            views: HashMap::new(),
+        }
+    }
+
+    /// Register a materialized view for query rewriting.
+    pub fn register_view(&mut self, sig: MaterializedViewSignature) {
+        self.views.insert(sig.view_name.clone(), sig);
+    }
+
+    /// Remove a view from the rewriter.
+    pub fn deregister_view(&mut self, name: &str) {
+        self.views.remove(name);
+    }
+
+    /// Attempt to rewrite a query by matching it against registered materialized views.
+    /// Returns the rewrite result with the best matching view (if any).
+    pub fn try_rewrite(
+        &self,
+        source_tables: &[String],
+        group_by_columns: &[String],
+        aggregate_columns: &[String],
+    ) -> RewriteResult {
+        let mut best_match: Option<(&str, f64)> = None;
+
+        for (name, sig) in &self.views {
+            if !sig.is_fresh {
+                continue;
+            }
+
+            // Check if the view covers all required source tables
+            let tables_covered = source_tables
+                .iter()
+                .all(|t| sig.source_tables.contains(t));
+            if !tables_covered {
+                continue;
+            }
+
+            // Check if the view has the required group-by columns
+            let groups_covered = group_by_columns
+                .iter()
+                .all(|g| sig.group_by_columns.contains(g));
+            if !groups_covered {
+                continue;
+            }
+
+            // Check if the view has the required aggregate columns
+            let aggs_covered = aggregate_columns
+                .iter()
+                .all(|a| sig.aggregate_columns.contains(a));
+            if !aggs_covered {
+                continue;
+            }
+
+            // Score: higher is better (exact match preferred)
+            let score = (sig.source_tables.len() as f64)
+                + (sig.group_by_columns.len() as f64) * 0.5
+                + (sig.aggregate_columns.len() as f64) * 0.3;
+            
+            if best_match.is_none() || score > best_match.unwrap().1 {
+                best_match = Some((name.as_str(), score));
+            }
+        }
+
+        match best_match {
+            Some((name, score)) => RewriteResult {
+                rewritten: true,
+                original_tables: source_tables.to_vec(),
+                rewrite_target: Some(name.to_string()),
+                estimated_speedup: score * 10.0,
+            },
+            None => RewriteResult {
+                rewritten: false,
+                original_tables: source_tables.to_vec(),
+                rewrite_target: None,
+                estimated_speedup: 1.0,
+            },
+        }
+    }
+
+    pub fn registered_views(&self) -> Vec<&str> {
+        self.views.keys().map(|s| s.as_str()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cascade Refresh Executor
+// ---------------------------------------------------------------------------
+
+/// Executes cascade refreshes through the dependency graph.
+#[derive(Debug)]
+pub struct CascadeRefreshExecutor {
+    refresh_order: Vec<String>,
+    stats: CascadeRefreshStats,
+}
+
+/// Statistics from a cascade refresh.
+#[derive(Debug, Clone, Default)]
+pub struct CascadeRefreshStats {
+    pub views_refreshed: usize,
+    pub views_skipped: usize,
+    pub total_rows_refreshed: u64,
+    pub errors: Vec<String>,
+}
+
+impl CascadeRefreshExecutor {
+    /// Build a cascade refresh plan from the dependency graph.
+    pub fn plan(graph: &ViewDependencyGraph, root_table: &str) -> Self {
+        let affected = graph.affected_views(root_table);
+
+        Self {
+            refresh_order: affected,
+            stats: CascadeRefreshStats::default(),
+        }
+    }
+
+    /// Get the planned refresh order.
+    pub fn refresh_order(&self) -> &[String] {
+        &self.refresh_order
+    }
+
+    /// Record a successful refresh.
+    pub fn record_refresh(&mut self, _view_name: &str, rows: u64) {
+        self.stats.views_refreshed += 1;
+        self.stats.total_rows_refreshed += rows;
+    }
+
+    /// Record a skipped view.
+    pub fn record_skip(&mut self, _view_name: &str) {
+        self.stats.views_skipped += 1;
+    }
+
+    /// Record an error during refresh.
+    pub fn record_error(&mut self, view_name: &str, error: &str) {
+        self.stats.errors.push(format!("{}: {}", view_name, error));
+    }
+
+    /// Get cascade refresh statistics.
+    pub fn stats(&self) -> &CascadeRefreshStats {
+        &self.stats
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3157,5 +3332,98 @@ mod tests {
         scheduler.complete("view_a");
         assert_eq!(scheduler.completed_count(), 1);
         assert_eq!(scheduler.active_count(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // MaterializedViewRewriter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rewriter_exact_match() {
+        let mut rewriter = MaterializedViewRewriter::new();
+        rewriter.register_view(MaterializedViewSignature {
+            view_name: "sales_summary".into(),
+            source_tables: vec!["sales".into()],
+            group_by_columns: vec!["region".into()],
+            aggregate_columns: vec!["total_amount".into()],
+            filter_columns: vec![],
+            is_fresh: true,
+        });
+
+        let result = rewriter.try_rewrite(
+            &["sales".into()],
+            &["region".into()],
+            &["total_amount".into()],
+        );
+        assert!(result.rewritten);
+        assert_eq!(result.rewrite_target, Some("sales_summary".into()));
+        assert!(result.estimated_speedup > 1.0);
+    }
+
+    #[test]
+    fn test_rewriter_stale_view_skipped() {
+        let mut rewriter = MaterializedViewRewriter::new();
+        rewriter.register_view(MaterializedViewSignature {
+            view_name: "stale_view".into(),
+            source_tables: vec!["orders".into()],
+            group_by_columns: vec!["status".into()],
+            aggregate_columns: vec!["count".into()],
+            filter_columns: vec![],
+            is_fresh: false,
+        });
+
+        let result = rewriter.try_rewrite(
+            &["orders".into()],
+            &["status".into()],
+            &["count".into()],
+        );
+        assert!(!result.rewritten);
+    }
+
+    #[test]
+    fn test_rewriter_no_match() {
+        let rewriter = MaterializedViewRewriter::new();
+        let result = rewriter.try_rewrite(
+            &["unknown_table".into()],
+            &["col".into()],
+            &["agg".into()],
+        );
+        assert!(!result.rewritten);
+        assert_eq!(result.estimated_speedup, 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // CascadeRefreshExecutor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cascade_refresh_plan() {
+        let mut graph = ViewDependencyGraph::new();
+        graph.add_view("view_a", &["base_table".into()]);
+        graph.add_view("view_b", &["view_a".into()]);
+        graph.add_view("view_c", &["view_b".into()]);
+
+        let executor = CascadeRefreshExecutor::plan(&graph, "base_table");
+        let order = executor.refresh_order();
+        // view_a depends on base_table, view_b on view_a, view_c on view_b
+        assert!(!order.is_empty());
+        assert!(order.contains(&"view_a".to_string()));
+    }
+
+    #[test]
+    fn test_cascade_refresh_stats() {
+        let graph = ViewDependencyGraph::new();
+        let mut executor = CascadeRefreshExecutor::plan(&graph, "table_x");
+
+        executor.record_refresh("v1", 1000);
+        executor.record_refresh("v2", 500);
+        executor.record_skip("v3");
+        executor.record_error("v4", "timeout");
+
+        let stats = executor.stats();
+        assert_eq!(stats.views_refreshed, 2);
+        assert_eq!(stats.total_rows_refreshed, 1500);
+        assert_eq!(stats.views_skipped, 1);
+        assert_eq!(stats.errors.len(), 1);
     }
 }
