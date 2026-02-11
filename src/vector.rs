@@ -1560,6 +1560,364 @@ impl VectorIndexManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// IVF-PQ Combined Index
+// ---------------------------------------------------------------------------
+
+/// Combined IVF + Product Quantization index for memory-efficient ANN search.
+///
+/// Vectors are partitioned into clusters via IVF, then each vector is
+/// compressed using Product Quantization. This enables searching over
+/// millions of vectors with significantly reduced memory usage.
+#[derive(Debug, Clone)]
+pub struct IvfPqIndex {
+    centroids: Vec<Vec<f32>>,
+    /// Per-cluster: list of (original_id, pq_code) pairs.
+    clusters: Vec<Vec<(usize, Vec<u8>)>>,
+    pq: ProductQuantizer,
+    metric: DistanceMetric,
+    num_clusters: usize,
+    next_id: usize,
+}
+
+impl IvfPqIndex {
+    /// Create a new IVF-PQ index.
+    pub fn new(
+        num_clusters: usize,
+        dimensions: usize,
+        num_subspaces: usize,
+        bits_per_code: usize,
+        metric: DistanceMetric,
+    ) -> Self {
+        Self {
+            centroids: Vec::new(),
+            clusters: Vec::new(),
+            pq: ProductQuantizer::new(dimensions, num_subspaces, bits_per_code),
+            metric,
+            num_clusters,
+            next_id: 0,
+        }
+    }
+
+    /// Train both the IVF centroids and PQ codebooks from training vectors.
+    pub fn train(&mut self, vectors: &[Vec<f32>]) {
+        if vectors.is_empty() || self.num_clusters == 0 {
+            return;
+        }
+        let k = self.num_clusters.min(vectors.len());
+        // Train IVF centroids with k-means
+        let mut centroids: Vec<Vec<f32>> = vectors.iter().take(k).cloned().collect();
+        let dim = centroids[0].len();
+
+        for _ in 0..20 {
+            let mut assignments: Vec<Vec<usize>> = vec![Vec::new(); k];
+            for (vi, v) in vectors.iter().enumerate() {
+                let nearest = Self::nearest_centroid(v, &centroids, self.metric);
+                assignments[nearest].push(vi);
+            }
+            for (ci, members) in assignments.iter().enumerate() {
+                if members.is_empty() {
+                    continue;
+                }
+                let mut new_c = vec![0.0f32; dim];
+                for &mi in members {
+                    for (j, val) in vectors[mi].iter().enumerate() {
+                        new_c[j] += val;
+                    }
+                }
+                let count = members.len() as f32;
+                for val in &mut new_c {
+                    *val /= count;
+                }
+                centroids[ci] = new_c;
+            }
+        }
+
+        self.centroids = centroids;
+        self.clusters = vec![Vec::new(); k];
+
+        // Compute residuals and train PQ on them
+        let residuals: Vec<Vec<f32>> = vectors
+            .iter()
+            .map(|v| {
+                let ci = Self::nearest_centroid(v, &self.centroids, self.metric);
+                v.iter()
+                    .zip(self.centroids[ci].iter())
+                    .map(|(a, b)| a - b)
+                    .collect()
+            })
+            .collect();
+        self.pq.train(&residuals);
+    }
+
+    /// Insert a vector into the index.
+    pub fn insert(&mut self, id: usize, vector: &[f32]) {
+        if self.centroids.is_empty() {
+            if self.clusters.is_empty() {
+                self.centroids.push(vector.to_vec());
+                self.clusters.push(Vec::new());
+            }
+        }
+        let ci = Self::nearest_centroid(vector, &self.centroids, self.metric);
+        let residual: Vec<f32> = vector
+            .iter()
+            .zip(self.centroids[ci].iter())
+            .map(|(a, b)| a - b)
+            .collect();
+        let code = self.pq.encode(&residual);
+        self.clusters[ci].push((id, code));
+        self.next_id = self.next_id.max(id + 1);
+    }
+
+    /// Search for k nearest neighbors probing `nprobe` clusters.
+    pub fn search(&self, query: &[f32], k: usize, nprobe: usize) -> Vec<(usize, f32)> {
+        if self.centroids.is_empty() {
+            return Vec::new();
+        }
+        let mut centroid_dists: Vec<(usize, f32)> = self
+            .centroids
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let d = compute_distance_metric(query, c, self.metric).unwrap_or(f32::MAX);
+                (i, d)
+            })
+            .collect();
+        centroid_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let probes = nprobe.min(centroid_dists.len());
+        let mut candidates: Vec<(usize, f32)> = Vec::new();
+        for &(ci, _) in centroid_dists.iter().take(probes) {
+            // Compute residual query for this cluster
+            let residual_query: Vec<f32> = query
+                .iter()
+                .zip(self.centroids[ci].iter())
+                .map(|(a, b)| a - b)
+                .collect();
+            for (id, code) in &self.clusters[ci] {
+                let d = self.pq.asymmetric_distance(&residual_query, code);
+                candidates.push((*id, d));
+            }
+        }
+        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(k);
+        candidates
+    }
+
+    fn nearest_centroid(vector: &[f32], centroids: &[Vec<f32>], metric: DistanceMetric) -> usize {
+        centroids
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let d = compute_distance_metric(vector, c, metric).unwrap_or(f32::MAX);
+                (i, d)
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+}
+
+impl VectorIndex for IvfPqIndex {
+    fn search_knn(&self, query: &[f32], k: usize) -> Result<Vec<(usize, f32)>> {
+        let nprobe = (self.num_clusters as f64).sqrt().ceil() as usize;
+        Ok(self.search(query, k, nprobe.max(1)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VECTOR_SEARCH SQL function support
+// ---------------------------------------------------------------------------
+
+/// Configuration for a VECTOR_SEARCH SQL function call.
+#[derive(Debug, Clone)]
+pub struct VectorSearchConfig {
+    pub table_name: String,
+    pub column_name: String,
+    pub query_vector: Vec<f32>,
+    pub k: usize,
+    pub metric: DistanceMetric,
+    pub nprobe: Option<usize>,
+    pub ef_search: Option<usize>,
+}
+
+/// Result of a vector search operation, suitable for returning as SQL rows.
+#[derive(Debug, Clone)]
+pub struct VectorSearchResult {
+    pub row_indices: Vec<usize>,
+    pub distances: Vec<f32>,
+}
+
+/// Executes a vector search against an Arrow column using the best available index.
+pub fn execute_vector_search(
+    vectors: &ArrayRef,
+    config: &VectorSearchConfig,
+    index: Option<&dyn VectorIndex>,
+) -> Result<VectorSearchResult> {
+    if let Some(idx) = index {
+        // Use the pre-built index for fast ANN search
+        let results = idx.search_knn(&config.query_vector, config.k)?;
+        Ok(VectorSearchResult {
+            row_indices: results.iter().map(|(i, _)| *i).collect(),
+            distances: results.iter().map(|(_, d)| *d).collect(),
+        })
+    } else {
+        // Fall back to brute-force search on the Arrow column
+        let knn = VectorKnnSearch::search(vectors, &config.query_vector, config.k, config.metric)?;
+        Ok(VectorSearchResult {
+            row_indices: knn.indices,
+            distances: knn.distances,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vector Search Optimizer Rule
+// ---------------------------------------------------------------------------
+
+/// Optimizer hint indicating a vector search can be pushed below filters.
+///
+/// When the optimizer detects a VECTOR_SEARCH function followed by
+/// scalar filters, this structure captures the pushdown opportunity.
+#[derive(Debug, Clone)]
+pub struct VectorSearchPushdown {
+    /// The original vector search configuration.
+    pub search_config: VectorSearchConfig,
+    /// Scalar filter predicates to apply after vector search.
+    pub post_filters: Vec<String>,
+    /// Whether an HNSW index is available for the target column.
+    pub has_index: bool,
+    /// Estimated cost reduction from using the index vs brute-force.
+    pub estimated_speedup: f64,
+}
+
+impl VectorSearchPushdown {
+    /// Determine if a vector search pushdown is beneficial.
+    pub fn should_pushdown(&self) -> bool {
+        self.has_index && self.estimated_speedup > 1.5
+    }
+
+    /// Estimate the speedup factor for using an index.
+    pub fn estimate_speedup(num_vectors: usize, k: usize, has_hnsw: bool) -> f64 {
+        if !has_hnsw || num_vectors < 1_000 {
+            return 1.0;
+        }
+        // HNSW search is O(log n) vs O(n) for brute-force
+        let brute_force_ops = num_vectors as f64;
+        let hnsw_ops = (num_vectors as f64).ln() * k as f64 * 50.0; // ef_search factor
+        brute_force_ops / hnsw_ops
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parquet Metadata Persistence for HNSW
+// ---------------------------------------------------------------------------
+
+/// Key used to store HNSW index data in Parquet file metadata.
+pub const HNSW_PARQUET_META_KEY: &str = "blaze.hnsw.index";
+/// Key for HNSW index configuration in Parquet metadata.
+pub const HNSW_PARQUET_CONFIG_KEY: &str = "blaze.hnsw.config";
+
+/// Serialize HNSW index configuration to a JSON string for Parquet metadata.
+pub fn serialize_hnsw_config(config: &HnswConfig, metric: DistanceMetric) -> String {
+    format!(
+        r#"{{"m":{},"m_max":{},"ef_construction":{},"ef_search":{},"ml":{},"metric":{}}}"#,
+        config.m,
+        config.m_max,
+        config.ef_construction,
+        config.ef_search,
+        config.ml,
+        metric as u8,
+    )
+}
+
+/// Save an HNSW index to Parquet key-value metadata.
+///
+/// Returns the key-value pairs to include in a Parquet file's metadata.
+pub fn hnsw_to_parquet_metadata(
+    index: &HnswIndex,
+    config: &HnswConfig,
+    metric: DistanceMetric,
+) -> Result<Vec<(String, String)>> {
+    let index_bytes = index.serialize()?;
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &index_bytes);
+    let config_json = serialize_hnsw_config(config, metric);
+
+    Ok(vec![
+        (HNSW_PARQUET_META_KEY.to_string(), encoded),
+        (HNSW_PARQUET_CONFIG_KEY.to_string(), config_json),
+    ])
+}
+
+/// Restore an HNSW index from Parquet key-value metadata.
+pub fn hnsw_from_parquet_metadata(
+    metadata: &std::collections::HashMap<String, String>,
+) -> Result<Option<HnswIndex>> {
+    let encoded = match metadata.get(HNSW_PARQUET_META_KEY) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|e| BlazeError::invalid_argument(format!("Invalid HNSW base64 data: {}", e)))?;
+
+    let config = if let Some(config_json) = metadata.get(HNSW_PARQUET_CONFIG_KEY) {
+        parse_hnsw_config(config_json)?
+    } else {
+        HnswConfig::default()
+    };
+
+    let index = HnswIndex::deserialize(&bytes, config)?;
+    Ok(Some(index))
+}
+
+/// Parse HNSW config from a simple JSON string.
+fn parse_hnsw_config(json: &str) -> Result<HnswConfig> {
+    // Simple JSON parsing without serde_json dependency on the config struct
+    let json = json.trim().trim_start_matches('{').trim_end_matches('}');
+    let mut config = HnswConfig::default();
+
+    for part in json.split(',') {
+        let kv: Vec<&str> = part.splitn(2, ':').collect();
+        if kv.len() != 2 {
+            continue;
+        }
+        let key = kv[0].trim().trim_matches('"');
+        let val = kv[1].trim().trim_matches('"');
+        match key {
+            "m" => {
+                if let Ok(v) = val.parse() {
+                    config.m = v;
+                }
+            }
+            "m_max" => {
+                if let Ok(v) = val.parse() {
+                    config.m_max = v;
+                }
+            }
+            "ef_construction" => {
+                if let Ok(v) = val.parse() {
+                    config.ef_construction = v;
+                }
+            }
+            "ef_search" => {
+                if let Ok(v) = val.parse() {
+                    config.ef_search = v;
+                }
+            }
+            "ml" => {
+                if let Ok(v) = val.parse() {
+                    config.ml = v;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(config)
+}
+
+use base64;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2213,5 +2571,144 @@ mod tests {
         assert!(manager.drop_index("idx1"));
         assert_eq!(manager.index_count(), 1);
         assert!(!manager.drop_index("idx1")); // already dropped
+    }
+
+    // -----------------------------------------------------------------------
+    // IVF-PQ Combined Index tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ivfpq_train_and_search() {
+        let vectors: Vec<Vec<f32>> = (0..50)
+            .map(|i| vec![i as f32 * 0.1, i as f32 * 0.2, i as f32 * 0.3, i as f32 * 0.4])
+            .collect();
+        let mut index = IvfPqIndex::new(4, 4, 2, 4, DistanceMetric::L2);
+        index.train(&vectors);
+        for (i, v) in vectors.iter().enumerate() {
+            index.insert(i, v);
+        }
+        let results = index.search(&[0.0, 0.0, 0.0, 0.0], 3, 4);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, 0);
+    }
+
+    #[test]
+    fn test_ivfpq_vector_index_trait() {
+        let vectors: Vec<Vec<f32>> = (0..20)
+            .map(|i| vec![i as f32, i as f32 * 2.0, 0.0, 0.0])
+            .collect();
+        let mut index = IvfPqIndex::new(2, 4, 2, 4, DistanceMetric::L2);
+        index.train(&vectors);
+        for (i, v) in vectors.iter().enumerate() {
+            index.insert(i, v);
+        }
+        let results = VectorIndex::search_knn(&index, &[0.0, 0.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // VECTOR_SEARCH function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_vector_search_brute_force() {
+        let vecs = vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![10.0, 10.0]];
+        let arr = VectorOps::build_vector_array(&vecs, 2).unwrap();
+        let config = VectorSearchConfig {
+            table_name: "test".to_string(),
+            column_name: "embedding".to_string(),
+            query_vector: vec![0.0, 0.0],
+            k: 2,
+            metric: DistanceMetric::L2,
+            nprobe: None,
+            ef_search: None,
+        };
+        let result = execute_vector_search(&arr, &config, None).unwrap();
+        assert_eq!(result.row_indices.len(), 2);
+        assert_eq!(result.row_indices[0], 0);
+    }
+
+    #[test]
+    fn test_vector_search_with_index() {
+        let mut hnsw = HnswIndex::with_defaults(DistanceMetric::L2);
+        hnsw.insert(vec![0.0, 0.0]).unwrap();
+        hnsw.insert(vec![1.0, 0.0]).unwrap();
+        hnsw.insert(vec![10.0, 10.0]).unwrap();
+
+        let vecs = vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![10.0, 10.0]];
+        let arr = VectorOps::build_vector_array(&vecs, 2).unwrap();
+        let config = VectorSearchConfig {
+            table_name: "test".to_string(),
+            column_name: "embedding".to_string(),
+            query_vector: vec![0.0, 0.0],
+            k: 2,
+            metric: DistanceMetric::L2,
+            nprobe: None,
+            ef_search: None,
+        };
+        let result = execute_vector_search(&arr, &config, Some(&hnsw)).unwrap();
+        assert_eq!(result.row_indices.len(), 2);
+        assert_eq!(result.row_indices[0], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Vector Search Pushdown tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pushdown_should_use_index() {
+        let speedup = VectorSearchPushdown::estimate_speedup(1_000_000, 10, true);
+        assert!(speedup > 1.5);
+    }
+
+    #[test]
+    fn test_pushdown_small_dataset_no_benefit() {
+        let speedup = VectorSearchPushdown::estimate_speedup(500, 10, true);
+        assert!((speedup - 1.0).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Parquet Metadata Persistence tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hnsw_parquet_roundtrip() {
+        let mut index = HnswIndex::with_defaults(DistanceMetric::L2);
+        index.insert(vec![1.0, 2.0]).unwrap();
+        index.insert(vec![3.0, 4.0]).unwrap();
+
+        let config = HnswConfig::default();
+        let meta = hnsw_to_parquet_metadata(&index, &config, DistanceMetric::L2).unwrap();
+
+        let meta_map: std::collections::HashMap<String, String> = meta.into_iter().collect();
+        let restored = hnsw_from_parquet_metadata(&meta_map).unwrap().unwrap();
+
+        assert_eq!(restored.len(), 2);
+        let results = restored.search_knn(&[1.0, 2.0], 1).unwrap();
+        assert!((results[0].1 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_hnsw_config_serialization() {
+        let config = HnswConfig {
+            m: 32,
+            m_max: 32,
+            ef_construction: 400,
+            ef_search: 100,
+            ..HnswConfig::default()
+        };
+        let json = serialize_hnsw_config(&config, DistanceMetric::Cosine);
+        let parsed = parse_hnsw_config(&json).unwrap();
+        assert_eq!(parsed.m, 32);
+        assert_eq!(parsed.ef_construction, 400);
+        assert_eq!(parsed.ef_search, 100);
+    }
+
+    #[test]
+    fn test_no_hnsw_in_metadata() {
+        let meta = std::collections::HashMap::new();
+        let result = hnsw_from_parquet_metadata(&meta).unwrap();
+        assert!(result.is_none());
     }
 }
