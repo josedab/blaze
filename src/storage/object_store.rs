@@ -1426,6 +1426,464 @@ impl CloudRouter {
 }
 
 // ---------------------------------------------------------------------------
+// HivePartitionDiscovery
+// ---------------------------------------------------------------------------
+
+/// Enhanced Hive-style partition discovery with recursive listing and schema inference.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct HivePartitionDiscovery {
+    store: Arc<dyn ObjectStoreProvider>,
+    partition_columns: Vec<String>,
+    file_extension: String,
+}
+
+#[allow(dead_code)]
+impl HivePartitionDiscovery {
+    pub fn new(store: Arc<dyn ObjectStoreProvider>, file_extension: &str) -> Self {
+        Self {
+            store,
+            partition_columns: Vec::new(),
+            file_extension: file_extension.to_string(),
+        }
+    }
+
+    /// Discover partitions by listing the base path and parsing Hive-style dirs.
+    pub fn discover(&self, base_path: &ObjectPath) -> Result<Vec<DiscoveredPartition>> {
+        let entries = self.store.list(base_path)?;
+        let mut partitions = Vec::new();
+
+        for entry in &entries {
+            let relative = entry.path.key.trim_start_matches('/');
+            let parts = PartitionDiscovery::parse_partition_path(relative);
+            if !parts.is_empty() || relative.ends_with(&self.file_extension) {
+                partitions.push(DiscoveredPartition {
+                    path: ObjectPath {
+                        scheme: base_path.scheme.clone(),
+                        bucket: base_path.bucket.clone(),
+                        key: if base_path.key.is_empty() {
+                            relative.to_string()
+                        } else {
+                            format!("{}/{}", base_path.key, relative)
+                        },
+                    },
+                    partition_values: parts.into_iter().collect(),
+                    size_bytes: entry.size as u64,
+                });
+            }
+        }
+
+        Ok(partitions)
+    }
+
+    /// Discover partitions and infer the partition schema from discovered values.
+    pub fn discover_with_schema(
+        &self,
+        base_path: &ObjectPath,
+    ) -> Result<(Vec<DiscoveredPartition>, PartitionSchema)> {
+        let partitions = self.discover(base_path)?;
+        let schema = PartitionSchema::infer_from_partitions(&partitions);
+        Ok((partitions, schema))
+    }
+}
+
+/// A discovered partition with its path and extracted key=value pairs.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct DiscoveredPartition {
+    pub path: ObjectPath,
+    pub partition_values: HashMap<String, String>,
+    pub size_bytes: u64,
+}
+
+/// Schema inferred from partition column values.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PartitionSchema {
+    pub columns: Vec<PartitionColumnInfo>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PartitionColumnInfo {
+    pub name: String,
+    pub distinct_values: Vec<String>,
+    pub inferred_type: PartitionDataType,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PartitionDataType {
+    Integer,
+    Date,
+    String,
+}
+
+#[allow(dead_code)]
+impl PartitionSchema {
+    pub fn infer_from_partitions(partitions: &[DiscoveredPartition]) -> Self {
+        let mut column_values: HashMap<String, Vec<String>> = HashMap::new();
+
+        for partition in partitions {
+            for (col, val) in &partition.partition_values {
+                column_values
+                    .entry(col.clone())
+                    .or_default()
+                    .push(val.clone());
+            }
+        }
+
+        let columns = column_values
+            .into_iter()
+            .map(|(name, mut values)| {
+                values.sort();
+                values.dedup();
+                let inferred_type = Self::infer_type(&values);
+                PartitionColumnInfo {
+                    name,
+                    distinct_values: values,
+                    inferred_type,
+                }
+            })
+            .collect();
+
+        Self { columns }
+    }
+
+    fn infer_type(values: &[String]) -> PartitionDataType {
+        if values.iter().all(|v| v.parse::<i64>().is_ok()) {
+            PartitionDataType::Integer
+        } else if values.iter().all(|v| {
+            v.len() == 10 && v.chars().nth(4) == Some('-') && v.chars().nth(7) == Some('-')
+        }) {
+            PartitionDataType::Date
+        } else {
+            PartitionDataType::String
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RangeReader
+// ---------------------------------------------------------------------------
+
+/// Reads byte ranges from cloud storage for efficient large file access.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct RangeReader {
+    store: Arc<dyn ObjectStoreProvider>,
+    path: ObjectPath,
+    file_size: u64,
+    range_size: usize,
+}
+
+#[allow(dead_code)]
+impl RangeReader {
+    pub fn new(
+        store: Arc<dyn ObjectStoreProvider>,
+        path: ObjectPath,
+        range_size: usize,
+    ) -> Result<Self> {
+        let meta = store.head(&path)?;
+        Ok(Self {
+            store,
+            path,
+            file_size: meta.size as u64,
+            range_size,
+        })
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    /// Calculate the ranges needed to read the entire file.
+    pub fn compute_ranges(&self) -> Vec<ByteRange> {
+        let mut ranges = Vec::new();
+        let mut offset = 0u64;
+        while offset < self.file_size {
+            let length = std::cmp::min(self.range_size as u64, self.file_size - offset);
+            ranges.push(ByteRange { offset, length });
+            offset += length;
+        }
+        ranges
+    }
+
+    /// Read a specific byte range from the file.
+    pub fn read_range(&self, range: &ByteRange) -> Result<Vec<u8>> {
+        let full = self.store.get(&self.path)?;
+        let start = range.offset as usize;
+        let end = std::cmp::min(start + range.length as usize, full.len());
+        if start >= full.len() {
+            return Ok(Vec::new());
+        }
+        Ok(full[start..end].to_vec())
+    }
+
+    /// Read all ranges and concatenate into a single buffer.
+    pub fn read_all(&self) -> Result<Vec<u8>> {
+        let data = self.store.get(&self.path)?;
+        Ok(data.to_vec())
+    }
+}
+
+/// A byte range within a file.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct ByteRange {
+    pub offset: u64,
+    pub length: u64,
+}
+
+// ---------------------------------------------------------------------------
+// CredentialRefreshManager
+// ---------------------------------------------------------------------------
+
+/// Manages credential lifecycle with expiry tracking and auto-refresh.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct CredentialRefreshManager {
+    chain: CredentialChain,
+    current: Mutex<Option<CachedCredential>>,
+    refresh_before_expiry_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCredential {
+    credential: ResolvedCredential,
+    resolved_at: std::time::Instant,
+}
+
+#[allow(dead_code)]
+impl CredentialRefreshManager {
+    pub fn new(chain: CredentialChain) -> Self {
+        Self {
+            chain,
+            current: Mutex::new(None),
+            refresh_before_expiry_secs: 300, // refresh 5 min before expiry
+        }
+    }
+
+    pub fn with_refresh_buffer(mut self, secs: u64) -> Self {
+        self.refresh_before_expiry_secs = secs;
+        self
+    }
+
+    /// Get a valid credential, refreshing if expired or about to expire.
+    pub fn get_credential(&self) -> Result<ResolvedCredential> {
+        let mut cached = self.current.lock();
+
+        if let Some(ref c) = *cached {
+            if !self.is_expired(c) {
+                return Ok(c.credential.clone());
+            }
+        }
+
+        // Refresh
+        let credential = self.chain.resolve()?;
+        *cached = Some(CachedCredential {
+            credential: credential.clone(),
+            resolved_at: std::time::Instant::now(),
+        });
+
+        Ok(credential)
+    }
+
+    fn is_expired(&self, cached: &CachedCredential) -> bool {
+        match cached.credential.expiry {
+            Some(expiry_epoch) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                now + self.refresh_before_expiry_secs >= expiry_epoch
+            }
+            None => {
+                // No expiry set - refresh every hour as a safety measure
+                cached.resolved_at.elapsed().as_secs() > 3600
+            }
+        }
+    }
+
+    /// Force a credential refresh.
+    pub fn force_refresh(&self) -> Result<ResolvedCredential> {
+        let credential = self.chain.resolve()?;
+        let mut cached = self.current.lock();
+        *cached = Some(CachedCredential {
+            credential: credential.clone(),
+            resolved_at: std::time::Instant::now(),
+        });
+        Ok(credential)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CloudStorageTableFactory
+// ---------------------------------------------------------------------------
+
+/// Factory for creating ObjectStoreTables from cloud storage URIs.
+/// Handles URI parsing, credential resolution, and schema inference.
+#[allow(dead_code)]
+pub struct CloudStorageTableFactory {
+    registry: Arc<ObjectStoreRegistry>,
+    metadata_cache: Arc<Mutex<MetadataCache>>,
+    credential_manager: Option<Arc<CredentialRefreshManager>>,
+}
+
+impl fmt::Debug for CloudStorageTableFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloudStorageTableFactory")
+            .field("registry", &self.registry)
+            .field("credential_manager", &self.credential_manager)
+            .finish()
+    }
+}
+
+#[allow(dead_code)]
+impl CloudStorageTableFactory {
+    pub fn new(registry: Arc<ObjectStoreRegistry>) -> Self {
+        Self {
+            registry,
+            metadata_cache: Arc::new(Mutex::new(MetadataCache::new(300, 10_000))),
+            credential_manager: None,
+        }
+    }
+
+    pub fn with_credentials(mut self, manager: Arc<CredentialRefreshManager>) -> Self {
+        self.credential_manager = Some(manager);
+        self
+    }
+
+    /// Create a table from a cloud URI, inferring schema from the Parquet file.
+    pub fn create_table(&self, uri: &str) -> Result<ObjectStoreTable> {
+        let path = ObjectPath::parse(uri)?;
+        let store = self.registry.get(&path.scheme).ok_or_else(|| {
+            BlazeError::invalid_argument(format!(
+                "No object store registered for scheme '{}'",
+                path.scheme
+            ))
+        })?;
+
+        // Read the file to infer schema from Parquet metadata
+        let data = store.get(&path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data)
+            .map_err(|e| BlazeError::execution(format!("Failed to read Parquet schema: {e}")))?;
+
+        let arrow_schema = reader.schema().clone();
+        let fields: Vec<crate::types::Field> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                let dt = crate::types::DataType::from_arrow(f.data_type())
+                    .unwrap_or(crate::types::DataType::Utf8);
+                crate::types::Field::new(f.name(), dt, f.is_nullable())
+            })
+            .collect();
+        let schema = Schema::new(fields);
+
+        Ok(ObjectStoreTable::new(path, schema, store))
+    }
+
+    /// Create a partitioned table from a cloud URI prefix.
+    pub fn create_partitioned_table(
+        &self,
+        base_uri: &str,
+        file_extension: &str,
+    ) -> Result<PartitionedObjectStoreTable> {
+        let base_path = ObjectPath::parse(base_uri)?;
+        let store = self.registry.get(&base_path.scheme).ok_or_else(|| {
+            BlazeError::invalid_argument(format!(
+                "No object store registered for scheme '{}'",
+                base_path.scheme
+            ))
+        })?;
+
+        let discovery = HivePartitionDiscovery::new(store.clone(), file_extension);
+        let (partitions, partition_schema) = discovery.discover_with_schema(&base_path)?;
+
+        Ok(PartitionedObjectStoreTable {
+            base_path,
+            store,
+            partitions,
+            partition_schema,
+            data_schema: None,
+        })
+    }
+}
+
+/// A table backed by partitioned files in cloud storage.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct PartitionedObjectStoreTable {
+    base_path: ObjectPath,
+    store: Arc<dyn ObjectStoreProvider>,
+    partitions: Vec<DiscoveredPartition>,
+    partition_schema: PartitionSchema,
+    data_schema: Option<Schema>,
+}
+
+#[allow(dead_code)]
+impl PartitionedObjectStoreTable {
+    pub fn partitions(&self) -> &[DiscoveredPartition] {
+        &self.partitions
+    }
+
+    pub fn partition_schema(&self) -> &PartitionSchema {
+        &self.partition_schema
+    }
+
+    pub fn num_partitions(&self) -> usize {
+        self.partitions.len()
+    }
+
+    /// Total data size across all partitions.
+    pub fn total_size_bytes(&self) -> u64 {
+        self.partitions.iter().map(|p| p.size_bytes).sum()
+    }
+
+    /// Prune partitions based on predicates, returning only matching ones.
+    pub fn prune_partitions(
+        &self,
+        predicates: &[PartitionPredicate],
+    ) -> Vec<&DiscoveredPartition> {
+        self.partitions
+            .iter()
+            .filter(|partition| {
+                predicates.iter().all(|pred| match pred {
+                    PartitionPredicate::Eq(col, val) => {
+                        partition.partition_values.get(col).map_or(true, |v| v == val)
+                    }
+                    PartitionPredicate::NotEq(col, val) => {
+                        partition
+                            .partition_values
+                            .get(col)
+                            .map_or(true, |v| v != val)
+                    }
+                    PartitionPredicate::In(col, vals) => {
+                        partition
+                            .partition_values
+                            .get(col)
+                            .map_or(true, |v| vals.contains(v))
+                    }
+                    PartitionPredicate::Gt(col, val) => {
+                        partition
+                            .partition_values
+                            .get(col)
+                            .map_or(true, |v| v.as_str() > val.as_str())
+                    }
+                    PartitionPredicate::Lt(col, val) => {
+                        partition
+                            .partition_values
+                            .get(col)
+                            .map_or(true, |v| v.as_str() < val.as_str())
+                    }
+                })
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2189,5 +2647,138 @@ mod tests {
         let cost = router.estimate_transfer_cost("us-east-1", "us-central1", 1_073_741_824);
         // 1 GB cross-cloud at $0.09/GB
         assert!((cost - 0.09).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_partition_schema_inference() {
+        let partitions = vec![
+            DiscoveredPartition {
+                path: ObjectPath::parse("s3://bucket/year=2024/month=01/data.parquet").unwrap(),
+                partition_values: HashMap::from([
+                    ("year".to_string(), "2024".to_string()),
+                    ("month".to_string(), "01".to_string()),
+                ]),
+                size_bytes: 1024,
+            },
+            DiscoveredPartition {
+                path: ObjectPath::parse("s3://bucket/year=2024/month=02/data.parquet").unwrap(),
+                partition_values: HashMap::from([
+                    ("year".to_string(), "2024".to_string()),
+                    ("month".to_string(), "02".to_string()),
+                ]),
+                size_bytes: 2048,
+            },
+            DiscoveredPartition {
+                path: ObjectPath::parse("s3://bucket/year=2023/month=12/data.parquet").unwrap(),
+                partition_values: HashMap::from([
+                    ("year".to_string(), "2023".to_string()),
+                    ("month".to_string(), "12".to_string()),
+                ]),
+                size_bytes: 512,
+            },
+        ];
+
+        let schema = PartitionSchema::infer_from_partitions(&partitions);
+        assert_eq!(schema.columns.len(), 2);
+
+        let year_col = schema.columns.iter().find(|c| c.name == "year").unwrap();
+        assert_eq!(year_col.inferred_type, PartitionDataType::Integer);
+        assert!(year_col.distinct_values.contains(&"2023".to_string()));
+        assert!(year_col.distinct_values.contains(&"2024".to_string()));
+
+        let month_col = schema.columns.iter().find(|c| c.name == "month").unwrap();
+        assert_eq!(month_col.inferred_type, PartitionDataType::Integer);
+    }
+
+    #[test]
+    fn test_byte_range_computation() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("range_test.txt");
+        fs::write(&file_path, "a]".repeat(50)).unwrap(); // 100 bytes
+
+        let store: Arc<dyn ObjectStoreProvider> = Arc::new(LocalFileSystemStore);
+        let path = ObjectPath {
+            scheme: "file".into(),
+            bucket: String::new(),
+            key: file_path.to_string_lossy().to_string(),
+        };
+
+        let reader = RangeReader::new(store, path, 30).unwrap();
+        assert_eq!(reader.file_size(), 100);
+
+        let ranges = reader.compute_ranges();
+        assert_eq!(ranges.len(), 4); // 30 + 30 + 30 + 10
+        assert_eq!(ranges[0].offset, 0);
+        assert_eq!(ranges[0].length, 30);
+        assert_eq!(ranges[3].offset, 90);
+        assert_eq!(ranges[3].length, 10);
+    }
+
+    #[test]
+    fn test_credential_refresh_manager() {
+        let chain = CredentialChain::new().with_static("test-key", "test-secret");
+        let manager = CredentialRefreshManager::new(chain);
+
+        let cred = manager.get_credential().unwrap();
+        assert_eq!(cred.access_key, "test-key");
+        assert_eq!(cred.secret_key, "test-secret");
+
+        // Should return cached credential
+        let cred2 = manager.get_credential().unwrap();
+        assert_eq!(cred2.access_key, "test-key");
+
+        // Force refresh should also work
+        let cred3 = manager.force_refresh().unwrap();
+        assert_eq!(cred3.access_key, "test-key");
+    }
+
+    #[test]
+    fn test_cloud_storage_table_factory() {
+        let dir = TempDir::new().unwrap();
+        let parquet_path = write_test_parquet(dir.path());
+
+        let registry = Arc::new(ObjectStoreRegistry::new());
+        let factory = CloudStorageTableFactory::new(registry);
+
+        let uri = format!("file://{}", parquet_path.to_string_lossy());
+        let table = factory.create_table(&uri).unwrap();
+
+        let batches = table.scan(None, &[], None).unwrap();
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 5);
+    }
+
+    #[test]
+    fn test_partitioned_table_pruning() {
+        let partitions = vec![
+            DiscoveredPartition {
+                path: ObjectPath::parse("s3://b/year=2024/data.parquet").unwrap(),
+                partition_values: HashMap::from([("year".to_string(), "2024".to_string())]),
+                size_bytes: 100,
+            },
+            DiscoveredPartition {
+                path: ObjectPath::parse("s3://b/year=2023/data.parquet").unwrap(),
+                partition_values: HashMap::from([("year".to_string(), "2023".to_string())]),
+                size_bytes: 200,
+            },
+        ];
+
+        let table = PartitionedObjectStoreTable {
+            base_path: ObjectPath::parse("s3://b/").unwrap(),
+            store: Arc::new(LocalFileSystemStore),
+            partitions,
+            partition_schema: PartitionSchema { columns: vec![] },
+            data_schema: None,
+        };
+
+        let pruned = table.prune_partitions(&[PartitionPredicate::Eq(
+            "year".into(),
+            "2024".into(),
+        )]);
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].partition_values.get("year").unwrap(), "2024");
+
+        assert_eq!(table.total_size_bytes(), 300);
+        assert_eq!(table.num_partitions(), 2);
     }
 }
