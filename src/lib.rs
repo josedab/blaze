@@ -142,6 +142,7 @@ pub mod catalog;
 pub mod dataframe;
 pub mod error;
 pub mod executor;
+pub mod fts;
 pub mod ingestion;
 pub mod ipc;
 pub mod jit;
