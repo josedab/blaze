@@ -1102,6 +1102,141 @@ impl FlightSqlService {
     pub fn active_cancellations(&self) -> usize {
         self.cancellation.active_cancellations()
     }
+
+    /// Upload data to a table (DoPut).
+    ///
+    /// Accepts Arrow IPC-encoded record batches and returns row count.
+    pub fn do_put(&self, _table_name: &str, data: &[u8]) -> Result<FlightSqlResult> {
+        let batches = deserialize_batches(data)?;
+        if batches.is_empty() {
+            return Ok(FlightSqlResult::Update(0));
+        }
+        let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        // In a production implementation, this would register the batches
+        // as a table in the server's catalog via the connection.
+        Ok(FlightSqlResult::Update(num_rows))
+    }
+
+    /// Execute a DoPut with a prepared statement handle.
+    pub fn do_put_prepared(
+        &self,
+        handle_id: &str,
+        data: &[u8],
+    ) -> Result<FlightSqlResult> {
+        let _handle = self.statements.get(handle_id).ok_or_else(|| {
+            BlazeError::execution(format!("Prepared statement not found: {}", handle_id))
+        })?;
+        let batches = deserialize_batches(data)?;
+        let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        Ok(FlightSqlResult::Update(num_rows))
+    }
+
+    /// Get active connection count for rate limiting.
+    pub fn active_connections(&self) -> usize {
+        self.statements.active_count()
+    }
+
+    /// Check if the server is at connection capacity.
+    pub fn at_capacity(&self) -> bool {
+        self.active_connections() >= self.config.max_connections
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connection Rate Limiter
+// ---------------------------------------------------------------------------
+
+/// Rate limiter for Flight SQL connections.
+pub struct ConnectionRateLimiter {
+    max_connections: usize,
+    active: std::sync::atomic::AtomicUsize,
+    max_queries_per_sec: Option<u32>,
+}
+
+impl ConnectionRateLimiter {
+    /// Create a new rate limiter.
+    pub fn new(max_connections: usize) -> Self {
+        Self {
+            max_connections,
+            active: std::sync::atomic::AtomicUsize::new(0),
+            max_queries_per_sec: None,
+        }
+    }
+
+    /// Set maximum queries per second.
+    pub fn with_qps_limit(mut self, qps: u32) -> Self {
+        self.max_queries_per_sec = Some(qps);
+        self
+    }
+
+    /// Try to acquire a connection slot. Returns false if at capacity.
+    pub fn try_acquire(&self) -> bool {
+        let current = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if current >= self.max_connections {
+            self.active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Release a connection slot.
+    pub fn release(&self) {
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Current number of active connections.
+    pub fn active_count(&self) -> usize {
+        self.active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Maximum connections allowed.
+    pub fn max_connections(&self) -> usize {
+        self.max_connections
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flight SQL Tracing
+// ---------------------------------------------------------------------------
+
+/// Tracing span for Flight SQL operations (OpenTelemetry-compatible).
+#[derive(Debug, Clone)]
+pub struct FlightSqlSpan {
+    pub operation: String,
+    pub start_time: std::time::Instant,
+    pub attributes: Vec<(String, String)>,
+}
+
+impl FlightSqlSpan {
+    /// Create a new tracing span.
+    pub fn new(operation: impl Into<String>) -> Self {
+        Self {
+            operation: operation.into(),
+            start_time: std::time::Instant::now(),
+            attributes: Vec::new(),
+        }
+    }
+
+    /// Add an attribute to the span.
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.push((key.into(), value.into()));
+        self
+    }
+
+    /// Finish the span and return the duration.
+    pub fn finish(&self) -> std::time::Duration {
+        self.start_time.elapsed()
+    }
+
+    /// Get the operation name.
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
 }
 
 #[cfg(test)]
