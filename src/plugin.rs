@@ -1076,6 +1076,193 @@ impl PluginMarketplace {
     }
 }
 
+// ---------------------------------------------------------------------------
+// C ABI Definition for Plugin Interface
+// ---------------------------------------------------------------------------
+
+/// Current Plugin C ABI version.
+pub const PLUGIN_C_ABI_VERSION: u32 = 1;
+
+/// C ABI function signatures for plugin entry points.
+///
+/// Plugins compiled as shared libraries must export these symbols:
+/// - `blaze_plugin_abi_version() -> u32`
+/// - `blaze_plugin_create() -> *mut c_void`
+/// - `blaze_plugin_destroy(ptr: *mut c_void)`
+/// - `blaze_plugin_name(ptr: *const c_void) -> *const c_char`
+/// - `blaze_plugin_version(ptr: *const c_void) -> *const c_char`
+#[derive(Debug, Clone)]
+pub struct CAbiDefinition {
+    pub abi_version: u32,
+    pub entry_symbol: String,
+    pub create_symbol: String,
+    pub destroy_symbol: String,
+}
+
+impl Default for CAbiDefinition {
+    fn default() -> Self {
+        Self {
+            abi_version: PLUGIN_C_ABI_VERSION,
+            entry_symbol: "blaze_plugin_abi_version".to_string(),
+            create_symbol: "blaze_plugin_create".to_string(),
+            destroy_symbol: "blaze_plugin_destroy".to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TOML Manifest Serialization
+// ---------------------------------------------------------------------------
+
+impl PluginManifest {
+    /// Serialize to TOML format string.
+    pub fn to_toml(&self) -> String {
+        let mut output = String::new();
+        output.push_str("[plugin]\n");
+        output.push_str(&format!("name = \"{}\"\n", self.name));
+        output.push_str(&format!("version = \"{}\"\n", self.version));
+        if !self.description.is_empty() {
+            output.push_str(&format!("description = \"{}\"\n", self.description));
+        }
+        if !self.author.is_empty() {
+            output.push_str(&format!("author = \"{}\"\n", self.author));
+        }
+        output.push_str(&format!("license = \"{}\"\n", self.license));
+        output.push_str(&format!("min_api_version = {}\n", self.min_api_version));
+        output.push_str(&format!("max_api_version = {}\n", self.max_api_version));
+        if let Some(ref repo) = self.repository {
+            output.push_str(&format!("repository = \"{}\"\n", repo));
+        }
+        if !self.keywords.is_empty() {
+            let kw: Vec<String> = self.keywords.iter().map(|k| format!("\"{}\"", k)).collect();
+            output.push_str(&format!("keywords = [{}]\n", kw.join(", ")));
+        }
+        if !self.capabilities.is_empty() {
+            let caps: Vec<String> = self
+                .capabilities
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect();
+            output.push_str(&format!("capabilities = [{}]\n", caps.join(", ")));
+        }
+        for dep in &self.dependencies {
+            output.push_str(&format!(
+                "\n[[plugin.dependencies]]\nname = \"{}\"\nversion_req = \"{}\"\n",
+                dep.name, dep.version_req
+            ));
+        }
+        output
+    }
+
+    /// Parse from a simple TOML-like string.
+    pub fn from_toml(toml: &str) -> Result<Self> {
+        let mut manifest = PluginManifest::new("", "");
+
+        for line in toml.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"');
+                match key {
+                    "name" => manifest.name = value.to_string(),
+                    "version" => manifest.version = value.to_string(),
+                    "description" => manifest.description = value.to_string(),
+                    "author" => manifest.author = value.to_string(),
+                    "license" => manifest.license = value.to_string(),
+                    "min_api_version" => {
+                        if let Ok(v) = value.parse() {
+                            manifest.min_api_version = v;
+                        }
+                    }
+                    "max_api_version" => {
+                        if let Ok(v) = value.parse() {
+                            manifest.max_api_version = v;
+                        }
+                    }
+                    "repository" => manifest.repository = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+        }
+
+        if manifest.name.is_empty() {
+            return Err(BlazeError::invalid_argument(
+                "Plugin manifest must have a name",
+            ));
+        }
+        if manifest.version.is_empty() {
+            return Err(BlazeError::invalid_argument(
+                "Plugin manifest must have a version",
+            ));
+        }
+
+        Ok(manifest)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dependency Resolver
+// ---------------------------------------------------------------------------
+
+/// Resolves plugin dependencies and determines installation order.
+pub struct DependencyResolver;
+
+impl DependencyResolver {
+    /// Resolve dependencies and return installation order (topological sort).
+    pub fn resolve(manifests: &[PluginManifest]) -> Result<Vec<String>> {
+        let manifest_map: HashMap<&str, &PluginManifest> =
+            manifests.iter().map(|m| (m.name.as_str(), m)).collect();
+
+        let mut in_degree: HashMap<&str, usize> = HashMap::new();
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        for m in manifests {
+            in_degree.entry(m.name.as_str()).or_insert(0);
+            for dep in &m.dependencies {
+                if manifest_map.contains_key(dep.name.as_str()) {
+                    *in_degree.entry(m.name.as_str()).or_insert(0) += 1;
+                    dependents
+                        .entry(dep.name.as_str())
+                        .or_default()
+                        .push(m.name.as_str());
+                }
+            }
+        }
+
+        let mut queue: std::collections::VecDeque<&str> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(&name, _)| name)
+            .collect();
+
+        let mut order = Vec::new();
+        while let Some(name) = queue.pop_front() {
+            order.push(name.to_string());
+            if let Some(deps) = dependents.get(name) {
+                for &dep in deps {
+                    if let Some(deg) = in_degree.get_mut(dep) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        if order.len() != manifests.len() {
+            return Err(BlazeError::invalid_argument(
+                "Circular dependency detected in plugins",
+            ));
+        }
+
+        Ok(order)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
