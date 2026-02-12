@@ -24,7 +24,7 @@ impl JoinOrderOptimizer {
     /// Create a new join order optimizer.
     pub fn new() -> Self {
         Self {
-            max_relations_exhaustive: 10,
+            max_relations_exhaustive: 12,
             use_greedy_fallback: true,
         }
     }
