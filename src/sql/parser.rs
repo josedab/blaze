@@ -49,6 +49,12 @@ pub enum Statement {
     ReleaseSavepoint(String),
     /// ROLLBACK TO SAVEPOINT name
     RollbackToSavepoint(String),
+    /// CREATE MATERIALIZED VIEW
+    CreateMaterializedView(CreateMaterializedView),
+    /// REFRESH MATERIALIZED VIEW
+    RefreshMaterializedView { name: Vec<String> },
+    /// ANALYZE TABLE for statistics collection
+    AnalyzeTable { name: Vec<String> },
 }
 
 /// A SELECT query.
@@ -567,12 +573,30 @@ pub enum CopyDirection {
     To,
 }
 
+/// CREATE MATERIALIZED VIEW statement.
+#[derive(Debug, Clone)]
+pub struct CreateMaterializedView {
+    /// View name
+    pub name: Vec<String>,
+    /// The defining query
+    pub query: Box<Query>,
+}
+
 /// SQL Parser for Blaze.
 pub struct Parser;
 
 impl Parser {
     /// Parse a SQL string into statements.
     pub fn parse(sql: &str) -> Result<Vec<Statement>> {
+        // Handle REFRESH MATERIALIZED VIEW before passing to sqlparser
+        let trimmed = sql.trim();
+        if trimmed.to_uppercase().starts_with("REFRESH MATERIALIZED VIEW") {
+            let name = trimmed["REFRESH MATERIALIZED VIEW".len()..].trim().trim_end_matches(';');
+            return Ok(vec![Statement::RefreshMaterializedView {
+                name: name.split('.').map(|s| s.trim().to_string()).collect(),
+            }]);
+        }
+
         let dialect = GenericDialect {};
         let ast = SqlParser::parse_sql(&dialect, sql)?;
 
@@ -769,6 +793,30 @@ impl Parser {
             sql_ast::Statement::Savepoint { name } => Ok(Statement::Savepoint(name.to_string())),
             sql_ast::Statement::ReleaseSavepoint { name } => {
                 Ok(Statement::ReleaseSavepoint(name.to_string()))
+            }
+            sql_ast::Statement::CreateView {
+                name,
+                query,
+                materialized,
+                ..
+            } => {
+                if materialized {
+                    Ok(Statement::CreateMaterializedView(CreateMaterializedView {
+                        name: Self::convert_object_name(&name),
+                        query: Box::new(Self::convert_query(*query)?),
+                    }))
+                } else {
+                    Err(BlazeError::not_implemented("Non-materialized views"))
+                }
+            }
+            // ANALYZE TABLE (sqlparser parses as ANALYZE)
+            sql_ast::Statement::Analyze {
+                table_name,
+                ..
+            } => {
+                Ok(Statement::AnalyzeTable {
+                    name: Self::convert_object_name(&table_name),
+                })
             }
             _ => Err(BlazeError::not_implemented(format!(
                 "Statement type: {:?}",
