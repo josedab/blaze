@@ -7,9 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use arrow::array::{
-    ArrayRef, Float64Array, Int64Array, StringArray,
-};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
@@ -331,9 +329,8 @@ pub fn json_each_tvf() -> TableFunction {
             .as_str()
             .ok_or_else(|| BlazeError::execution("JSON_EACH: argument must be a string"))?;
 
-        let parsed: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-            BlazeError::execution(format!("JSON_EACH: invalid JSON: {}", e))
-        })?;
+        let parsed: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| BlazeError::execution(format!("JSON_EACH: invalid JSON: {}", e)))?;
 
         match parsed {
             serde_json::Value::Object(obj) => {
@@ -408,9 +405,8 @@ pub fn regexp_matches_tvf() -> TableFunction {
             .as_str()
             .ok_or_else(|| BlazeError::execution("REGEXP_MATCHES: pattern must be a string"))?;
 
-        let re = regex::Regex::new(pattern).map_err(|e| {
-            BlazeError::execution(format!("REGEXP_MATCHES: invalid regex: {}", e))
-        })?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| BlazeError::execution(format!("REGEXP_MATCHES: invalid regex: {}", e)))?;
 
         let mut indices = Vec::new();
         let mut match_values = Vec::new();
@@ -459,15 +455,15 @@ pub fn generate_series_float_tvf() -> TableFunction {
             ));
         }
 
-        let start = args[0].as_f64().ok_or_else(|| {
-            BlazeError::execution("GENERATE_SERIES_FLOAT: start must be numeric")
-        })?;
-        let stop = args[1].as_f64().ok_or_else(|| {
-            BlazeError::execution("GENERATE_SERIES_FLOAT: stop must be numeric")
-        })?;
-        let step = args[2].as_f64().ok_or_else(|| {
-            BlazeError::execution("GENERATE_SERIES_FLOAT: step must be numeric")
-        })?;
+        let start = args[0]
+            .as_f64()
+            .ok_or_else(|| BlazeError::execution("GENERATE_SERIES_FLOAT: start must be numeric"))?;
+        let stop = args[1]
+            .as_f64()
+            .ok_or_else(|| BlazeError::execution("GENERATE_SERIES_FLOAT: stop must be numeric"))?;
+        let step = args[2]
+            .as_f64()
+            .ok_or_else(|| BlazeError::execution("GENERATE_SERIES_FLOAT: step must be numeric"))?;
 
         if step == 0.0 {
             return Err(BlazeError::execution(
@@ -536,7 +532,11 @@ mod tests {
     #[test]
     fn test_generate_series_descending() {
         let tvf = generate_series_tvf();
-        let args = vec![ScalarArg::Int64(5), ScalarArg::Int64(1), ScalarArg::Int64(-1)];
+        let args = vec![
+            ScalarArg::Int64(5),
+            ScalarArg::Int64(1),
+            ScalarArg::Int64(-1),
+        ];
         let result = tvf.execute(&args).unwrap();
 
         assert_eq!(result.len(), 1);

@@ -813,9 +813,12 @@ impl SchemaEvolution {
     /// existing columns must not be removed or narrowed.
     pub fn is_compatible(old: &Schema, new: &Schema) -> bool {
         let changes = Self::detect_changes(old, new);
-        !changes
-            .iter()
-            .any(|c| matches!(c.change_type, EvolutionType::DropColumn | EvolutionType::Incompatible))
+        !changes.iter().any(|c| {
+            matches!(
+                c.change_type,
+                EvolutionType::DropColumn | EvolutionType::Incompatible
+            )
+        })
     }
 
     /// Detect individual column-level changes between two schemas.
@@ -963,24 +966,16 @@ impl DeadLetterQueue {
 #[derive(Debug, Clone)]
 pub enum TransformStep {
     /// Filter rows where `column` satisfies `predicate` (kept as a string expression).
-    Filter {
-        column: String,
-        predicate: String,
-    },
+    Filter { column: String, predicate: String },
     /// Rename a column.
-    Rename {
-        old_name: String,
-        new_name: String,
-    },
+    Rename { old_name: String, new_name: String },
     /// Cast a column to a new data type.
     Cast {
         column: String,
         target_type: crate::types::DataType,
     },
     /// Drop a column from the batch.
-    Drop {
-        column: String,
-    },
+    Drop { column: String },
 }
 
 /// A builder-style pipeline of transformations applied to `RecordBatch`es.
@@ -1013,7 +1008,11 @@ impl TransformPipeline {
     }
 
     /// Add a type cast step.
-    pub fn add_cast(mut self, column: impl Into<String>, target_type: crate::types::DataType) -> Self {
+    pub fn add_cast(
+        mut self,
+        column: impl Into<String>,
+        target_type: crate::types::DataType,
+    ) -> Self {
         self.steps.push(TransformStep::Cast {
             column: column.into(),
             target_type,
@@ -1052,22 +1051,25 @@ impl TransformPipeline {
                     .iter()
                     .map(|f| {
                         if f.name() == old_name {
-                            arrow::datatypes::Field::new(new_name, f.data_type().clone(), f.is_nullable())
+                            arrow::datatypes::Field::new(
+                                new_name,
+                                f.data_type().clone(),
+                                f.is_nullable(),
+                            )
                         } else {
                             f.as_ref().clone()
                         }
                     })
                     .collect();
                 let new_schema = Arc::new(arrow::datatypes::Schema::new(new_fields));
-                RecordBatch::try_new(new_schema, batch.columns().to_vec()).map_err(|e| {
-                    BlazeError::execution(format!("Rename failed: {e}"))
-                })
+                RecordBatch::try_new(new_schema, batch.columns().to_vec())
+                    .map_err(|e| BlazeError::execution(format!("Rename failed: {e}")))
             }
             TransformStep::Drop { column } => {
                 let schema = batch.schema();
-                let idx = schema
-                    .index_of(column)
-                    .map_err(|_| BlazeError::analysis(format!("Column '{column}' not found for drop")))?;
+                let idx = schema.index_of(column).map_err(|_| {
+                    BlazeError::analysis(format!("Column '{column}' not found for drop"))
+                })?;
                 let mut fields: Vec<arrow::datatypes::Field> = Vec::new();
                 let mut columns: Vec<arrow::array::ArrayRef> = Vec::new();
                 for (i, f) in schema.fields().iter().enumerate() {
@@ -1077,19 +1079,22 @@ impl TransformPipeline {
                     }
                 }
                 let new_schema = Arc::new(arrow::datatypes::Schema::new(fields));
-                RecordBatch::try_new(new_schema, columns).map_err(|e| {
-                    BlazeError::execution(format!("Drop column failed: {e}"))
-                })
+                RecordBatch::try_new(new_schema, columns)
+                    .map_err(|e| BlazeError::execution(format!("Drop column failed: {e}")))
             }
-            TransformStep::Cast { column, target_type } => {
+            TransformStep::Cast {
+                column,
+                target_type,
+            } => {
                 let schema = batch.schema();
-                let idx = schema
-                    .index_of(column)
-                    .map_err(|_| BlazeError::analysis(format!("Column '{column}' not found for cast")))?;
-                let arrow_target = target_type.to_arrow();
-                let casted = arrow::compute::cast(batch.column(idx), &arrow_target).map_err(|e| {
-                    BlazeError::execution(format!("Cast failed for column '{column}': {e}"))
+                let idx = schema.index_of(column).map_err(|_| {
+                    BlazeError::analysis(format!("Column '{column}' not found for cast"))
                 })?;
+                let arrow_target = target_type.to_arrow();
+                let casted =
+                    arrow::compute::cast(batch.column(idx), &arrow_target).map_err(|e| {
+                        BlazeError::execution(format!("Cast failed for column '{column}': {e}"))
+                    })?;
                 let mut fields: Vec<arrow::datatypes::Field> = Vec::new();
                 let mut columns: Vec<arrow::array::ArrayRef> = Vec::new();
                 for (i, f) in schema.fields().iter().enumerate() {
@@ -1106,15 +1111,14 @@ impl TransformPipeline {
                     }
                 }
                 let new_schema = Arc::new(arrow::datatypes::Schema::new(fields));
-                RecordBatch::try_new(new_schema, columns).map_err(|e| {
-                    BlazeError::execution(format!("Cast rebuild failed: {e}"))
-                })
+                RecordBatch::try_new(new_schema, columns)
+                    .map_err(|e| BlazeError::execution(format!("Cast rebuild failed: {e}")))
             }
             TransformStep::Filter { column, predicate } => {
                 let schema = batch.schema();
-                let idx = schema
-                    .index_of(column)
-                    .map_err(|_| BlazeError::analysis(format!("Column '{column}' not found for filter")))?;
+                let idx = schema.index_of(column).map_err(|_| {
+                    BlazeError::analysis(format!("Column '{column}' not found for filter"))
+                })?;
                 let col = batch.column(idx);
 
                 // Support simple "is_not_null" predicate
@@ -1343,7 +1347,10 @@ mod tests {
     #[test]
     fn test_csv_source_connector_basic() {
         let schema = test_schema();
-        let config = SourceConnectorConfig { batch_size: 512, poll_interval_ms: 50 };
+        let config = SourceConnectorConfig {
+            batch_size: 512,
+            poll_interval_ms: 50,
+        };
         let connector = CsvSourceConnector::new("/tmp/test.csv", schema, config);
         assert_eq!(connector.name(), "csv");
         assert_eq!(connector.schema().len(), 2);

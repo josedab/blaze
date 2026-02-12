@@ -1062,7 +1062,10 @@ pub enum PartitionScheme {
     /// Hash a column and assign rows to partitions via modulo.
     Hash { column_index: usize },
     /// Range-based partitioning using sorted split points.
-    Range { column_index: usize, split_points: Vec<i64> },
+    Range {
+        column_index: usize,
+        split_points: Vec<i64>,
+    },
     /// Distribute rows cyclically across partitions.
     RoundRobin,
     /// Clone the entire dataset to every partition.
@@ -1077,7 +1080,10 @@ pub struct DataPartitioner {
 
 impl DataPartitioner {
     pub fn new(scheme: PartitionScheme, num_partitions: usize) -> Self {
-        Self { scheme, num_partitions }
+        Self {
+            scheme,
+            num_partitions,
+        }
     }
 
     /// Split `batches` into `num_partitions` buckets.
@@ -1087,9 +1093,10 @@ impl DataPartitioner {
         }
         match &self.scheme {
             PartitionScheme::Hash { column_index } => self.hash_partition(batches, *column_index),
-            PartitionScheme::Range { column_index, split_points } => {
-                self.range_partition(batches, *column_index, split_points)
-            }
+            PartitionScheme::Range {
+                column_index,
+                split_points,
+            } => self.range_partition(batches, *column_index, split_points),
             PartitionScheme::RoundRobin => self.round_robin_partition(batches),
             PartitionScheme::Broadcast => self.broadcast_partition(batches),
         }
@@ -1132,7 +1139,9 @@ impl DataPartitioner {
                 } else {
                     // Simple hash: use the formatted scalar as bytes.
                     let s = format!("{:?}", col.slice(row, 1));
-                    s.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize))
+                    s.bytes().fold(0usize, |acc, b| {
+                        acc.wrapping_mul(31).wrapping_add(b as usize)
+                    })
                 };
                 row_indices[hash % self.num_partitions].push(row);
             }
@@ -1173,13 +1182,17 @@ impl DataPartitioner {
                 return Err(BlazeError::execution("Column index out of range"));
             }
             let col = batch.column(col_idx);
-            let int_col = col.as_primitive_opt::<arrow::datatypes::Int64Type>().ok_or_else(|| {
-                BlazeError::execution("Range partitioning requires Int64 column")
-            })?;
+            let int_col = col
+                .as_primitive_opt::<arrow::datatypes::Int64Type>()
+                .ok_or_else(|| BlazeError::execution("Range partitioning requires Int64 column"))?;
             let mut row_indices: Vec<Vec<usize>> =
                 (0..self.num_partitions).map(|_| Vec::new()).collect();
             for row in 0..batch.num_rows() {
-                let val = if int_col.is_null(row) { i64::MIN } else { int_col.value(row) };
+                let val = if int_col.is_null(row) {
+                    i64::MIN
+                } else {
+                    int_col.value(row)
+                };
                 let mut part = split_points.len(); // last bucket by default
                 for (i, &sp) in split_points.iter().enumerate() {
                     if val < sp {
@@ -1273,25 +1286,31 @@ pub enum ExchangeOperator {
     /// Gather results from all nodes onto the coordinator.
     GatherExchange,
     /// Co-locate two inputs by join keys so matching rows land on the same node.
-    ColocatedJoinExchange {
-        left_key: String,
-        right_key: String,
-    },
+    ColocatedJoinExchange { left_key: String, right_key: String },
 }
 
 impl ExchangeOperator {
     /// Return a human-readable description of this exchange.
     pub fn describe(&self) -> String {
         match self {
-            Self::Repartition { scheme, num_partitions } => {
+            Self::Repartition {
+                scheme,
+                num_partitions,
+            } => {
                 format!("Repartition({:?}, {} partitions)", scheme, num_partitions)
             }
             Self::BroadcastExchange { target_nodes } => {
                 format!("BroadcastExchange(targets: [{}])", target_nodes.join(", "))
             }
             Self::GatherExchange => "GatherExchange".to_string(),
-            Self::ColocatedJoinExchange { left_key, right_key } => {
-                format!("ColocatedJoinExchange(left={}, right={})", left_key, right_key)
+            Self::ColocatedJoinExchange {
+                left_key,
+                right_key,
+            } => {
+                format!(
+                    "ColocatedJoinExchange(left={}, right={})",
+                    left_key, right_key
+                )
             }
         }
     }
@@ -1369,12 +1388,15 @@ impl ResourceGovernor {
             acquired_at: Instant::now(),
         };
 
-        self.active.write().insert(grant_id, ResourceGrant {
+        self.active.write().insert(
             grant_id,
-            memory_budget: self.max_memory_per_query,
-            timeout_ms: self.query_timeout_ms,
-            acquired_at: grant.acquired_at,
-        });
+            ResourceGrant {
+                grant_id,
+                memory_budget: self.max_memory_per_query,
+                timeout_ms: self.query_timeout_ms,
+                acquired_at: grant.acquired_at,
+            },
+        );
         self.stats.write().queries_admitted += 1;
 
         Ok(grant)
@@ -1494,9 +1516,8 @@ impl StreamingResultCollector {
                             .map_err(|e| BlazeError::execution(format!("take error: {e}")))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let sorted =
-                    RecordBatch::try_new(schema, sorted_cols)
-                        .map_err(|e| BlazeError::execution(format!("batch error: {e}")))?;
+                let sorted = RecordBatch::try_new(schema, sorted_cols)
+                    .map_err(|e| BlazeError::execution(format!("batch error: {e}")))?;
                 Ok(vec![sorted])
             }
             MergeStrategy::Aggregate { expression: _ } => {
@@ -1906,12 +1927,14 @@ mod tests {
     #[test]
     fn test_hash_partition_distributes_rows() {
         let batch = make_int_batch(vec![1, 2, 3, 4, 5, 6]);
-        let partitioner =
-            DataPartitioner::new(PartitionScheme::Hash { column_index: 0 }, 3);
+        let partitioner = DataPartitioner::new(PartitionScheme::Hash { column_index: 0 }, 3);
         let buckets = partitioner.partition(&[batch]).unwrap();
 
         assert_eq!(buckets.len(), 3);
-        let total: usize = buckets.iter().flat_map(|b| b.iter().map(|r| r.num_rows())).sum();
+        let total: usize = buckets
+            .iter()
+            .flat_map(|b| b.iter().map(|r| r.num_rows()))
+            .sum();
         assert_eq!(total, 6);
     }
 
@@ -1922,7 +1945,10 @@ mod tests {
         let buckets = partitioner.partition(&[batch]).unwrap();
 
         assert_eq!(buckets.len(), 2);
-        let total: usize = buckets.iter().flat_map(|b| b.iter().map(|r| r.num_rows())).sum();
+        let total: usize = buckets
+            .iter()
+            .flat_map(|b| b.iter().map(|r| r.num_rows()))
+            .sum();
         assert_eq!(total, 4);
         // Each partition should have 2 rows (round-robin evenly).
         for bucket in &buckets {
@@ -1957,7 +1983,10 @@ mod tests {
         let buckets = partitioner.partition(&[batch]).unwrap();
 
         assert_eq!(buckets.len(), 3);
-        let total: usize = buckets.iter().flat_map(|b| b.iter().map(|r| r.num_rows())).sum();
+        let total: usize = buckets
+            .iter()
+            .flat_map(|b| b.iter().map(|r| r.num_rows()))
+            .sum();
         assert_eq!(total, 5);
     }
 
@@ -2075,11 +2104,10 @@ mod tests {
 
     #[test]
     fn test_streaming_collector_sort() {
-        let mut collector =
-            StreamingResultCollector::new(MergeStrategy::Sort {
-                column: "id".to_string(),
-                descending: true,
-            });
+        let mut collector = StreamingResultCollector::new(MergeStrategy::Sort {
+            column: "id".to_string(),
+            descending: true,
+        });
 
         collector.add_result(0, vec![make_int_batch(vec![3, 1])]);
         collector.add_result(1, vec![make_int_batch(vec![4, 2])]);

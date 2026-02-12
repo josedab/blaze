@@ -249,9 +249,8 @@ pub fn serve_connection(conn: &Connection, mut stream: impl Read + Write) -> Res
             Err(_) => break, // Connection closed
         };
 
-        let request: IpcRequest = serde_json::from_slice(&request_data).map_err(|e| {
-            BlazeError::invalid_argument(format!("Invalid IPC request: {}", e))
-        })?;
+        let request: IpcRequest = serde_json::from_slice(&request_data)
+            .map_err(|e| BlazeError::invalid_argument(format!("Invalid IPC request: {}", e)))?;
 
         let is_shutdown = matches!(request, IpcRequest::Shutdown);
 
@@ -259,9 +258,8 @@ pub fn serve_connection(conn: &Connection, mut stream: impl Read + Write) -> Res
         let (meta, ipc_data) = handle_request(conn, &request);
 
         // Write response metadata
-        let meta_json = serde_json::to_vec(&meta).map_err(|e| {
-            BlazeError::internal(format!("Failed to serialize response: {}", e))
-        })?;
+        let meta_json = serde_json::to_vec(&meta)
+            .map_err(|e| BlazeError::internal(format!("Failed to serialize response: {}", e)))?;
         write_message(&mut stream, &meta_json)?;
 
         // Write IPC data if present
@@ -289,16 +287,14 @@ impl<S: Read + Write> IpcClient<S> {
     /// Send a request and receive the response.
     pub fn request(&mut self, req: &IpcRequest) -> Result<(IpcResponseMeta, Vec<RecordBatch>)> {
         // Send request
-        let req_data = serde_json::to_vec(req).map_err(|e| {
-            BlazeError::internal(format!("Failed to serialize request: {}", e))
-        })?;
+        let req_data = serde_json::to_vec(req)
+            .map_err(|e| BlazeError::internal(format!("Failed to serialize request: {}", e)))?;
         write_message(&mut self.stream, &req_data)?;
 
         // Read response metadata
         let meta_data = read_message(&mut self.stream)?;
-        let meta: IpcResponseMeta = serde_json::from_slice(&meta_data).map_err(|e| {
-            BlazeError::internal(format!("Failed to deserialize response: {}", e))
-        })?;
+        let meta: IpcResponseMeta = serde_json::from_slice(&meta_data)
+            .map_err(|e| BlazeError::internal(format!("Failed to deserialize response: {}", e)))?;
 
         // Read IPC data if present
         let batches = if meta.data_bytes > 0 {

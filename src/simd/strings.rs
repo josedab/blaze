@@ -97,7 +97,10 @@ impl VectorizedStringOps {
             }
 
             // Contains match: "%middle%"
-            if parts.len() == 3 && parts[0].is_empty() && parts[2].is_empty() && !parts[1].is_empty()
+            if parts.len() == 3
+                && parts[0].is_empty()
+                && parts[2].is_empty()
+                && !parts[1].is_empty()
             {
                 return Self::contains(array, parts[1]);
             }
@@ -186,9 +189,8 @@ impl VectorizedStringOps {
 
     /// Vectorized regex match using pre-compiled regex.
     pub fn regex_match(array: &StringArray, pattern: &str) -> Result<ArrayRef> {
-        let re = regex::Regex::new(pattern).map_err(|e| {
-            crate::error::BlazeError::execution(format!("Invalid regex: {}", e))
-        })?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| crate::error::BlazeError::execution(format!("Invalid regex: {}", e)))?;
 
         let results: BooleanArray = (0..array.len())
             .map(|i| {
@@ -278,9 +280,7 @@ fn fast_contains(haystack: &[u8], needle: &[u8], needle_len: usize) -> bool {
         return memchr_single(haystack, needle[0]);
     }
     // Use Rust's built-in optimized search for general case
-    haystack
-        .windows(needle_len)
-        .any(|window| window == needle)
+    haystack.windows(needle_len).any(|window| window == needle)
 }
 
 /// Single-byte search optimized for common case.
@@ -499,12 +499,7 @@ mod tests {
 
     #[test]
     fn test_contains_any() {
-        let arr = make_string_array(&[
-            Some("hello world"),
-            Some("foo bar"),
-            Some("baz qux"),
-            None,
-        ]);
+        let arr = make_string_array(&[Some("hello world"), Some("foo bar"), Some("baz qux"), None]);
         let result = VectorizedStringOps::contains_any(&arr, &["hello", "foo"]).unwrap();
         assert_eq!(
             to_bool_vec(&result),
@@ -514,12 +509,7 @@ mod tests {
 
     #[test]
     fn test_regex_match() {
-        let arr = make_string_array(&[
-            Some("hello123"),
-            Some("world"),
-            Some("test456"),
-            None,
-        ]);
+        let arr = make_string_array(&[Some("hello123"), Some("world"), Some("test456"), None]);
         let result = VectorizedStringOps::regex_match(&arr, r"\d+").unwrap();
         assert_eq!(
             to_bool_vec(&result),

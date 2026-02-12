@@ -254,13 +254,15 @@ impl VectorOps {
 pub fn l2_distance_simd(a: &[f32], b: &[f32]) -> Result<f32> {
     if a.len() != b.len() {
         return Err(BlazeError::invalid_argument(format!(
-            "Vector dimension mismatch: {} vs {}", a.len(), b.len()
+            "Vector dimension mismatch: {} vs {}",
+            a.len(),
+            b.len()
         )));
     }
     // Process in chunks of 8 for manual SIMD-style computation
     let chunks = a.len() / 8;
     let mut sum = 0.0f32;
-    
+
     for chunk in 0..chunks {
         let base = chunk * 8;
         let mut local_sum = 0.0f32;
@@ -270,13 +272,13 @@ pub fn l2_distance_simd(a: &[f32], b: &[f32]) -> Result<f32> {
         }
         sum += local_sum;
     }
-    
+
     // Handle remaining elements
     for i in (chunks * 8)..a.len() {
         let diff = a[i] - b[i];
         sum += diff * diff;
     }
-    
+
     Ok(sum.sqrt())
 }
 
@@ -284,12 +286,14 @@ pub fn l2_distance_simd(a: &[f32], b: &[f32]) -> Result<f32> {
 pub fn dot_product_simd(a: &[f32], b: &[f32]) -> Result<f32> {
     if a.len() != b.len() {
         return Err(BlazeError::invalid_argument(format!(
-            "Vector dimension mismatch: {} vs {}", a.len(), b.len()
+            "Vector dimension mismatch: {} vs {}",
+            a.len(),
+            b.len()
         )));
     }
     let chunks = a.len() / 8;
     let mut sum = 0.0f32;
-    
+
     for chunk in 0..chunks {
         let base = chunk * 8;
         let mut local_sum = 0.0f32;
@@ -298,11 +302,11 @@ pub fn dot_product_simd(a: &[f32], b: &[f32]) -> Result<f32> {
         }
         sum += local_sum;
     }
-    
+
     for i in (chunks * 8)..a.len() {
         sum += a[i] * b[i];
     }
-    
+
     Ok(sum)
 }
 
@@ -352,10 +356,10 @@ impl VectorKnnSearch {
         let dists = VectorOps::compute_distances(vectors, query, metric)?;
         let mut top_k = VectorOps::top_k(&dists, k)?;
         top_k.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         let indices = top_k.iter().map(|(i, _)| *i).collect();
         let distances = top_k.iter().map(|(_, d)| *d).collect();
-        
+
         Ok(KnnResult { indices, distances })
     }
 
@@ -372,18 +376,22 @@ impl VectorKnnSearch {
             .filter_map(|i| {
                 if dists.is_valid(i) {
                     let d = dists.value(i);
-                    if d <= radius { Some((i, d)) } else { None }
+                    if d <= radius {
+                        Some((i, d))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             })
             .collect();
-        
+
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         let indices = results.iter().map(|(i, _)| *i).collect();
         let distances = results.iter().map(|(_, d)| *d).collect();
-        
+
         Ok(KnnResult { indices, distances })
     }
 }
@@ -504,11 +512,7 @@ impl HnswIndex {
 
         // Traverse from top layer down to level+1, greedily finding closest node
         for layer in (level + 1..=self.max_layer).rev() {
-            current = self.greedy_search_layer(
-                &self.nodes[node_id].vector,
-                current,
-                layer,
-            )?;
+            current = self.greedy_search_layer(&self.nodes[node_id].vector, current, layer)?;
         }
 
         // For layers level..0, find ef_construction nearest neighbors and connect
@@ -520,7 +524,11 @@ impl HnswIndex {
                 layer,
             )?;
 
-            let m = if layer == 0 { self.config.m * 2 } else { self.config.m };
+            let m = if layer == 0 {
+                self.config.m * 2
+            } else {
+                self.config.m
+            };
             let selected: Vec<usize> = neighbors.iter().take(m).map(|&(id, _)| id).collect();
 
             self.nodes[node_id].connections[layer] = selected.clone();
@@ -532,14 +540,14 @@ impl HnswIndex {
                     // Trim if over capacity
                     if self.nodes[neighbor_id].connections[layer].len() > m {
                         let nv = self.nodes[neighbor_id].vector.clone();
-                        let mut conn_dists: Vec<(usize, f32)> = self.nodes[neighbor_id]
-                            .connections[layer]
+                        let mut conn_dists: Vec<(usize, f32)> = self.nodes[neighbor_id].connections
+                            [layer]
                             .iter()
-                            .filter_map(|&c| {
-                                self.distance_to_node(&nv, c).ok().map(|d| (c, d))
-                            })
+                            .filter_map(|&c| self.distance_to_node(&nv, c).ok().map(|d| (c, d)))
                             .collect();
-                        conn_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                        conn_dists.sort_by(|a, b| {
+                            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                         self.nodes[neighbor_id].connections[layer] =
                             conn_dists.into_iter().take(m).map(|(id, _)| id).collect();
                     }
@@ -560,12 +568,7 @@ impl HnswIndex {
     }
 
     /// Greedy search on a single layer to find the closest node.
-    fn greedy_search_layer(
-        &self,
-        query: &[f32],
-        entry: usize,
-        layer: usize,
-    ) -> Result<usize> {
+    fn greedy_search_layer(&self, query: &[f32], entry: usize, layer: usize) -> Result<usize> {
         let mut current = entry;
         let mut current_dist = self.distance_to_node(query, current)?;
 
@@ -669,7 +672,9 @@ impl HnswIndex {
     /// Deserialize an index from bytes.
     pub fn deserialize(bytes: &[u8], config: HnswConfig) -> Result<Self> {
         if bytes.len() < 21 {
-            return Err(BlazeError::invalid_argument("Invalid HNSW index data: too short"));
+            return Err(BlazeError::invalid_argument(
+                "Invalid HNSW index data: too short",
+            ));
         }
         let mut pos = 0;
 
@@ -710,17 +715,22 @@ impl HnswIndex {
 
             let mut connections = Vec::with_capacity(num_layers);
             for _ in 0..num_layers {
-                let num_conns = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+                let num_conns =
+                    u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
                 let mut conns = Vec::with_capacity(num_conns);
                 for _ in 0..num_conns {
-                    conns.push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize);
+                    conns
+                        .push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize);
                     pos += 8;
                 }
                 connections.push(conns);
             }
 
-            nodes.push(HnswNode { vector, connections });
+            nodes.push(HnswNode {
+                vector,
+                connections,
+            });
         }
 
         Ok(Self {
@@ -759,16 +769,22 @@ impl VectorIndex for HnswIndex {
 struct OrdF32Pair(f32, usize);
 
 impl PartialEq for OrdF32Pair {
-    fn eq(&self, other: &Self) -> bool { self.0 == other.0 && self.1 == other.1 }
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.1 == other.1
+    }
 }
 impl Eq for OrdF32Pair {}
 
 impl PartialOrd for OrdF32Pair {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl Ord for OrdF32Pair {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -793,9 +809,7 @@ fn compute_distance_metric(a: &[f32], b: &[f32], metric: DistanceMetric) -> Resu
     match metric {
         DistanceMetric::L2 => l2_distance(a, b),
         DistanceMetric::Cosine => cosine_distance(a, b),
-        DistanceMetric::DotProduct | DistanceMetric::InnerProduct => {
-            Ok(-dot_product(a, b)?)
-        }
+        DistanceMetric::DotProduct | DistanceMetric::InnerProduct => Ok(-dot_product(a, b)?),
     }
 }
 
@@ -992,10 +1006,7 @@ impl ProductQuantizer {
             let start = s * self.sub_dim;
             let end = start + self.sub_dim;
             // Extract sub-vectors for this subspace
-            let sub_vecs: Vec<Vec<f32>> = vectors
-                .iter()
-                .map(|v| v[start..end].to_vec())
-                .collect();
+            let sub_vecs: Vec<Vec<f32>> = vectors.iter().map(|v| v[start..end].to_vec()).collect();
             self.codebooks[s] = Self::kmeans(&sub_vecs, self.num_codes, 15);
         }
     }
@@ -1171,22 +1182,20 @@ impl HybridSearchEngine {
 
         let mut results: Vec<SearchResult> = candidates
             .into_iter()
-            .filter(|(id, _)| {
-                match &filter {
-                    None => true,
-                    Some(f) => {
-                        let meta = self.metadata.get(id);
-                        Self::matches_filter(meta, f)
-                    }
+            .filter(|(id, _)| match &filter {
+                None => true,
+                Some(f) => {
+                    let meta = self.metadata.get(id);
+                    Self::matches_filter(meta, f)
                 }
             })
             .map(|(id, distance)| {
-                let metadata = self
-                    .metadata
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_default();
-                SearchResult { id, distance, metadata }
+                let metadata = self.metadata.get(&id).cloned().unwrap_or_default();
+                SearchResult {
+                    id,
+                    distance,
+                    metadata,
+                }
             })
             .collect();
 
@@ -1203,14 +1212,17 @@ impl HybridSearchEngine {
             None => return false,
         };
         match filter {
-            MetadataFilter::Eq(key, value) => {
-                meta.get(key).map_or(false, |v| v == value)
+            MetadataFilter::Eq(key, value) => meta.get(key).map_or(false, |v| v == value),
+            MetadataFilter::Range(key, min, max) => meta
+                .get(key)
+                .and_then(|v| v.parse::<f64>().ok())
+                .map_or(false, |v| v >= *min && v <= *max),
+            MetadataFilter::And(filters) => {
+                filters.iter().all(|f| Self::matches_filter(Some(meta), f))
             }
-            MetadataFilter::Range(key, min, max) => {
-                meta.get(key).and_then(|v| v.parse::<f64>().ok()).map_or(false, |v| v >= *min && v <= *max)
+            MetadataFilter::Or(filters) => {
+                filters.iter().any(|f| Self::matches_filter(Some(meta), f))
             }
-            MetadataFilter::And(filters) => filters.iter().all(|f| Self::matches_filter(Some(meta), f)),
-            MetadataFilter::Or(filters) => filters.iter().any(|f| Self::matches_filter(Some(meta), f)),
         }
     }
 }
@@ -1344,7 +1356,8 @@ impl VectorIndexSelector {
                 + (num_vectors * 16 * std::mem::size_of::<usize>() * 5); // HNSW graph overhead
             IndexRecommendation {
                 index_type: RecommendedIndex::Hnsw,
-                reason: "Medium dataset (1K-100K): HNSW provides best latency/recall tradeoff".into(),
+                reason: "Medium dataset (1K-100K): HNSW provides best latency/recall tradeoff"
+                    .into(),
                 estimated_build_time_ms: (num_vectors as u64) / 10,
                 estimated_memory_bytes: memory as u64,
                 expected_recall: 0.95,
@@ -1374,8 +1387,20 @@ impl VectorIndexSelector {
 
     /// Recommend HNSW parameters based on desired recall and dataset size.
     pub fn recommend_hnsw_params(num_vectors: usize, target_recall: f64) -> HnswConfig {
-        let m = if target_recall > 0.95 { 32 } else if target_recall > 0.9 { 16 } else { 8 };
-        let ef_construction = if target_recall > 0.95 { 400 } else if target_recall > 0.9 { 200 } else { 100 };
+        let m = if target_recall > 0.95 {
+            32
+        } else if target_recall > 0.9 {
+            16
+        } else {
+            8
+        };
+        let ef_construction = if target_recall > 0.95 {
+            400
+        } else if target_recall > 0.9 {
+            200
+        } else {
+            100
+        };
         let ef_search = if num_vectors > 1_000_000 { 200 } else { 100 };
 
         HnswConfig {
@@ -1602,7 +1627,7 @@ mod tests {
         let results = index.search_knn(&[0.0, 0.0], 2).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, 0); // closest is itself
-        // second closest is either (1,0) or (0,1) at distance 1.0
+                                     // second closest is either (1,0) or (0,1) at distance 1.0
         assert!((results[1].1 - 1.0).abs() < 1e-6);
     }
 
@@ -1752,7 +1777,12 @@ mod tests {
 
     #[test]
     fn test_knn_search() {
-        let vecs = vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0], vec![10.0, 10.0]];
+        let vecs = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![10.0, 10.0],
+        ];
         let arr = VectorOps::build_vector_array(&vecs, 2).unwrap();
         let result = VectorKnnSearch::search(&arr, &[0.0, 0.0], 2, DistanceMetric::L2).unwrap();
         assert_eq!(result.indices.len(), 2);
@@ -1762,11 +1792,16 @@ mod tests {
 
     #[test]
     fn test_knn_search_within_radius() {
-        let vecs = vec![vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0], vec![10.0, 10.0]];
+        let vecs = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![10.0, 10.0],
+        ];
         let arr = VectorOps::build_vector_array(&vecs, 2).unwrap();
-        let result = VectorKnnSearch::search_within_radius(
-            &arr, &[0.0, 0.0], 1.5, DistanceMetric::L2
-        ).unwrap();
+        let result =
+            VectorKnnSearch::search_within_radius(&arr, &[0.0, 0.0], 1.5, DistanceMetric::L2)
+                .unwrap();
         assert_eq!(result.indices.len(), 3); // [0,0], [1,0], [0,1] all within 1.5
         assert!(!result.indices.contains(&3)); // [10,10] is too far
     }
@@ -1810,9 +1845,15 @@ mod tests {
 
     #[test]
     fn test_hnsw_larger_dataset() {
-        let config = HnswConfig { m: 8, m_max: 8, ef_construction: 50, ef_search: 30, ..HnswConfig::default() };
+        let config = HnswConfig {
+            m: 8,
+            m_max: 8,
+            ef_construction: 50,
+            ef_search: 30,
+            ..HnswConfig::default()
+        };
         let mut index = HnswIndex::new(DistanceMetric::L2, config);
-        
+
         for i in 0..100 {
             let x = (i as f32) * 0.1;
             let y = (i as f32) * 0.2;
@@ -2002,7 +2043,9 @@ mod tests {
         let filter = MetadataFilter::Eq("category".to_string(), "A".to_string());
         let results = engine.search(&[0.0, 0.0], 10, Some(filter)).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|r| r.metadata.get("category") == Some(&"A".to_string())));
+        assert!(results
+            .iter()
+            .all(|r| r.metadata.get("category") == Some(&"A".to_string())));
     }
 
     #[test]

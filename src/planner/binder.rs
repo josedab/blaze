@@ -1636,12 +1636,18 @@ mod tests {
         Binder::new(catalog_list)
     }
 
-    fn create_binder_with_table(table_name: &str, fields: Vec<(&str, crate::types::DataType)>) -> Binder {
-        use crate::types::{Field, Schema};
+    fn create_binder_with_table(
+        table_name: &str,
+        fields: Vec<(&str, crate::types::DataType)>,
+    ) -> Binder {
         use crate::storage::MemoryTable;
+        use crate::types::{Field, Schema};
 
         let schema = Schema::new(
-            fields.into_iter().map(|(name, dt)| Field::new(name, dt, true)).collect()
+            fields
+                .into_iter()
+                .map(|(name, dt)| Field::new(name, dt, true))
+                .collect(),
         );
         let table = MemoryTable::new(schema, vec![]);
         let catalog_list = Arc::new(CatalogList::default());
@@ -1661,10 +1667,13 @@ mod tests {
 
     #[test]
     fn test_bind_select_from_table() {
-        let binder = create_binder_with_table("users", vec![
-            ("id", crate::types::DataType::Int64),
-            ("name", crate::types::DataType::Utf8),
-        ]);
+        let binder = create_binder_with_table(
+            "users",
+            vec![
+                ("id", crate::types::DataType::Int64),
+                ("name", crate::types::DataType::Utf8),
+            ],
+        );
         let stmt = sql::parser::Parser::parse_one("SELECT * FROM users").unwrap();
         let plan = binder.bind(stmt).unwrap();
 
@@ -1674,10 +1683,13 @@ mod tests {
 
     #[test]
     fn test_bind_select_with_filter() {
-        let binder = create_binder_with_table("users", vec![
-            ("id", crate::types::DataType::Int64),
-            ("name", crate::types::DataType::Utf8),
-        ]);
+        let binder = create_binder_with_table(
+            "users",
+            vec![
+                ("id", crate::types::DataType::Int64),
+                ("name", crate::types::DataType::Utf8),
+            ],
+        );
         let stmt = sql::parser::Parser::parse_one("SELECT * FROM users WHERE id > 10").unwrap();
         let plan = binder.bind(stmt).unwrap();
 
@@ -1686,10 +1698,13 @@ mod tests {
 
     #[test]
     fn test_bind_aggregate() {
-        let binder = create_binder_with_table("orders", vec![
-            ("id", crate::types::DataType::Int64),
-            ("amount", crate::types::DataType::Float64),
-        ]);
+        let binder = create_binder_with_table(
+            "orders",
+            vec![
+                ("id", crate::types::DataType::Int64),
+                ("amount", crate::types::DataType::Float64),
+            ],
+        );
         let stmt = sql::parser::Parser::parse_one("SELECT COUNT(*) FROM orders").unwrap();
         let plan = binder.bind(stmt).unwrap();
 

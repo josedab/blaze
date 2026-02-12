@@ -246,9 +246,9 @@ impl WasmBuildProfile {
     /// Estimated binary size in bytes for this build profile.
     pub fn estimated_size_bytes(&self) -> usize {
         match self {
-            WasmBuildProfile::Full => 3 * 1024 * 1024,    // ~3MB
-            WasmBuildProfile::Core => 500 * 1024,          // ~500KB
-            WasmBuildProfile::Minimal => 300 * 1024,       // ~300KB
+            WasmBuildProfile::Full => 3 * 1024 * 1024, // ~3MB
+            WasmBuildProfile::Core => 500 * 1024,      // ~500KB
+            WasmBuildProfile::Minimal => 300 * 1024,   // ~300KB
             WasmBuildProfile::Custom { features } => {
                 // Base size + per-feature estimate
                 200 * 1024 + features.len() * 50 * 1024
@@ -271,16 +271,10 @@ impl WasmBuildProfile {
                 "joins",
                 "cte_support",
             ],
-            WasmBuildProfile::Core => vec![
-                "sql_parser",
-                "executor",
-                "memory_storage",
-                "json_output",
-            ],
-            WasmBuildProfile::Minimal => vec![
-                "sql_parser",
-                "executor",
-            ],
+            WasmBuildProfile::Core => {
+                vec!["sql_parser", "executor", "memory_storage", "json_output"]
+            }
+            WasmBuildProfile::Minimal => vec!["sql_parser", "executor"],
             WasmBuildProfile::Custom { .. } => vec![],
         }
     }
@@ -525,13 +519,48 @@ pub struct WasmFeatureInfo {
 impl TreeShakingAnalyzer {
     pub fn new() -> Self {
         let all_features = vec![
-            WasmFeatureInfo { name: "sql_parser".into(), estimated_size_bytes: 50_000, dependencies: vec![], is_required: true },
-            WasmFeatureInfo { name: "query_planner".into(), estimated_size_bytes: 30_000, dependencies: vec!["sql_parser".into()], is_required: true },
-            WasmFeatureInfo { name: "executor".into(), estimated_size_bytes: 40_000, dependencies: vec!["query_planner".into()], is_required: true },
-            WasmFeatureInfo { name: "csv_reader".into(), estimated_size_bytes: 15_000, dependencies: vec![], is_required: false },
-            WasmFeatureInfo { name: "json_output".into(), estimated_size_bytes: 10_000, dependencies: vec![], is_required: false },
-            WasmFeatureInfo { name: "arrow_ipc".into(), estimated_size_bytes: 25_000, dependencies: vec![], is_required: false },
-            WasmFeatureInfo { name: "window_functions".into(), estimated_size_bytes: 20_000, dependencies: vec!["executor".into()], is_required: false },
+            WasmFeatureInfo {
+                name: "sql_parser".into(),
+                estimated_size_bytes: 50_000,
+                dependencies: vec![],
+                is_required: true,
+            },
+            WasmFeatureInfo {
+                name: "query_planner".into(),
+                estimated_size_bytes: 30_000,
+                dependencies: vec!["sql_parser".into()],
+                is_required: true,
+            },
+            WasmFeatureInfo {
+                name: "executor".into(),
+                estimated_size_bytes: 40_000,
+                dependencies: vec!["query_planner".into()],
+                is_required: true,
+            },
+            WasmFeatureInfo {
+                name: "csv_reader".into(),
+                estimated_size_bytes: 15_000,
+                dependencies: vec![],
+                is_required: false,
+            },
+            WasmFeatureInfo {
+                name: "json_output".into(),
+                estimated_size_bytes: 10_000,
+                dependencies: vec![],
+                is_required: false,
+            },
+            WasmFeatureInfo {
+                name: "arrow_ipc".into(),
+                estimated_size_bytes: 25_000,
+                dependencies: vec![],
+                is_required: false,
+            },
+            WasmFeatureInfo {
+                name: "window_functions".into(),
+                estimated_size_bytes: 20_000,
+                dependencies: vec!["executor".into()],
+                is_required: false,
+            },
         ];
         Self {
             used_features: Vec::new(),
@@ -544,7 +573,9 @@ impl TreeShakingAnalyzer {
         if !self.used_features.contains(&feature.to_string()) {
             self.used_features.push(feature.to_string());
             // Also mark dependencies
-            let deps: Vec<String> = self.all_features.iter()
+            let deps: Vec<String> = self
+                .all_features
+                .iter()
                 .filter(|f| f.name == feature)
                 .flat_map(|f| f.dependencies.clone())
                 .collect();
@@ -556,19 +587,27 @@ impl TreeShakingAnalyzer {
 
     /// Get features that can be removed (not used and not required).
     pub fn removable_features(&self) -> Vec<&WasmFeatureInfo> {
-        self.all_features.iter()
+        self.all_features
+            .iter()
             .filter(|f| !f.is_required && !self.used_features.contains(&f.name))
             .collect()
     }
 
     /// Estimated size savings from tree-shaking.
     pub fn estimated_savings(&self) -> usize {
-        self.removable_features().iter().map(|f| f.estimated_size_bytes).sum()
+        self.removable_features()
+            .iter()
+            .map(|f| f.estimated_size_bytes)
+            .sum()
     }
 
     /// Total estimated size after tree-shaking.
     pub fn estimated_size(&self) -> usize {
-        let total: usize = self.all_features.iter().map(|f| f.estimated_size_bytes).sum();
+        let total: usize = self
+            .all_features
+            .iter()
+            .map(|f| f.estimated_size_bytes)
+            .sum();
         total - self.estimated_savings()
     }
 }
@@ -598,13 +637,21 @@ impl WasmCodeSplitter {
             chunks: vec![
                 WasmChunk {
                     name: "core".into(),
-                    features: vec!["sql_parser".into(), "query_planner".into(), "executor".into()],
+                    features: vec![
+                        "sql_parser".into(),
+                        "query_planner".into(),
+                        "executor".into(),
+                    ],
                     estimated_size_bytes: 120_000,
                     is_core: true,
                 },
                 WasmChunk {
                     name: "io".into(),
-                    features: vec!["csv_reader".into(), "json_output".into(), "arrow_ipc".into()],
+                    features: vec![
+                        "csv_reader".into(),
+                        "json_output".into(),
+                        "arrow_ipc".into(),
+                    ],
                     estimated_size_bytes: 50_000,
                     is_core: false,
                 },
@@ -620,17 +667,23 @@ impl WasmCodeSplitter {
 
     /// Get chunks needed for a set of features.
     pub fn required_chunks(&self, features: &[String]) -> Vec<&WasmChunk> {
-        self.chunks.iter().filter(|chunk| {
-            chunk.is_core || chunk.features.iter().any(|f| features.contains(f))
-        }).collect()
+        self.chunks
+            .iter()
+            .filter(|chunk| chunk.is_core || chunk.features.iter().any(|f| features.contains(f)))
+            .collect()
     }
 
     /// Total size of required chunks.
     pub fn total_size(&self, features: &[String]) -> usize {
-        self.required_chunks(features).iter().map(|c| c.estimated_size_bytes).sum()
+        self.required_chunks(features)
+            .iter()
+            .map(|c| c.estimated_size_bytes)
+            .sum()
     }
 
-    pub fn all_chunks(&self) -> &[WasmChunk] { &self.chunks }
+    pub fn all_chunks(&self) -> &[WasmChunk] {
+        &self.chunks
+    }
 }
 
 /// CI size regression checker for WASM builds.
@@ -643,7 +696,11 @@ pub struct WasmSizeRegression {
 
 impl WasmSizeRegression {
     pub fn new(budget_bytes: usize) -> Self {
-        Self { budget_bytes, previous_size: None, current_size: 0 }
+        Self {
+            budget_bytes,
+            previous_size: None,
+            current_size: 0,
+        }
     }
 
     /// Set the previous build size for comparison.
@@ -663,26 +720,46 @@ impl WasmSizeRegression {
 
     /// Size change from previous build (positive = growth).
     pub fn size_delta(&self) -> Option<i64> {
-        self.previous_size.map(|prev| self.current_size as i64 - prev as i64)
+        self.previous_size
+            .map(|prev| self.current_size as i64 - prev as i64)
     }
 
     /// Percentage change from previous build.
     pub fn size_delta_pct(&self) -> Option<f64> {
         self.previous_size.map(|prev| {
-            if prev == 0 { 0.0 } else { (self.current_size as f64 - prev as f64) / prev as f64 * 100.0 }
+            if prev == 0 {
+                0.0
+            } else {
+                (self.current_size as f64 - prev as f64) / prev as f64 * 100.0
+            }
         })
     }
 
     /// Generate a CI report string.
     pub fn report(&self) -> String {
         let mut report = format!("WASM Size Report\n");
-        report.push_str(&format!("  Current: {} bytes ({:.1} KB)\n", self.current_size, self.current_size as f64 / 1024.0));
-        report.push_str(&format!("  Budget:  {} bytes ({:.1} KB)\n", self.budget_bytes, self.budget_bytes as f64 / 1024.0));
+        report.push_str(&format!(
+            "  Current: {} bytes ({:.1} KB)\n",
+            self.current_size,
+            self.current_size as f64 / 1024.0
+        ));
+        report.push_str(&format!(
+            "  Budget:  {} bytes ({:.1} KB)\n",
+            self.budget_bytes,
+            self.budget_bytes as f64 / 1024.0
+        ));
         if let Some(delta) = self.size_delta() {
             let pct = self.size_delta_pct().unwrap_or(0.0);
             report.push_str(&format!("  Delta:   {:+} bytes ({:+.1}%)\n", delta, pct));
         }
-        report.push_str(&format!("  Status:  {}", if self.is_within_budget() { "PASS ✅" } else { "FAIL ❌" }));
+        report.push_str(&format!(
+            "  Status:  {}",
+            if self.is_within_budget() {
+                "PASS ✅"
+            } else {
+                "FAIL ❌"
+            }
+        ));
         report
     }
 }
@@ -763,7 +840,10 @@ mod tests {
 
     #[test]
     fn test_wasm_build_profile_sizes() {
-        assert_eq!(WasmBuildProfile::Full.estimated_size_bytes(), 3 * 1024 * 1024);
+        assert_eq!(
+            WasmBuildProfile::Full.estimated_size_bytes(),
+            3 * 1024 * 1024
+        );
         assert_eq!(WasmBuildProfile::Core.estimated_size_bytes(), 500 * 1024);
         assert_eq!(WasmBuildProfile::Minimal.estimated_size_bytes(), 300 * 1024);
 

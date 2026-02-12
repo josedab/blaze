@@ -381,24 +381,36 @@ impl ParquetTable {
         let field = schema.fields().get(col_idx)?;
         match field.data_type() {
             ArrowDataType::Int32 | ArrowDataType::Int64 | ArrowDataType::Date32 => {
-                let (stat_min, stat_max) = self.parse_int_stats(min_bytes, max_bytes, field.data_type())?;
+                let (stat_min, stat_max) =
+                    self.parse_int_stats(min_bytes, max_bytes, field.data_type())?;
                 let lit_val = match &literal_val {
                     crate::types::ScalarValue::Int32(Some(v)) => *v as i64,
                     crate::types::ScalarValue::Int64(Some(v)) => *v,
                     crate::types::ScalarValue::Float64(Some(v)) => *v as i64,
                     _ => return None,
                 };
-                Some(Self::prune_with_int_stats(op.as_str(), stat_min, stat_max, lit_val))
+                Some(Self::prune_with_int_stats(
+                    op.as_str(),
+                    stat_min,
+                    stat_max,
+                    lit_val,
+                ))
             }
             ArrowDataType::Float32 | ArrowDataType::Float64 => {
-                let (stat_min, stat_max) = self.parse_float_stats(min_bytes, max_bytes, field.data_type())?;
+                let (stat_min, stat_max) =
+                    self.parse_float_stats(min_bytes, max_bytes, field.data_type())?;
                 let lit_val = match &literal_val {
                     crate::types::ScalarValue::Int32(Some(v)) => *v as f64,
                     crate::types::ScalarValue::Int64(Some(v)) => *v as f64,
                     crate::types::ScalarValue::Float64(Some(v)) => *v,
                     _ => return None,
                 };
-                Some(Self::prune_with_float_stats(op.as_str(), stat_min, stat_max, lit_val))
+                Some(Self::prune_with_float_stats(
+                    op.as_str(),
+                    stat_min,
+                    stat_max,
+                    lit_val,
+                ))
             }
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
                 let stat_min = std::str::from_utf8(min_bytes).ok()?;
@@ -407,13 +419,23 @@ impl ParquetTable {
                     crate::types::ScalarValue::Utf8(Some(v)) => v.as_str(),
                     _ => return None,
                 };
-                Some(Self::prune_with_str_stats(op.as_str(), stat_min, stat_max, lit_val))
+                Some(Self::prune_with_str_stats(
+                    op.as_str(),
+                    stat_min,
+                    stat_max,
+                    lit_val,
+                ))
             }
             _ => None,
         }
     }
 
-    fn parse_int_stats(&self, min_bytes: &[u8], max_bytes: &[u8], dt: &ArrowDataType) -> Option<(i64, i64)> {
+    fn parse_int_stats(
+        &self,
+        min_bytes: &[u8],
+        max_bytes: &[u8],
+        dt: &ArrowDataType,
+    ) -> Option<(i64, i64)> {
         match dt {
             ArrowDataType::Int32 | ArrowDataType::Date32 => {
                 let min = i32::from_le_bytes(min_bytes.try_into().ok()?) as i64;
@@ -429,7 +451,12 @@ impl ParquetTable {
         }
     }
 
-    fn parse_float_stats(&self, min_bytes: &[u8], max_bytes: &[u8], dt: &ArrowDataType) -> Option<(f64, f64)> {
+    fn parse_float_stats(
+        &self,
+        min_bytes: &[u8],
+        max_bytes: &[u8],
+        dt: &ArrowDataType,
+    ) -> Option<(f64, f64)> {
         match dt {
             ArrowDataType::Float32 => {
                 let min = f32::from_le_bytes(min_bytes.try_into().ok()?) as f64;

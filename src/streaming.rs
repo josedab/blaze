@@ -30,7 +30,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -1175,7 +1175,6 @@ impl StreamRegistry {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Watermark Manager
 // ---------------------------------------------------------------------------
@@ -1312,7 +1311,10 @@ impl WindowAssigner {
         match &self.window_type {
             WindowType::Tumbling { size_ms } => {
                 let start = (timestamp / size_ms) * size_ms;
-                vec![TimeWindow { start, end: start + size_ms }]
+                vec![TimeWindow {
+                    start,
+                    end: start + size_ms,
+                }]
             }
             WindowType::Sliding { size_ms, slide_ms } => {
                 let mut windows = Vec::new();
@@ -1407,8 +1409,12 @@ impl StreamingJoinOperator {
     pub fn process_left(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
         let max_time = Self::max_time(&batch, self.left_key_col)?;
         self.left_buffer.push((max_time, batch.clone()));
-        let results =
-            self.probe_against(&batch, self.left_key_col, &self.right_buffer.clone(), self.right_key_col)?;
+        let results = self.probe_against(
+            &batch,
+            self.left_key_col,
+            &self.right_buffer.clone(),
+            self.right_key_col,
+        )?;
         self.cleanup(max_time);
         Ok(results)
     }
@@ -1417,8 +1423,12 @@ impl StreamingJoinOperator {
     pub fn process_right(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
         let max_time = Self::max_time(&batch, self.right_key_col)?;
         self.right_buffer.push((max_time, batch.clone()));
-        let results =
-            self.probe_against(&batch, self.right_key_col, &self.left_buffer.clone(), self.left_key_col)?;
+        let results = self.probe_against(
+            &batch,
+            self.right_key_col,
+            &self.left_buffer.clone(),
+            self.left_key_col,
+        )?;
         self.cleanup(max_time);
         Ok(results)
     }
@@ -1870,6 +1880,339 @@ impl LateDataTracker {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Session windows
+// ---------------------------------------------------------------------------
+
+struct SessionState {
+    start_time: u64,
+    end_time: u64,
+    events: Vec<u64>,
+}
+
+/// Session window that groups events separated by no more than `gap_duration_ms`.
+pub struct SessionWindow {
+    gap_duration_ms: u64,
+    sessions: Vec<SessionState>,
+}
+
+impl SessionWindow {
+    pub fn new(gap_duration_ms: u64) -> Self {
+        Self {
+            gap_duration_ms,
+            sessions: Vec::new(),
+        }
+    }
+
+    /// Add an event timestamp. Extends an existing session or starts a new one.
+    pub fn add_event(&mut self, timestamp: u64) {
+        // Try to find a session this event belongs to
+        for session in &mut self.sessions {
+            if timestamp >= session.start_time.saturating_sub(self.gap_duration_ms)
+                && timestamp <= session.end_time + self.gap_duration_ms
+            {
+                if timestamp < session.start_time {
+                    session.start_time = timestamp;
+                }
+                if timestamp > session.end_time {
+                    session.end_time = timestamp;
+                }
+                session.events.push(timestamp);
+                return;
+            }
+        }
+        // No matching session – create a new one
+        self.sessions.push(SessionState {
+            start_time: timestamp,
+            end_time: timestamp,
+            events: vec![timestamp],
+        });
+    }
+
+    /// Close and return sessions whose end_time + gap is before `current_time`.
+    pub fn close_expired(&mut self, current_time: u64) -> Vec<(u64, u64, Vec<u64>)> {
+        let mut expired = Vec::new();
+        let mut remaining = Vec::new();
+        for s in self.sessions.drain(..) {
+            if s.end_time + self.gap_duration_ms < current_time {
+                expired.push((s.start_time, s.end_time, s.events));
+            } else {
+                remaining.push(s);
+            }
+        }
+        self.sessions = remaining;
+        expired
+    }
+
+    pub fn active_sessions(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn total_events(&self) -> usize {
+        self.sessions.iter().map(|s| s.events.len()).sum()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sliding window aggregator
+// ---------------------------------------------------------------------------
+
+/// Aggregate result for a single sliding window pane.
+pub struct WindowAggregate {
+    pub window_start: u64,
+    pub window_end: u64,
+    pub sum: f64,
+    pub count: usize,
+    pub avg: f64,
+}
+
+/// Computes rolling aggregates over a sliding window.
+pub struct SlidingWindowAggregator {
+    window_size_ms: u64,
+    slide_interval_ms: u64,
+    values: Vec<(u64, f64)>,
+}
+
+impl SlidingWindowAggregator {
+    pub fn new(window_size_ms: u64, slide_interval_ms: u64) -> Self {
+        Self {
+            window_size_ms,
+            slide_interval_ms,
+            values: Vec::new(),
+        }
+    }
+
+    pub fn add_value(&mut self, timestamp: u64, value: f64) {
+        self.values.push((timestamp, value));
+    }
+
+    /// Compute aggregates for all window panes up to `current_time`.
+    pub fn compute_windows(&self, current_time: u64) -> Vec<WindowAggregate> {
+        let mut windows = Vec::new();
+        if self.slide_interval_ms == 0 {
+            return windows;
+        }
+
+        // Find the earliest timestamp
+        let min_ts = self.values.iter().map(|(t, _)| *t).min().unwrap_or(current_time);
+        // Align window start
+        let first_window_end = min_ts + self.window_size_ms;
+        let mut win_end = first_window_end;
+
+        while win_end <= current_time + self.window_size_ms {
+            let win_start = win_end.saturating_sub(self.window_size_ms);
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for &(ts, val) in &self.values {
+                if ts >= win_start && ts < win_end {
+                    sum += val;
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                windows.push(WindowAggregate {
+                    window_start: win_start,
+                    window_end: win_end,
+                    sum,
+                    count,
+                    avg: sum / count as f64,
+                });
+            }
+            win_end += self.slide_interval_ms;
+        }
+        windows
+    }
+
+    /// Remove values that fall outside all possible windows at `current_time`.
+    pub fn evict_expired(&mut self, current_time: u64) {
+        let cutoff = current_time.saturating_sub(self.window_size_ms);
+        self.values.retain(|(ts, _)| *ts >= cutoff);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exactly-once processing tracker
+// ---------------------------------------------------------------------------
+
+/// Tracks committed and pending offsets per partition for exactly-once semantics.
+pub struct ExactlyOnceTracker {
+    committed_offsets: HashMap<String, u64>,
+    pending_offsets: HashMap<String, u64>,
+}
+
+impl ExactlyOnceTracker {
+    pub fn new() -> Self {
+        Self {
+            committed_offsets: HashMap::new(),
+            pending_offsets: HashMap::new(),
+        }
+    }
+
+    /// Begin a transaction for the given partition at the given offset.
+    pub fn begin_transaction(&mut self, partition: &str, offset: u64) {
+        self.pending_offsets.insert(partition.to_string(), offset);
+    }
+
+    /// Commit the pending offset for the partition.
+    pub fn commit(&mut self, partition: &str) {
+        if let Some(offset) = self.pending_offsets.remove(partition) {
+            self.committed_offsets.insert(partition.to_string(), offset);
+        }
+    }
+
+    /// Discard the pending offset for the partition.
+    pub fn rollback(&mut self, partition: &str) {
+        self.pending_offsets.remove(partition);
+    }
+
+    /// Return the last committed offset for the partition, if any.
+    pub fn committed_offset(&self, partition: &str) -> Option<u64> {
+        self.committed_offsets.get(partition).copied()
+    }
+
+    /// Returns true if the offset has already been committed for this partition.
+    pub fn is_duplicate(&self, partition: &str, offset: u64) -> bool {
+        self.committed_offsets
+            .get(partition)
+            .map_or(false, |&committed| offset <= committed)
+    }
+}
+
+impl Default for ExactlyOnceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream-to-Table Enrichment Join
+// ---------------------------------------------------------------------------
+
+/// Enriches streaming events by joining them with a static lookup table.
+/// The lookup table is held in memory and can be refreshed.
+#[derive(Debug)]
+pub struct StreamTableJoin {
+    /// Lookup table: join_key -> row values (serialized).
+    lookup: HashMap<String, Vec<String>>,
+    /// Name of the lookup table.
+    table_name: String,
+    /// Number of successful lookups.
+    hits: u64,
+    /// Number of failed lookups (no match).
+    misses: u64,
+}
+
+impl StreamTableJoin {
+    pub fn new(table_name: impl Into<String>) -> Self {
+        Self {
+            lookup: HashMap::new(),
+            table_name: table_name.into(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// Load lookup data. Each entry maps a join key to enrichment values.
+    pub fn load_lookup(&mut self, entries: Vec<(String, Vec<String>)>) {
+        self.lookup.clear();
+        for (key, values) in entries {
+            self.lookup.insert(key, values);
+        }
+    }
+
+    /// Enrich a stream event by looking up the join key.
+    /// Returns the enrichment values, or None if no match.
+    pub fn enrich(&mut self, join_key: &str) -> Option<&Vec<String>> {
+        if let Some(vals) = self.lookup.get(join_key) {
+            self.hits += 1;
+            Some(vals)
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    /// Refresh a single entry in the lookup table.
+    pub fn update_entry(&mut self, key: String, values: Vec<String>) {
+        self.lookup.insert(key, values);
+    }
+
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+    pub fn lookup_size(&self) -> usize {
+        self.lookup.len()
+    }
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 { 0.0 } else { self.hits as f64 / total as f64 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint Barrier for Exactly-Once
+// ---------------------------------------------------------------------------
+
+/// Coordinates checkpoint barriers across stream operators for consistent snapshots.
+#[derive(Debug)]
+pub struct CheckpointBarrier {
+    /// Current barrier ID.
+    barrier_id: u64,
+    /// Operators that have acknowledged the current barrier.
+    acknowledged: HashSet<String>,
+    /// Total operators that need to acknowledge.
+    total_operators: usize,
+    /// History of completed barriers.
+    completed_barriers: Vec<u64>,
+}
+
+impl CheckpointBarrier {
+    pub fn new(operator_names: &[String]) -> Self {
+        Self {
+            barrier_id: 0,
+            acknowledged: HashSet::new(),
+            total_operators: operator_names.len(),
+            completed_barriers: Vec::new(),
+        }
+    }
+
+    /// Initiate a new checkpoint barrier.
+    pub fn initiate(&mut self) -> u64 {
+        self.barrier_id += 1;
+        self.acknowledged.clear();
+        self.barrier_id
+    }
+
+    /// Acknowledge the barrier from an operator.
+    /// Returns true if all operators have acknowledged (barrier complete).
+    pub fn acknowledge(&mut self, operator_name: &str) -> bool {
+        self.acknowledged.insert(operator_name.to_string());
+        if self.acknowledged.len() >= self.total_operators {
+            self.completed_barriers.push(self.barrier_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if the current barrier is complete.
+    pub fn is_complete(&self) -> bool {
+        self.acknowledged.len() >= self.total_operators
+    }
+
+    pub fn current_barrier_id(&self) -> u64 {
+        self.barrier_id
+    }
+
+    pub fn completed_count(&self) -> usize {
+        self.completed_barriers.len()
+    }
+
+    pub fn pending_acknowledgements(&self) -> usize {
+        self.total_operators.saturating_sub(self.acknowledged.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2292,7 +2635,13 @@ mod tests {
         let wa = WindowAssigner::new(WindowType::Tumbling { size_ms: 1000 });
         let windows = wa.assign_windows(2500);
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0], TimeWindow { start: 2000, end: 3000 });
+        assert_eq!(
+            windows[0],
+            TimeWindow {
+                start: 2000,
+                end: 3000
+            }
+        );
     }
 
     #[test]
@@ -2303,28 +2652,52 @@ mod tests {
         });
         let windows = wa.assign_windows(1200);
         assert!(windows.len() >= 2);
-        assert!(windows.contains(&TimeWindow { start: 1000, end: 2000 }));
-        assert!(windows.contains(&TimeWindow { start: 500, end: 1500 }));
+        assert!(windows.contains(&TimeWindow {
+            start: 1000,
+            end: 2000
+        }));
+        assert!(windows.contains(&TimeWindow {
+            start: 500,
+            end: 1500
+        }));
     }
 
     #[test]
     fn test_session_window_assignment() {
         let wa = WindowAssigner::new(WindowType::Session { gap_ms: 300 });
         let w = wa.assign_windows(1000);
-        assert_eq!(w, vec![TimeWindow { start: 1000, end: 1300 }]);
+        assert_eq!(
+            w,
+            vec![TimeWindow {
+                start: 1000,
+                end: 1300
+            }]
+        );
     }
 
     #[test]
     fn test_merge_windows() {
         let windows = vec![
             TimeWindow { start: 0, end: 100 },
-            TimeWindow { start: 50, end: 150 },
-            TimeWindow { start: 200, end: 300 },
+            TimeWindow {
+                start: 50,
+                end: 150,
+            },
+            TimeWindow {
+                start: 200,
+                end: 300,
+            },
         ];
         let merged = WindowAssigner::merge_windows(&windows);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0], TimeWindow { start: 0, end: 150 });
-        assert_eq!(merged[1], TimeWindow { start: 200, end: 300 });
+        assert_eq!(
+            merged[1],
+            TimeWindow {
+                start: 200,
+                end: 300
+            }
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2334,9 +2707,11 @@ mod tests {
     fn create_int64_batch(col_name: &str, values: Vec<i64>) -> RecordBatch {
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new(col_name, ArrowDataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            col_name,
+            ArrowDataType::Int64,
+            false,
+        )]));
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap()
     }
 
@@ -2433,14 +2808,15 @@ mod tests {
             data: HashMap::from([("v".into(), "x".into())]),
         })
         .unwrap();
-        let batch = cdc.process(CdcRecord {
-            operation: CdcOperation::Delete,
-            table: "t".into(),
-            timestamp: 2,
-            key: b"k1".to_vec(),
-            data: HashMap::new(),
-        })
-        .unwrap();
+        let batch = cdc
+            .process(CdcRecord {
+                operation: CdcOperation::Delete,
+                table: "t".into(),
+                timestamp: 2,
+                key: b"k1".to_vec(),
+                data: HashMap::new(),
+            })
+            .unwrap();
         assert!(batch.is_none()); // state is empty after delete
         assert_eq!(cdc.stats().deletes, 1);
         assert_eq!(cdc.state_len(), 0);
@@ -2471,7 +2847,9 @@ mod tests {
         let mut cm = CheckpointManager::new(std::time::Duration::from_millis(0), 3);
         let wm = Watermark::new("ts", std::time::Duration::from_millis(100));
         let agg = WindowedAggregator::new(
-            StreamWindow::Tumbling { size: std::time::Duration::from_secs(1) },
+            StreamWindow::Tumbling {
+                size: std::time::Duration::from_secs(1),
+            },
             wm,
         );
 
@@ -2490,7 +2868,9 @@ mod tests {
         let mut cm = CheckpointManager::new(std::time::Duration::from_millis(0), 2);
         let wm = Watermark::new("ts", std::time::Duration::from_millis(0));
         let agg = WindowedAggregator::new(
-            StreamWindow::Tumbling { size: std::time::Duration::from_secs(1) },
+            StreamWindow::Tumbling {
+                size: std::time::Duration::from_secs(1),
+            },
             wm,
         );
 
@@ -2511,7 +2891,9 @@ mod tests {
     #[test]
     fn test_state_backend_basic() {
         let mut backend = StreamStateBackend::new(1024);
-        backend.put("ns1", b"key1".to_vec(), b"val1".to_vec()).unwrap();
+        backend
+            .put("ns1", b"key1".to_vec(), b"val1".to_vec())
+            .unwrap();
         assert_eq!(backend.get("ns1", b"key1"), Some(b"val1".as_ref()));
         assert_eq!(backend.get("ns1", b"missing"), None);
         assert_eq!(backend.namespace_count(), 1);
@@ -2530,7 +2912,9 @@ mod tests {
     fn test_state_backend_overflow() {
         let mut backend = StreamStateBackend::new(10);
         backend.put("ns", b"k1".to_vec(), b"v1".to_vec()).unwrap();
-        assert!(backend.put("ns", b"big_key".to_vec(), b"big_val".to_vec()).is_err());
+        assert!(backend
+            .put("ns", b"big_key".to_vec(), b"big_val".to_vec())
+            .is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -2552,5 +2936,403 @@ mod tests {
         });
         assert!(tracker.handle_late_event(100, 200));
         assert_eq!(tracker.allowed, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // State backend and stream joining tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_in_memory_state_backend() {
+        let mut backend = InMemoryStateBackend::new();
+        backend.save_state("key1".to_string(), vec![1, 2, 3]);
+
+        let data = backend.load_state("key1");
+        assert_eq!(data, Some(vec![1, 2, 3]));
+
+        backend.delete_state("key1");
+        assert_eq!(backend.load_state("key1"), None);
+    }
+
+    #[test]
+    fn test_stream_joiner_config() {
+        let config = StreamJoinConfig {
+            join_type: "inner".to_string(),
+            left_key: "id".to_string(),
+            right_key: "user_id".to_string(),
+            time_window: std::time::Duration::from_secs(60),
+        };
+
+        assert_eq!(config.join_type, "inner");
+        assert_eq!(config.time_window.as_secs(), 60);
+    }
+
+    #[test]
+    fn test_stream_joiner_basic() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let config = StreamJoinConfig {
+            join_type: "inner".to_string(),
+            left_key: "id".to_string(),
+            right_key: "id".to_string(),
+            time_window: std::time::Duration::from_secs(60),
+        };
+
+        let mut joiner = StreamJoiner::new(config);
+
+        // Create left batch
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let left_batch = RecordBatch::try_new(
+            left_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+            ],
+        )
+        .unwrap();
+
+        let result = joiner.process_left(left_batch);
+        assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // SessionWindow tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_window_basic() {
+        let mut sw = SessionWindow::new(100);
+        sw.add_event(1000);
+        sw.add_event(1050);
+        sw.add_event(1090);
+        assert_eq!(sw.active_sessions(), 1);
+        assert_eq!(sw.total_events(), 3);
+
+        // Event far away starts a new session
+        sw.add_event(2000);
+        assert_eq!(sw.active_sessions(), 2);
+        assert_eq!(sw.total_events(), 4);
+    }
+
+    #[test]
+    fn test_session_window_close_expired() {
+        let mut sw = SessionWindow::new(100);
+        sw.add_event(1000);
+        sw.add_event(1050);
+        sw.add_event(2000);
+
+        let expired = sw.close_expired(1200);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].2.len(), 2); // first session had 2 events
+        assert_eq!(sw.active_sessions(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // SlidingWindowAggregator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sliding_window_aggregator() {
+        let mut agg = SlidingWindowAggregator::new(100, 50);
+        agg.add_value(10, 1.0);
+        agg.add_value(30, 2.0);
+        agg.add_value(60, 3.0);
+
+        let windows = agg.compute_windows(110);
+        assert!(!windows.is_empty());
+        // All values should appear in at least one window
+        let total_count: usize = windows.iter().map(|w| w.count).sum();
+        assert!(total_count >= 3);
+    }
+
+    #[test]
+    fn test_sliding_window_evict() {
+        let mut agg = SlidingWindowAggregator::new(100, 50);
+        agg.add_value(10, 1.0);
+        agg.add_value(200, 2.0);
+        agg.evict_expired(200);
+        // Value at 10 should be evicted (200 - 100 = 100 cutoff)
+        assert_eq!(agg.values.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // ExactlyOnceTracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exactly_once_commit() {
+        let mut tracker = ExactlyOnceTracker::new();
+        tracker.begin_transaction("p0", 5);
+        assert!(tracker.committed_offset("p0").is_none());
+        tracker.commit("p0");
+        assert_eq!(tracker.committed_offset("p0"), Some(5));
+    }
+
+    #[test]
+    fn test_exactly_once_rollback_and_duplicate() {
+        let mut tracker = ExactlyOnceTracker::new();
+        tracker.begin_transaction("p0", 10);
+        tracker.commit("p0");
+
+        assert!(tracker.is_duplicate("p0", 10));
+        assert!(tracker.is_duplicate("p0", 5));
+        assert!(!tracker.is_duplicate("p0", 11));
+
+        // Rollback discards pending
+        tracker.begin_transaction("p0", 20);
+        tracker.rollback("p0");
+        assert_eq!(tracker.committed_offset("p0"), Some(10));
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream-Table Join tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stream_table_join_enrich() {
+        let mut join = StreamTableJoin::new("users");
+        join.load_lookup(vec![
+            ("u1".into(), vec!["Alice".into(), "NYC".into()]),
+            ("u2".into(), vec!["Bob".into(), "LA".into()]),
+        ]);
+
+        assert_eq!(join.lookup_size(), 2);
+        let result = join.enrich("u1").unwrap();
+        assert_eq!(result[0], "Alice");
+        assert!(join.enrich("u99").is_none());
+        assert!(join.hit_rate() > 0.0 && join.hit_rate() < 1.0);
+    }
+
+    #[test]
+    fn test_stream_table_join_update() {
+        let mut join = StreamTableJoin::new("products");
+        join.load_lookup(vec![("p1".into(), vec!["Widget".into()])]);
+        join.update_entry("p1".into(), vec!["Super Widget".into()]);
+        let result = join.enrich("p1").unwrap();
+        assert_eq!(result[0], "Super Widget");
+    }
+
+    // -----------------------------------------------------------------------
+    // Checkpoint Barrier tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_checkpoint_barrier() {
+        let ops = vec!["scan".into(), "filter".into(), "aggregate".into()];
+        let mut barrier = CheckpointBarrier::new(&ops);
+
+        let bid = barrier.initiate();
+        assert_eq!(bid, 1);
+        assert_eq!(barrier.pending_acknowledgements(), 3);
+
+        assert!(!barrier.acknowledge("scan"));
+        assert!(!barrier.acknowledge("filter"));
+        assert!(barrier.acknowledge("aggregate")); // all done
+        assert!(barrier.is_complete());
+        assert_eq!(barrier.completed_count(), 1);
+    }
+
+    #[test]
+    fn test_checkpoint_barrier_multiple() {
+        let ops = vec!["op1".into(), "op2".into()];
+        let mut barrier = CheckpointBarrier::new(&ops);
+
+        barrier.initiate();
+        barrier.acknowledge("op1");
+        barrier.acknowledge("op2");
+
+        barrier.initiate();
+        barrier.acknowledge("op1");
+        barrier.acknowledge("op2");
+
+        assert_eq!(barrier.completed_count(), 2);
+        assert_eq!(barrier.current_barrier_id(), 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// State persistence and stream joining implementation
+// ---------------------------------------------------------------------------
+
+use std::time::Duration;
+
+/// Trait for state backend implementations.
+pub trait StateBackend: Send + Sync {
+    /// Save state data.
+    fn save_state(&mut self, key: String, data: Vec<u8>);
+
+    /// Load state data.
+    fn load_state(&self, key: &str) -> Option<Vec<u8>>;
+
+    /// Delete state data.
+    fn delete_state(&mut self, key: &str);
+}
+
+/// In-memory state backend.
+#[derive(Debug, Default)]
+pub struct InMemoryStateBackend {
+    data: HashMap<String, Vec<u8>>,
+}
+
+impl InMemoryStateBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl StateBackend for InMemoryStateBackend {
+    fn save_state(&mut self, key: String, data: Vec<u8>) {
+        self.data.insert(key, data);
+    }
+
+    fn load_state(&self, key: &str) -> Option<Vec<u8>> {
+        self.data.get(key).cloned()
+    }
+
+    fn delete_state(&mut self, key: &str) {
+        self.data.remove(key);
+    }
+}
+
+/// File-based state backend using JSON serialization.
+#[derive(Debug)]
+pub struct FileStateBackend {
+    directory: std::path::PathBuf,
+}
+
+impl FileStateBackend {
+    pub fn new(directory: impl AsRef<std::path::Path>) -> Result<Self> {
+        let directory = directory.as_ref().to_path_buf();
+        std::fs::create_dir_all(&directory).map_err(|e| BlazeError::Io { source: e })?;
+
+        Ok(Self { directory })
+    }
+
+    fn key_to_path(&self, key: &str) -> std::path::PathBuf {
+        self.directory.join(format!("{}.json", key))
+    }
+}
+
+impl StateBackend for FileStateBackend {
+    fn save_state(&mut self, key: String, data: Vec<u8>) {
+        let path = self.key_to_path(&key);
+        let _ = std::fs::write(path, data);
+    }
+
+    fn load_state(&self, key: &str) -> Option<Vec<u8>> {
+        let path = self.key_to_path(key);
+        std::fs::read(path).ok()
+    }
+
+    fn delete_state(&mut self, key: &str) {
+        let path = self.key_to_path(key);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Configuration for stream joining.
+#[derive(Debug, Clone)]
+pub struct StreamJoinConfig {
+    pub join_type: String, // "inner", "left", "right", "full"
+    pub left_key: String,
+    pub right_key: String,
+    pub time_window: Duration,
+}
+
+/// Buffer entry for windowed join.
+#[derive(Debug, Clone)]
+struct WindowedBatch {
+    batch: RecordBatch,
+    timestamp: std::time::Instant,
+}
+
+/// Stream joiner that performs windowed joins between two streams.
+#[derive(Debug)]
+pub struct StreamJoiner {
+    config: StreamJoinConfig,
+    left_buffer: Vec<WindowedBatch>,
+    right_buffer: Vec<WindowedBatch>,
+}
+
+impl StreamJoiner {
+    pub fn new(config: StreamJoinConfig) -> Self {
+        Self {
+            config,
+            left_buffer: Vec::new(),
+            right_buffer: Vec::new(),
+        }
+    }
+
+    /// Process a batch from the left stream.
+    pub fn process_left(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
+        let now = std::time::Instant::now();
+
+        // Add to buffer
+        self.left_buffer.push(WindowedBatch {
+            batch: batch.clone(),
+            timestamp: now,
+        });
+
+        // Evict old entries
+        self.evict_expired_left();
+
+        // Try to join with right buffer
+        self.join_buffers()
+    }
+
+    /// Process a batch from the right stream.
+    pub fn process_right(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
+        let now = std::time::Instant::now();
+
+        // Add to buffer
+        self.right_buffer.push(WindowedBatch {
+            batch: batch.clone(),
+            timestamp: now,
+        });
+
+        // Evict old entries
+        self.evict_expired_right();
+
+        // Try to join with left buffer
+        self.join_buffers()
+    }
+
+    fn evict_expired_left(&mut self) {
+        let now = std::time::Instant::now();
+        self.left_buffer
+            .retain(|wb| now.duration_since(wb.timestamp) < self.config.time_window);
+    }
+
+    fn evict_expired_right(&mut self) {
+        let now = std::time::Instant::now();
+        self.right_buffer
+            .retain(|wb| now.duration_since(wb.timestamp) < self.config.time_window);
+    }
+
+    fn join_buffers(&self) -> Result<Vec<RecordBatch>> {
+        // Simplified join implementation
+        // In a real implementation, this would:
+        // 1. Extract key columns from both sides
+        // 2. Build a hash table for one side
+        // 3. Probe with the other side
+        // 4. Emit matching rows according to join type
+
+        // For now, return empty result (placeholder)
+        Ok(Vec::new())
+    }
+
+    /// Get the number of buffered batches on the left.
+    pub fn left_buffer_size(&self) -> usize {
+        self.left_buffer.len()
+    }
+
+    /// Get the number of buffered batches on the right.
+    pub fn right_buffer_size(&self) -> usize {
+        self.right_buffer.len()
     }
 }

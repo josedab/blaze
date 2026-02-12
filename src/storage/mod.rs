@@ -20,7 +20,9 @@ pub use self::object_store::{
     ObjectStoreRegistry, ObjectStoreTable,
 };
 pub use self::parquet::{write_parquet, write_parquet_with_options, ParquetOptions, ParquetTable};
-pub use self::type_inference::{infer_csv_schema, infer_json_schema, merge_schemas, InferenceConfig};
+pub use self::type_inference::{
+    infer_csv_schema, infer_json_schema, merge_schemas, InferenceConfig,
+};
 pub use memory::MemoryTable;
 pub use persistent::{
     persistent_table, BufferPool, Page, PageType, PersistentConfig, PersistentTable, WalEntry,
@@ -83,8 +85,7 @@ pub fn read_json_inferred(path: impl AsRef<Path>) -> Result<Arc<dyn TableProvide
     // Read all lines and build record batches
     let file = std::fs::File::open(path.as_ref())?;
     let reader = std::io::BufReader::new(file);
-    let decoder = arrow::json::ReaderBuilder::new(schema.clone())
-        .build(reader)?;
+    let decoder = arrow::json::ReaderBuilder::new(schema.clone()).build(reader)?;
 
     let mut batches = Vec::new();
     for batch_result in decoder {
