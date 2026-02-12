@@ -22,7 +22,7 @@
 mod cardinality;
 mod cost_model;
 mod join_ordering;
-mod statistics;
+pub mod statistics;
 
 pub use cardinality::CardinalityEstimator;
 pub use cost_model::{Cost, CostModel, DEFAULT_CPU_COST, DEFAULT_IO_COST};

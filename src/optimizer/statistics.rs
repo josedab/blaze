@@ -406,6 +406,94 @@ impl Clone for StatisticsManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Histogram Builder
+// ---------------------------------------------------------------------------
+
+/// Builds equi-width histograms from sorted numeric values.
+pub struct HistogramBuilder;
+
+impl HistogramBuilder {
+    /// Build an equi-width histogram from sorted f64 values.
+    pub fn build_equiwidth(values: &[f64], num_buckets: usize) -> Histogram {
+        if values.is_empty() || num_buckets == 0 {
+            return Histogram::equiwidth(Vec::new());
+        }
+
+        let min_val = values[0];
+        let max_val = values[values.len() - 1];
+        let range = max_val - min_val;
+        if range == 0.0 {
+            return Histogram::singleton(vec![HistogramBucket::new(
+                format!("{}", min_val),
+                format!("{}", max_val),
+                values.len(),
+                1,
+            )]);
+        }
+
+        let bucket_width = range / num_buckets as f64;
+        let mut buckets = Vec::with_capacity(num_buckets);
+        let mut val_idx = 0;
+
+        for i in 0..num_buckets {
+            let lower = min_val + i as f64 * bucket_width;
+            let upper = if i == num_buckets - 1 {
+                max_val
+            } else {
+                min_val + (i + 1) as f64 * bucket_width
+            };
+
+            let mut frequency = 0;
+            let mut distinct = std::collections::HashSet::new();
+            while val_idx < values.len() && (values[val_idx] <= upper || i == num_buckets - 1) {
+                if values[val_idx] >= lower {
+                    frequency += 1;
+                    distinct.insert(values[val_idx].to_bits());
+                }
+                if values[val_idx] > upper && i < num_buckets - 1 {
+                    break;
+                }
+                val_idx += 1;
+            }
+
+            buckets.push(HistogramBucket::new(
+                format!("{}", lower),
+                format!("{}", upper),
+                frequency,
+                distinct.len(),
+            ));
+        }
+
+        Histogram::equiwidth(buckets)
+    }
+
+    /// Build an equi-height histogram from sorted f64 values.
+    pub fn build_equiheight(values: &[f64], num_buckets: usize) -> Histogram {
+        if values.is_empty() || num_buckets == 0 {
+            return Histogram::equiheight(Vec::new());
+        }
+
+        let rows_per_bucket = (values.len() + num_buckets - 1) / num_buckets;
+        let mut buckets = Vec::with_capacity(num_buckets);
+
+        for chunk in values.chunks(rows_per_bucket) {
+            let lower = chunk[0];
+            let upper = chunk[chunk.len() - 1];
+            let distinct: std::collections::HashSet<u64> =
+                chunk.iter().map(|v| v.to_bits()).collect();
+            buckets.push(HistogramBucket::new(
+                format!("{}", lower),
+                format!("{}", upper),
+                chunk.len(),
+                distinct.len(),
+            ));
+        }
+
+        Histogram::equiheight(buckets)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
