@@ -586,6 +586,16 @@ impl ExecutionStats {
                 .sum::<u64>()
     }
 
+    /// Get total rows output
+    pub fn total_rows_output(&self) -> usize {
+        self.rows_output
+            + self
+                .children
+                .iter()
+                .map(|c| c.total_rows_output())
+                .sum::<usize>()
+    }
+
     /// Format as a tree for display
     pub fn format_tree(&self, indent: usize) -> String {
         let mut result = String::new();
