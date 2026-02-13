@@ -362,6 +362,34 @@ impl PyQueryResult {
     fn __len__(&self) -> usize {
         self.num_rows()
     }
+
+    /// Convert to Arrow IPC format for zero-copy transfer.
+    ///
+    /// Returns:
+    ///     Bytes containing the Arrow IPC stream format.
+    fn to_arrow_ipc(&self, py: Python<'_>) -> PyResult<PyObject> {
+        use arrow::ipc::writer::StreamWriter;
+        use std::io::Cursor;
+
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = StreamWriter::try_new(&mut cursor, &self.batches[0].schema())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            for batch in &self.batches {
+                writer
+                    .write(batch)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            }
+
+            writer
+                .finish()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+
+        let bytes = cursor.into_inner();
+        Ok(pyo3::types::PyBytes::new_bound(py, &bytes).into())
+    }
 }
 
 /// Python wrapper for prepared statements.
@@ -1133,6 +1161,8 @@ fn pyblaze(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQueryResult>()?;
     m.add_class::<PyPreparedStatement>()?;
     m.add_class::<PySchema>()?;
+    m.add_class::<PyUdfRegistry>()?;
+    m.add_class::<PyUdfInfo>()?;
     m.add_function(wrap_pyfunction!(connect, m)?)?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(read_parquet, m)?)?;
@@ -1142,6 +1172,170 @@ fn pyblaze(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Python UDF Registry
+// ---------------------------------------------------------------------------
+
+/// Information about a registered Python UDF.
+#[derive(Debug, Clone)]
+#[pyclass(name = "PyUdfInfo")]
+pub struct PyUdfInfo {
+    /// UDF name
+    #[pyo3(get)]
+    pub name: String,
+    /// Argument names
+    #[pyo3(get)]
+    pub arg_names: Vec<String>,
+    /// Argument types (as strings)
+    #[pyo3(get)]
+    pub arg_types: Vec<String>,
+    /// Return type (as string)
+    #[pyo3(get)]
+    pub return_type: String,
+}
+
+#[pymethods]
+impl PyUdfInfo {
+    fn __repr__(&self) -> String {
+        format!(
+            "PyUdfInfo(name='{}', args={:?}, return_type='{}')",
+            self.name, self.arg_names, self.return_type
+        )
+    }
+}
+
+/// Registry for Python UDFs.
+#[pyclass(name = "PyUdfRegistry")]
+pub struct PyUdfRegistry {
+    udfs: Arc<RwLock<HashMap<String, PyUdfInfo>>>,
+    /// Map UDF name -> Python function body as string
+    udf_bodies: Arc<RwLock<HashMap<String, String>>>,
+}
+
+#[pymethods]
+impl PyUdfRegistry {
+    /// Create a new UDF registry.
+    #[new]
+    fn new() -> Self {
+        Self {
+            udfs: Arc::new(RwLock::new(HashMap::new())),
+            udf_bodies: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Register a Python UDF.
+    ///
+    /// Args:
+    ///     name: The name of the UDF.
+    ///     arg_names: List of argument names.
+    ///     arg_types: List of argument type strings (e.g., ["INT", "VARCHAR"]).
+    ///     return_type: Return type string (e.g., "FLOAT").
+    ///     body: Python function body as a string.
+    fn register_python_udf(
+        &self,
+        name: String,
+        arg_names: Vec<String>,
+        arg_types: Vec<String>,
+        return_type: String,
+        body: String,
+    ) -> PyResult<()> {
+        if arg_names.len() != arg_types.len() {
+            return Err(PyValueError::new_err(
+                "arg_names and arg_types must have the same length",
+            ));
+        }
+
+        let info = PyUdfInfo {
+            name: name.clone(),
+            arg_names,
+            arg_types,
+            return_type,
+        };
+
+        self.udfs.write().insert(name.clone(), info);
+        self.udf_bodies.write().insert(name, body);
+
+        Ok(())
+    }
+
+    /// List all registered UDFs.
+    ///
+    /// Returns:
+    ///     A list of PyUdfInfo objects.
+    fn list_python_udfs(&self) -> Vec<PyUdfInfo> {
+        self.udfs.read().values().cloned().collect()
+    }
+
+    /// Get a specific UDF by name.
+    ///
+    /// Args:
+    ///     name: The name of the UDF.
+    ///
+    /// Returns:
+    ///     PyUdfInfo or None if not found.
+    fn get_udf(&self, name: &str) -> Option<PyUdfInfo> {
+        self.udfs.read().get(name).cloned()
+    }
+
+    /// Get the body of a UDF.
+    ///
+    /// Args:
+    ///     name: The name of the UDF.
+    ///
+    /// Returns:
+    ///     The Python function body as a string, or None if not found.
+    fn get_udf_body(&self, name: &str) -> Option<String> {
+        self.udf_bodies.read().get(name).cloned()
+    }
+
+    /// Check if a UDF exists.
+    ///
+    /// Args:
+    ///     name: The name of the UDF.
+    ///
+    /// Returns:
+    ///     True if the UDF exists, False otherwise.
+    fn has_udf(&self, name: &str) -> bool {
+        self.udfs.read().contains_key(name)
+    }
+
+    /// Unregister a UDF.
+    ///
+    /// Args:
+    ///     name: The name of the UDF to remove.
+    ///
+    /// Returns:
+    ///     True if the UDF was removed, False if it didn't exist.
+    fn unregister_udf(&self, name: &str) -> bool {
+        let removed = self.udfs.write().remove(name).is_some();
+        if removed {
+            self.udf_bodies.write().remove(name);
+        }
+        removed
+    }
+
+    /// Clear all registered UDFs.
+    fn clear(&self) {
+        self.udfs.write().clear();
+        self.udf_bodies.write().clear();
+    }
+
+    /// Get the number of registered UDFs.
+    fn __len__(&self) -> usize {
+        self.udfs.read().len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PyUdfRegistry(count={})", self.__len__())
+    }
+}
+
+impl Default for PyUdfRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -1159,5 +1353,93 @@ mod tests {
 
         let null_val = ScalarValue::Null;
         assert!(matches!(null_val, ScalarValue::Null));
+    }
+
+    #[test]
+    fn test_udf_registry() {
+        let registry = PyUdfRegistry::new();
+
+        assert_eq!(registry.__len__(), 0);
+        assert!(!registry.has_udf("my_func"));
+
+        // Register a UDF
+        registry
+            .register_python_udf(
+                "my_func".to_string(),
+                vec!["x".to_string(), "y".to_string()],
+                vec!["INT".to_string(), "INT".to_string()],
+                "INT".to_string(),
+                "return x + y".to_string(),
+            )
+            .unwrap();
+
+        assert_eq!(registry.__len__(), 1);
+        assert!(registry.has_udf("my_func"));
+
+        // List UDFs
+        let udfs = registry.list_python_udfs();
+        assert_eq!(udfs.len(), 1);
+        assert_eq!(udfs[0].name, "my_func");
+        assert_eq!(udfs[0].arg_names, vec!["x", "y"]);
+
+        // Get specific UDF
+        let info = registry.get_udf("my_func");
+        assert!(info.is_some());
+        assert_eq!(info.unwrap().name, "my_func");
+
+        // Get UDF body
+        let body = registry.get_udf_body("my_func");
+        assert_eq!(body, Some("return x + y".to_string()));
+
+        // Unregister
+        assert!(registry.unregister_udf("my_func"));
+        assert!(!registry.has_udf("my_func"));
+        assert_eq!(registry.__len__(), 0);
+    }
+
+    #[test]
+    fn test_udf_registry_validation() {
+        let registry = PyUdfRegistry::new();
+
+        // Mismatched arg_names and arg_types should fail
+        let result = registry.register_python_udf(
+            "bad_func".to_string(),
+            vec!["x".to_string()],
+            vec!["INT".to_string(), "INT".to_string()],
+            "INT".to_string(),
+            "body".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_udf_registry_clear() {
+        let registry = PyUdfRegistry::new();
+
+        registry
+            .register_python_udf(
+                "func1".to_string(),
+                vec![],
+                vec![],
+                "INT".to_string(),
+                "return 1".to_string(),
+            )
+            .unwrap();
+
+        registry
+            .register_python_udf(
+                "func2".to_string(),
+                vec![],
+                vec![],
+                "INT".to_string(),
+                "return 2".to_string(),
+            )
+            .unwrap();
+
+        assert_eq!(registry.__len__(), 2);
+
+        registry.clear();
+        assert_eq!(registry.__len__(), 0);
     }
 }
