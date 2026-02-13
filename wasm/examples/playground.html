@@ -625,6 +625,44 @@ ORDER BY diff_from_avg DESC`
 
     // Initialize on load
     init();
+
+    // --- Embeddable iframe support ---
+    // When embedded in an iframe, listen for postMessage commands
+    window.addEventListener('message', function(event) {
+      if (event.data && event.data.type === 'blaze-query') {
+        const editor = document.getElementById('editor');
+        if (editor && event.data.sql) {
+          editor.value = event.data.sql;
+          if (event.data.autorun) {
+            executeQuery();
+          }
+        }
+      }
+      if (event.data && event.data.type === 'blaze-get-result') {
+        const results = document.getElementById('results');
+        if (results && event.source) {
+          event.source.postMessage({
+            type: 'blaze-result',
+            html: results.innerHTML
+          }, '*');
+        }
+      }
+    });
+
+    // Expose API for embedding
+    window.BlazePlayground = {
+      setQuery: function(sql) {
+        const editor = document.getElementById('editor');
+        if (editor) editor.value = sql;
+      },
+      run: function() { executeQuery(); },
+      getShareUrl: function() {
+        const editor = document.getElementById('editor');
+        if (!editor) return '';
+        const encoded = btoa(unescape(encodeURIComponent(editor.value)));
+        return window.location.origin + window.location.pathname + '#q=' + encoded;
+      }
+    };
   </script>
 </body>
 </html>
