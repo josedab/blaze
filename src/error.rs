@@ -369,4 +369,253 @@ mod tests {
         assert!(msg.contains("Did you mean"));
         assert!(msg.contains("name"));
     }
+
+    // --- Additional error coverage tests ---
+
+    #[test]
+    fn test_error_resource_exhausted() {
+        let err = BlazeError::resource_exhausted("Out of memory");
+        let msg = err.to_string();
+        assert!(msg.contains("Resource limit exceeded"));
+        assert!(msg.contains("Out of memory"));
+    }
+
+    #[test]
+    fn test_error_cancelled() {
+        let err = BlazeError::Cancelled;
+        assert_eq!(err.to_string(), "Operation cancelled");
+    }
+
+    #[test]
+    fn test_error_memory() {
+        let err = BlazeError::memory("allocation failed");
+        let msg = err.to_string();
+        assert!(msg.contains("Memory error"));
+        assert!(msg.contains("allocation failed"));
+    }
+
+    #[test]
+    fn test_error_not_implemented() {
+        let err = BlazeError::not_implemented("Feature X");
+        let msg = err.to_string();
+        assert!(msg.contains("Not implemented"));
+        assert!(msg.contains("Feature X"));
+    }
+
+    #[test]
+    fn test_error_invalid_argument() {
+        let err = BlazeError::invalid_argument("bad value");
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid argument"));
+    }
+
+    #[test]
+    fn test_error_type_error() {
+        let err = BlazeError::type_error("cannot cast");
+        let msg = err.to_string();
+        assert!(msg.contains("Type error"));
+    }
+
+    #[test]
+    fn test_error_plan() {
+        let err = BlazeError::plan("bad plan");
+        assert!(err.to_string().contains("Planning error"));
+    }
+
+    #[test]
+    fn test_error_optimization() {
+        let err = BlazeError::optimization("loop detected");
+        assert!(err.to_string().contains("Optimization error"));
+    }
+
+    #[test]
+    fn test_error_execution() {
+        let err = BlazeError::execution("runtime failure");
+        assert!(err.to_string().contains("Execution error"));
+    }
+
+    #[test]
+    fn test_error_internal() {
+        let err = BlazeError::internal("bug");
+        assert!(err.to_string().contains("Internal error"));
+    }
+
+    #[test]
+    fn test_error_catalog() {
+        let err = BlazeError::catalog("db not found");
+        assert!(err.to_string().contains("Catalog error"));
+    }
+
+    #[test]
+    fn test_error_schema() {
+        let err = BlazeError::schema("column missing");
+        assert!(err.to_string().contains("Schema error"));
+    }
+
+    // --- Arrow/Parquet error conversions ---
+
+    #[test]
+    fn test_arrow_error_conversion() {
+        let arrow_err =
+            arrow::error::ArrowError::InvalidArgumentError("bad arg".to_string());
+        let blaze_err: BlazeError = arrow_err.into();
+        let msg = blaze_err.to_string();
+        assert!(msg.contains("Arrow error"));
+        assert!(msg.contains("bad arg"));
+    }
+
+    #[test]
+    fn test_parquet_error_conversion() {
+        let parquet_err = parquet::errors::ParquetError::General("bad file".to_string());
+        let blaze_err: BlazeError = parquet_err.into();
+        let msg = blaze_err.to_string();
+        assert!(msg.contains("Parquet error"));
+        assert!(msg.contains("bad file"));
+    }
+
+    #[test]
+    fn test_io_error_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let blaze_err: BlazeError = io_err.into();
+        assert!(blaze_err.to_string().contains("I/O error"));
+    }
+
+    #[test]
+    fn test_sqlparser_error_conversion() {
+        let parser_err =
+            sqlparser::parser::ParserError::ParserError("syntax error".to_string());
+        let blaze_err: BlazeError = parser_err.into();
+        assert!(blaze_err.to_string().contains("SQL parse error"));
+    }
+
+    // --- find_similar_names edge cases ---
+
+    #[test]
+    fn test_find_similar_names_empty_candidates() {
+        let suggestions = find_similar_names("abc", &[], 3);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_find_similar_names_exact_match() {
+        let candidates = vec!["user_id".to_string()];
+        let suggestions = find_similar_names("user_id", &candidates, 3);
+        assert!(!suggestions.is_empty());
+        assert!(suggestions.contains(&"user_id".to_string()));
+    }
+
+    #[test]
+    fn test_find_similar_names_single_char() {
+        let candidates = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let suggestions = find_similar_names("a", &candidates, 3);
+        // Single-char input may or may not find matches depending on threshold
+        // Just verify it doesn't panic
+        assert!(suggestions.len() <= 3);
+    }
+
+    #[test]
+    fn test_find_similar_names_unicode() {
+        let candidates = vec!["ñame".to_string(), "naïve".to_string()];
+        let suggestions = find_similar_names("name", &candidates, 3);
+        // Unicode names should not cause panics
+        assert!(suggestions.len() <= 3);
+    }
+
+    #[test]
+    fn test_find_similar_names_max_suggestions() {
+        let candidates: Vec<String> = (0..20).map(|i| format!("col_{}", i)).collect();
+        let suggestions = find_similar_names("col_", &candidates, 2);
+        assert!(suggestions.len() <= 2);
+    }
+
+    // --- catalog_with_suggestions ---
+
+    #[test]
+    fn test_catalog_with_suggestions() {
+        let available = vec!["users".to_string(), "orders".to_string()];
+        let err = BlazeError::catalog_with_suggestions("user", &available);
+        let msg = err.to_string();
+        assert!(msg.contains("Table 'user' not found"));
+        assert!(msg.contains("Did you mean"));
+        assert!(msg.contains("users"));
+    }
+
+    #[test]
+    fn test_catalog_with_suggestions_no_match() {
+        let available = vec!["users".to_string()];
+        let err = BlazeError::catalog_with_suggestions("xyzzy", &available);
+        let msg = err.to_string();
+        assert!(msg.contains("Table 'xyzzy' not found"));
+        // No similar names should be suggested
+        assert!(!msg.contains("Did you mean"));
+    }
+
+    // --- function_not_found ---
+
+    #[test]
+    fn test_function_not_found() {
+        let available = vec![
+            "COUNT".to_string(),
+            "SUM".to_string(),
+            "AVG".to_string(),
+        ];
+        let err = BlazeError::function_not_found("CONT", &available);
+        let msg = err.to_string();
+        assert!(msg.contains("Function 'CONT' not found"));
+        assert!(msg.contains("Did you mean"));
+        assert!(msg.contains("COUNT"));
+    }
+
+    #[test]
+    fn test_function_not_found_no_candidates() {
+        let err = BlazeError::function_not_found("MYFUNC", &[]);
+        let msg = err.to_string();
+        assert!(msg.contains("Function 'MYFUNC' not found"));
+        assert!(!msg.contains("Did you mean"));
+    }
+
+    // --- schema_with_suggestions edge cases ---
+
+    #[test]
+    fn test_schema_with_suggestions_many_available() {
+        let available: Vec<String> = (0..20).map(|i| format!("field_{}", i)).collect();
+        let err = BlazeError::schema_with_suggestions("field_", &available, "Column");
+        let msg = err.to_string();
+        assert!(msg.contains("Column 'field_' not found"));
+        // More than 10 available, so "Available:" list should not be shown
+        assert!(!msg.contains("Available:"));
+    }
+
+    #[test]
+    fn test_schema_with_suggestions_few_available() {
+        let available = vec!["id".to_string(), "name".to_string()];
+        let err = BlazeError::schema_with_suggestions("idd", &available, "Column");
+        let msg = err.to_string();
+        assert!(msg.contains("Available:"));
+    }
+
+    #[test]
+    fn test_location_display() {
+        let loc = Location { line: 1, column: 5 };
+        assert_eq!(format!("{}", loc), "line 1, column 5");
+    }
+
+    #[test]
+    fn test_parse_at_stores_location() {
+        let err = BlazeError::parse_at("unexpected", 3, 7);
+        if let BlazeError::Parse { location, .. } = &err {
+            let loc = location.as_ref().unwrap();
+            assert_eq!(loc.line, 3);
+            assert_eq!(loc.column, 7);
+        } else {
+            panic!("Expected Parse error");
+        }
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = BlazeError::execution("test");
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Execution"));
+    }
 }
