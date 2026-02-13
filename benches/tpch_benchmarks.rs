@@ -511,6 +511,20 @@ GROUP BY l_returnflag, l_linestatus
 ORDER BY l_returnflag, l_linestatus
 ";
 
+/// TPC-H Q2 - Minimum Cost Supplier (simplified)
+///
+/// Finds suppliers with lowest cost for parts. Tests join + sort + limit.
+const TPCH_Q2: &str = "\
+SELECT
+    s_suppkey,
+    s_name,
+    n_name
+FROM supplier
+JOIN nation ON s_nationkey = n_nationkey
+ORDER BY s_name
+LIMIT 10
+";
+
 /// TPC-H Q3 - Shipping Priority (simplified)
 ///
 /// Joins lineitem with orders and computes revenue per order.
@@ -674,6 +688,117 @@ FROM customer
 WHERE c_acctbal > 0
 ";
 
+/// TPC-H Q7 - Volume Shipping (simplified)
+///
+/// Revenue by nation from supplier-lineitem join.
+const TPCH_Q7: &str = "\
+SELECT
+    n_name,
+    SUM(l_extendedprice * (1 - l_discount)) AS volume
+FROM lineitem
+JOIN supplier ON l_suppkey = s_suppkey
+JOIN nation ON s_nationkey = n_nationkey
+GROUP BY n_name
+ORDER BY n_name
+";
+
+/// TPC-H Q8 - National Market Share (simplified)
+///
+/// Market share by nation.
+const TPCH_Q8: &str = "\
+SELECT
+    n_name,
+    SUM(l_extendedprice * (1 - l_discount)) AS mkt_share
+FROM lineitem
+JOIN supplier ON l_suppkey = s_suppkey
+JOIN nation ON s_nationkey = n_nationkey
+GROUP BY n_name
+ORDER BY mkt_share DESC
+LIMIT 5
+";
+
+/// TPC-H Q11 - Important Stock Identification (simplified)
+///
+/// Top parts by value in partsupp.
+const TPCH_Q11: &str = "\
+SELECT
+    ps_partkey,
+    SUM(ps_supplycost * ps_availqty) AS value
+FROM partsupp
+GROUP BY ps_partkey
+ORDER BY value DESC
+LIMIT 20
+";
+
+/// TPC-H Q15 - Top Supplier (simplified)
+///
+/// Find supplier with highest total revenue.
+const TPCH_Q15: &str = "\
+SELECT
+    s_suppkey,
+    s_name,
+    SUM(l_extendedprice * (1 - l_discount)) AS total_revenue
+FROM supplier
+JOIN lineitem ON s_suppkey = l_suppkey
+GROUP BY s_suppkey, s_name
+ORDER BY total_revenue DESC
+LIMIT 1
+";
+
+/// TPC-H Q17 - Small Quantity Order Revenue (simplified)
+///
+/// Average yearly revenue for parts below threshold.
+const TPCH_Q17: &str = "\
+SELECT
+    SUM(l_extendedprice) / 7.0 AS avg_yearly
+FROM lineitem
+WHERE l_quantity < 25
+";
+
+/// TPC-H Q18 - Large Volume Customer (simplified)
+///
+/// Top customers by total quantity ordered.
+const TPCH_Q18: &str = "\
+SELECT
+    c_name,
+    o_orderkey,
+    SUM(l_quantity) AS total_qty
+FROM customer
+JOIN orders ON c_custkey = o_custkey
+JOIN lineitem ON o_orderkey = l_orderkey
+GROUP BY c_name, o_orderkey
+ORDER BY total_qty DESC
+LIMIT 10
+";
+
+/// TPC-H Q20 - Potential Part Promotion (simplified)
+///
+/// Supplier names with nation information.
+const TPCH_Q20: &str = "\
+SELECT
+    s_name,
+    s_suppkey
+FROM supplier
+JOIN nation ON s_nationkey = n_nationkey
+ORDER BY s_name
+LIMIT 20
+";
+
+/// TPC-H Q21 - Suppliers Who Kept Orders Waiting (simplified)
+///
+/// Supplier wait analysis via joins.
+const TPCH_Q21: &str = "\
+SELECT
+    s_name,
+    COUNT(*) AS numwait
+FROM supplier
+JOIN lineitem ON s_suppkey = l_suppkey
+JOIN orders ON l_orderkey = o_orderkey
+GROUP BY s_name
+ORDER BY numwait DESC
+LIMIT 10
+";
+
 // ============================================================================
 // Benchmark Functions
 // ============================================================================
@@ -695,6 +820,11 @@ fn tpch_benchmarks(c: &mut Criterion) {
         // Q3: Shipping Priority (join + aggregate + sort + limit)
         group.bench_with_input(BenchmarkId::new("Q3_shipping_priority", sf), &sf, |b, _| {
             b.iter(|| black_box(conn.query(TPCH_Q3).unwrap()))
+        });
+
+        // Q2: Minimum Cost Supplier (join + sort + limit)
+        group.bench_with_input(BenchmarkId::new("Q2_min_cost_supplier", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q2).unwrap()))
         });
 
         // Q5: Local Supplier Volume (multi-join + aggregate + sort)
@@ -760,6 +890,46 @@ fn tpch_benchmarks(c: &mut Criterion) {
         // Q22: Global Sales Opportunity (scan + filter + aggregate)
         group.bench_with_input(BenchmarkId::new("Q22_global_sales", sf), &sf, |b, _| {
             b.iter(|| black_box(conn.query(TPCH_Q22).unwrap()))
+        });
+
+        // Q7: Volume Shipping (multi-join + aggregate)
+        group.bench_with_input(BenchmarkId::new("Q7_volume_shipping", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q7).unwrap()))
+        });
+
+        // Q8: National Market Share (multi-join + aggregate + limit)
+        group.bench_with_input(BenchmarkId::new("Q8_market_share", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q8).unwrap()))
+        });
+
+        // Q11: Important Stock Identification (aggregate + sort + limit)
+        group.bench_with_input(BenchmarkId::new("Q11_important_stock", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q11).unwrap()))
+        });
+
+        // Q15: Top Supplier (join + aggregate + sort + limit)
+        group.bench_with_input(BenchmarkId::new("Q15_top_supplier", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q15).unwrap()))
+        });
+
+        // Q17: Small Quantity Order Revenue (scan + filter + aggregate)
+        group.bench_with_input(BenchmarkId::new("Q17_small_qty_revenue", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q17).unwrap()))
+        });
+
+        // Q18: Large Volume Customer (multi-join + aggregate + sort + limit)
+        group.bench_with_input(BenchmarkId::new("Q18_large_volume_customer", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q18).unwrap()))
+        });
+
+        // Q20: Potential Part Promotion (join + sort + limit)
+        group.bench_with_input(BenchmarkId::new("Q20_part_promotion", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q20).unwrap()))
+        });
+
+        // Q21: Suppliers Who Kept Orders Waiting (multi-join + aggregate + sort + limit)
+        group.bench_with_input(BenchmarkId::new("Q21_supplier_wait", sf), &sf, |b, _| {
+            b.iter(|| black_box(conn.query(TPCH_Q21).unwrap()))
         });
     }
 
