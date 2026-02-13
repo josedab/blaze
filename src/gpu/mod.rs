@@ -511,7 +511,8 @@ impl MultiGpuScheduler {
     /// Compute distribution statistics for a given set of work items.
     pub fn stats(&self, work_items: &[GpuWorkItem]) -> SchedulerStats {
         let assignments = self.assign_work(work_items);
-        let items_per_device: Vec<usize> = assignments.iter().map(|(_, items)| items.len()).collect();
+        let items_per_device: Vec<usize> =
+            assignments.iter().map(|(_, items)| items.len()).collect();
         let max = *items_per_device.iter().max().unwrap_or(&0);
         let min = *items_per_device.iter().min().unwrap_or(&0);
         let load_balance_ratio = if max == 0 {
@@ -696,10 +697,18 @@ impl GpuKernelCache {
 
     pub fn hit_rate(&self) -> f64 {
         let total = self.hits + self.misses;
-        if total == 0 { 0.0 } else { self.hits as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
     }
-    pub fn len(&self) -> usize { self.cache.len() }
-    pub fn is_empty(&self) -> bool { self.cache.is_empty() }
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -831,12 +840,9 @@ impl GpuProfiler {
 
     /// Recommend minimum row count for a given operation to benefit from GPU.
     pub fn recommend_min_rows(&self, op: &GpuOperationType) -> u64 {
-        let records: Vec<&GpuProfileRecord> = self
-            .records
-            .iter()
-            .filter(|r| &r.operation == op)
-            .collect();
-        
+        let records: Vec<&GpuProfileRecord> =
+            self.records.iter().filter(|r| &r.operation == op).collect();
+
         if records.is_empty() {
             return 100_000; // default
         }
@@ -852,6 +858,179 @@ impl GpuProfiler {
 
     pub fn record_count(&self) -> usize {
         self.records.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Automatic CPU/GPU Operator Placement (Feature 9)
+// ---------------------------------------------------------------------------
+
+/// Decides whether to run an operator on CPU or GPU based on data size
+/// and operator characteristics.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlacementDecision {
+    Cpu { reason: String },
+    Gpu { device_id: usize, reason: String },
+}
+
+/// Cost-based placement engine for CPU/GPU routing.
+#[derive(Debug)]
+pub struct OperatorPlacement {
+    /// Minimum rows to justify GPU transfer overhead.
+    min_gpu_rows: usize,
+    /// Available GPU devices.
+    num_devices: usize,
+    /// Transfer cost per byte (microseconds).
+    transfer_cost_per_byte: f64,
+    /// GPU speedup factor over CPU.
+    gpu_speedup_factor: f64,
+}
+
+impl OperatorPlacement {
+    pub fn new(num_devices: usize) -> Self {
+        Self {
+            min_gpu_rows: 10_000,
+            num_devices,
+            transfer_cost_per_byte: 0.001, // 1ns per byte
+            gpu_speedup_factor: 5.0,
+        }
+    }
+
+    /// Decide placement for an operator.
+    pub fn decide(
+        &self,
+        operator_type: &GpuOperationType,
+        row_count: usize,
+        row_size_bytes: usize,
+    ) -> PlacementDecision {
+        if self.num_devices == 0 {
+            return PlacementDecision::Cpu {
+                reason: "No GPU available".into(),
+            };
+        }
+
+        if row_count < self.min_gpu_rows {
+            return PlacementDecision::Cpu {
+                reason: format!("Row count ({row_count}) below GPU threshold ({})", self.min_gpu_rows),
+            };
+        }
+
+        let data_size = row_count * row_size_bytes;
+        let transfer_cost = data_size as f64 * self.transfer_cost_per_byte;
+        let cpu_cost = row_count as f64;
+        let gpu_cost = (row_count as f64 / self.gpu_speedup_factor) + transfer_cost;
+
+        if gpu_cost < cpu_cost {
+            // Pick least-loaded device (round-robin simplification)
+            let device_id = row_count % self.num_devices;
+            PlacementDecision::Gpu {
+                device_id,
+                reason: format!(
+                    "{}: GPU cost {:.0} < CPU cost {:.0}",
+                    operator_type, gpu_cost, cpu_cost
+                ),
+            }
+        } else {
+            PlacementDecision::Cpu {
+                reason: format!("Transfer overhead makes CPU cheaper for {} bytes", data_size),
+            }
+        }
+    }
+
+    pub fn with_min_gpu_rows(mut self, rows: usize) -> Self {
+        self.min_gpu_rows = rows;
+        self
+    }
+
+    pub fn with_speedup_factor(mut self, factor: f64) -> Self {
+        self.gpu_speedup_factor = factor;
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU Memory Pressure Monitor (Feature 9)
+// ---------------------------------------------------------------------------
+
+/// Monitors GPU memory pressure and triggers spill-to-host when necessary.
+#[derive(Debug)]
+pub struct GpuMemoryPressureMonitor {
+    /// Total GPU memory per device (bytes).
+    device_memory: Vec<usize>,
+    /// Current usage per device (bytes).
+    device_usage: Vec<usize>,
+    /// Threshold (0.0-1.0) above which we trigger spill.
+    pressure_threshold: f64,
+    /// Number of spill events triggered.
+    spill_events: u64,
+}
+
+impl GpuMemoryPressureMonitor {
+    pub fn new(device_memory_sizes: Vec<usize>) -> Self {
+        let num = device_memory_sizes.len();
+        Self {
+            device_memory: device_memory_sizes,
+            device_usage: vec![0; num],
+            pressure_threshold: 0.85,
+            spill_events: 0,
+        }
+    }
+
+    /// Record an allocation on a device.
+    pub fn allocate(&mut self, device_id: usize, bytes: usize) -> bool {
+        if device_id >= self.device_usage.len() {
+            return false;
+        }
+        self.device_usage[device_id] += bytes;
+        true
+    }
+
+    /// Record a deallocation.
+    pub fn deallocate(&mut self, device_id: usize, bytes: usize) {
+        if device_id < self.device_usage.len() {
+            self.device_usage[device_id] = self.device_usage[device_id].saturating_sub(bytes);
+        }
+    }
+
+    /// Check if a device is under memory pressure.
+    pub fn is_under_pressure(&self, device_id: usize) -> bool {
+        if device_id >= self.device_memory.len() {
+            return true;
+        }
+        let usage_ratio =
+            self.device_usage[device_id] as f64 / self.device_memory[device_id].max(1) as f64;
+        usage_ratio >= self.pressure_threshold
+    }
+
+    /// Find bytes to spill to bring device below threshold.
+    pub fn bytes_to_spill(&self, device_id: usize) -> usize {
+        if device_id >= self.device_memory.len() || !self.is_under_pressure(device_id) {
+            return 0;
+        }
+        let target = (self.device_memory[device_id] as f64 * self.pressure_threshold * 0.8) as usize;
+        self.device_usage[device_id].saturating_sub(target)
+    }
+
+    /// Record a spill event.
+    pub fn record_spill(&mut self) {
+        self.spill_events += 1;
+    }
+
+    /// Return pressure ratio for a device (0.0-1.0).
+    pub fn pressure_ratio(&self, device_id: usize) -> f64 {
+        if device_id >= self.device_memory.len() {
+            return 1.0;
+        }
+        self.device_usage[device_id] as f64 / self.device_memory[device_id].max(1) as f64
+    }
+
+    pub fn spill_events(&self) -> u64 {
+        self.spill_events
+    }
+
+    pub fn with_threshold(mut self, threshold: f64) -> Self {
+        self.pressure_threshold = threshold.clamp(0.1, 0.99);
+        self
     }
 }
 
@@ -1179,5 +1358,69 @@ mod tests {
 
         let min = profiler.recommend_min_rows(&GpuOperationType::Aggregate);
         assert_eq!(min, 100_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Operator Placement tests (Feature 9)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_placement_no_gpu() {
+        let placement = OperatorPlacement::new(0);
+        let decision = placement.decide(&GpuOperationType::Filter, 1_000_000, 64);
+        assert!(matches!(decision, PlacementDecision::Cpu { .. }));
+    }
+
+    #[test]
+    fn test_placement_small_data_stays_cpu() {
+        let placement = OperatorPlacement::new(2);
+        let decision = placement.decide(&GpuOperationType::Aggregate, 100, 64);
+        assert!(matches!(decision, PlacementDecision::Cpu { .. }));
+    }
+
+    #[test]
+    fn test_placement_large_data_goes_gpu() {
+        let placement = OperatorPlacement::new(2).with_speedup_factor(10.0);
+        let decision = placement.decide(&GpuOperationType::Filter, 1_000_000, 64);
+        assert!(matches!(decision, PlacementDecision::Gpu { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // GPU Memory Pressure Monitor tests (Feature 9)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memory_pressure_basic() {
+        let mut monitor = GpuMemoryPressureMonitor::new(vec![1_000_000]);
+        assert!(!monitor.is_under_pressure(0));
+        assert_eq!(monitor.pressure_ratio(0), 0.0);
+
+        monitor.allocate(0, 900_000); // 90% usage
+        assert!(monitor.is_under_pressure(0));
+        assert!(monitor.pressure_ratio(0) > 0.85);
+    }
+
+    #[test]
+    fn test_memory_pressure_spill() {
+        let mut monitor = GpuMemoryPressureMonitor::new(vec![1_000_000]);
+        monitor.allocate(0, 900_000);
+
+        let to_spill = monitor.bytes_to_spill(0);
+        assert!(to_spill > 0);
+
+        monitor.deallocate(0, to_spill);
+        monitor.record_spill();
+        assert_eq!(monitor.spill_events(), 1);
+        assert!(!monitor.is_under_pressure(0));
+    }
+
+    #[test]
+    fn test_memory_pressure_multi_device() {
+        let mut monitor = GpuMemoryPressureMonitor::new(vec![1_000_000, 2_000_000]);
+        monitor.allocate(0, 900_000); // device 0: pressure
+        monitor.allocate(1, 500_000); // device 1: fine
+
+        assert!(monitor.is_under_pressure(0));
+        assert!(!monitor.is_under_pressure(1));
     }
 }
