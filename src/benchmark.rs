@@ -236,16 +236,49 @@ impl RegressionDetector {
 /// Benchmark report generation.
 pub struct BenchmarkReport {
     results: Vec<BenchmarkResult>,
+    metadata: Option<BenchmarkMetadata>,
+}
+
+/// Metadata for a benchmark run.
+#[derive(Debug, Clone)]
+pub struct BenchmarkMetadata {
+    /// Engine name (e.g., "blaze")
+    pub engine: String,
+    /// Timestamp of the benchmark run
+    pub timestamp: String,
+    /// Scale factor used
+    pub scale_factor: usize,
+    /// Git commit hash (if available)
+    pub git_commit: Option<String>,
 }
 
 impl BenchmarkReport {
     pub fn new(results: Vec<BenchmarkResult>) -> Self {
-        Self { results }
+        Self {
+            results,
+            metadata: None,
+        }
+    }
+
+    /// Attach metadata to the report.
+    pub fn with_metadata(mut self, metadata: BenchmarkMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 
     /// Generate a JSON report.
     pub fn to_json(&self) -> String {
         let mut output = String::from("{\n");
+
+        if let Some(meta) = &self.metadata {
+            output.push_str(&format!("  \"engine\": \"{}\",\n", meta.engine));
+            output.push_str(&format!("  \"timestamp\": \"{}\",\n", meta.timestamp));
+            output.push_str(&format!("  \"scale_factor\": {},\n", meta.scale_factor));
+            if let Some(commit) = &meta.git_commit {
+                output.push_str(&format!("  \"git_commit\": \"{}\",\n", commit));
+            }
+        }
+
         output.push_str("  \"benchmarks\": [\n");
 
         for (i, result) in self.results.iter().enumerate() {
@@ -292,6 +325,99 @@ impl BenchmarkReport {
 
         output
     }
+
+    /// Generate a markdown comparison table.
+    pub fn to_markdown(&self) -> String {
+        let mut output = String::from("## Benchmark Results\n\n");
+        output.push_str("| Query | Time (ms) | Rows |\n");
+        output.push_str("|-------|-----------|------|\n");
+
+        for result in &self.results {
+            output.push_str(&format!(
+                "| {} | {:.3} | {} |\n",
+                result.name,
+                result.elapsed_ms(),
+                result.rows_returned,
+            ));
+        }
+
+        output
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TPC-H Benchmark Suite Builder
+// ---------------------------------------------------------------------------
+
+/// Pre-built TPC-H benchmark suite with all 22 queries (simplified).
+pub fn tpch_benchmark_suite() -> BenchmarkSuite {
+    let mut suite = BenchmarkSuite::new();
+    suite.add_all(vec![
+        BenchmarkQuery::new("Q1", "SELECT l_returnflag, l_linestatus, SUM(l_quantity) AS sum_qty, SUM(l_extendedprice) AS sum_base_price, SUM(l_extendedprice * (1 - l_discount)) AS sum_disc_price, COUNT(*) AS count_order FROM lineitem GROUP BY l_returnflag, l_linestatus ORDER BY l_returnflag, l_linestatus"),
+        BenchmarkQuery::new("Q2", "SELECT s_suppkey, s_name, n_name FROM supplier JOIN nation ON s_nationkey = n_nationkey ORDER BY s_name LIMIT 10"),
+        BenchmarkQuery::new("Q3", "SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) AS revenue FROM lineitem JOIN orders ON l_orderkey = o_orderkey GROUP BY l_orderkey ORDER BY revenue DESC LIMIT 10"),
+        BenchmarkQuery::new("Q4", "SELECT o_orderstatus, COUNT(*) AS order_count FROM orders GROUP BY o_orderstatus ORDER BY o_orderstatus"),
+        BenchmarkQuery::new("Q5", "SELECT n_name, SUM(l_extendedprice * (1 - l_discount)) AS revenue FROM lineitem JOIN supplier ON l_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey GROUP BY n_name ORDER BY revenue DESC"),
+        BenchmarkQuery::new("Q6", "SELECT SUM(l_extendedprice * l_discount) AS revenue FROM lineitem WHERE l_discount BETWEEN 0.05 AND 0.07 AND l_quantity < 24"),
+        BenchmarkQuery::new("Q7", "SELECT n_name, SUM(l_extendedprice * (1 - l_discount)) AS volume FROM lineitem JOIN supplier ON l_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey GROUP BY n_name ORDER BY n_name"),
+        BenchmarkQuery::new("Q8", "SELECT n_name, SUM(l_extendedprice * (1 - l_discount)) AS mkt_share FROM lineitem JOIN supplier ON l_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey GROUP BY n_name ORDER BY mkt_share DESC LIMIT 5"),
+        BenchmarkQuery::new("Q9", "SELECT n_name AS nation, SUM(l_extendedprice * (1 - l_discount) - l_quantity * l_tax) AS profit FROM lineitem JOIN supplier ON l_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey GROUP BY n_name ORDER BY n_name"),
+        BenchmarkQuery::new("Q10", "SELECT c_custkey, c_name, SUM(l_extendedprice * (1 - l_discount)) AS revenue FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON o_orderkey = l_orderkey WHERE l_returnflag = 'R' GROUP BY c_custkey, c_name ORDER BY revenue DESC LIMIT 20"),
+        BenchmarkQuery::new("Q11", "SELECT ps_partkey, SUM(ps_supplycost * ps_availqty) AS value FROM partsupp GROUP BY ps_partkey ORDER BY value DESC LIMIT 20"),
+        BenchmarkQuery::new("Q12", "SELECT l_linestatus, COUNT(*) AS order_count FROM lineitem JOIN orders ON l_orderkey = o_orderkey GROUP BY l_linestatus ORDER BY l_linestatus"),
+        BenchmarkQuery::new("Q13", "SELECT c_custkey, COUNT(o_orderkey) AS c_count FROM customer LEFT JOIN orders ON c_custkey = o_custkey GROUP BY c_custkey ORDER BY c_count DESC LIMIT 20"),
+        BenchmarkQuery::new("Q14", "SELECT SUM(l_extendedprice * (1 - l_discount)) AS promo_revenue FROM lineitem JOIN part ON l_partkey = p_partkey"),
+        BenchmarkQuery::new("Q15", "SELECT s_suppkey, s_name, SUM(l_extendedprice * (1 - l_discount)) AS total_revenue FROM supplier JOIN lineitem ON s_suppkey = l_suppkey GROUP BY s_suppkey, s_name ORDER BY total_revenue DESC LIMIT 1"),
+        BenchmarkQuery::new("Q16", "SELECT p_type, COUNT(*) AS supplier_cnt FROM partsupp JOIN part ON ps_partkey = p_partkey GROUP BY p_type ORDER BY supplier_cnt DESC LIMIT 10"),
+        BenchmarkQuery::new("Q17", "SELECT SUM(l_extendedprice) / 7.0 AS avg_yearly FROM lineitem WHERE l_quantity < 25"),
+        BenchmarkQuery::new("Q18", "SELECT c_name, o_orderkey, SUM(l_quantity) AS total_qty FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON o_orderkey = l_orderkey GROUP BY c_name, o_orderkey ORDER BY total_qty DESC LIMIT 10"),
+        BenchmarkQuery::new("Q19", "SELECT SUM(l_extendedprice * (1 - l_discount)) AS revenue FROM lineitem WHERE l_quantity >= 1 AND l_quantity <= 30 AND l_discount BETWEEN 0.02 AND 0.09"),
+        BenchmarkQuery::new("Q20", "SELECT s_name, s_suppkey FROM supplier JOIN nation ON s_nationkey = n_nationkey ORDER BY s_name LIMIT 20"),
+        BenchmarkQuery::new("Q21", "SELECT s_name, COUNT(*) AS numwait FROM supplier JOIN lineitem ON s_suppkey = l_suppkey JOIN orders ON l_orderkey = o_orderkey GROUP BY s_name ORDER BY numwait DESC LIMIT 10"),
+        BenchmarkQuery::new("Q22", "SELECT COUNT(*) AS numcust, SUM(c_acctbal) AS totacctbal FROM customer WHERE c_acctbal > 0"),
+    ]);
+    suite
+}
+
+/// Compare two benchmark reports and return a formatted comparison.
+pub fn compare_reports(baseline: &[BenchmarkResult], current: &[BenchmarkResult]) -> String {
+    let baseline_map: std::collections::HashMap<_, _> =
+        baseline.iter().map(|r| (r.name.as_str(), r)).collect();
+
+    let mut output = String::from("## Benchmark Comparison\n\n");
+    output.push_str("| Query | Baseline (ms) | Current (ms) | Change |\n");
+    output.push_str("|-------|--------------|-------------|--------|\n");
+
+    for curr in current {
+        if let Some(base) = baseline_map.get(curr.name.as_str()) {
+            let baseline_ms = base.elapsed_ms();
+            let current_ms = curr.elapsed_ms();
+            let change = if baseline_ms > 0.0 {
+                ((current_ms - baseline_ms) / baseline_ms) * 100.0
+            } else {
+                0.0
+            };
+            let indicator = if change > 5.0 {
+                "🔴"
+            } else if change < -5.0 {
+                "🟢"
+            } else {
+                "⚪"
+            };
+            output.push_str(&format!(
+                "| {} | {:.3} | {:.3} | {} {:.1}% |\n",
+                curr.name, baseline_ms, current_ms, indicator, change,
+            ));
+        } else {
+            output.push_str(&format!(
+                "| {} | - | {:.3} | new |\n",
+                curr.name,
+                curr.elapsed_ms(),
+            ));
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]
