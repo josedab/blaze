@@ -57,6 +57,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: false
           comment-on-alert: true
-          alert-threshold: "130%"
+          alert-threshold: "105%"
           fail-on-alert: true
           benchmark-data-dir-path: dev/bench
