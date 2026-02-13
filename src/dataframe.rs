@@ -875,6 +875,48 @@ impl DataFrame {
         self.sql_builder.source = format!("({}) AS {}", self.sql_builder.source, name);
         self
     }
+
+    /// Show the execution plan without executing the query.
+    pub fn explain(&self) -> Result<String> {
+        let sql = format!("EXPLAIN {}", self.to_sql());
+        let statements = Parser::parse(&sql)?;
+        let Some(statement) = statements.into_iter().next() else {
+            return Ok(String::new());
+        };
+        let binder = Binder::new(self.catalog_list.clone());
+        let logical_plan = binder.bind(statement)?;
+        let optimized = Optimizer::default().optimize(&logical_plan)?;
+        let physical_plan = PhysicalPlanner::new().create_physical_plan(&optimized)?;
+        let batches = self.execution_context.execute(&physical_plan)?;
+        let mut output = String::new();
+        for batch in &batches {
+            output.push_str(
+                &arrow::util::pretty::pretty_format_batches(&[batch.clone()])
+                    .map_err(|e| crate::error::BlazeError::execution(e.to_string()))?
+                    .to_string(),
+            );
+        }
+        Ok(output)
+    }
+
+    /// Execute and return first n rows as a Vec of RecordBatch.
+    pub fn head(&self, n: usize) -> Result<Vec<RecordBatch>> {
+        Self {
+            catalog_list: self.catalog_list.clone(),
+            execution_context: self.execution_context.clone(),
+            sql_builder: {
+                let mut b = self.sql_builder.clone();
+                b.limit = Some(n);
+                b
+            },
+        }
+        .collect()
+    }
+
+    /// Return the generated SQL without executing (alias for to_sql).
+    pub fn to_string(&self) -> String {
+        self.to_sql()
+    }
 }
 
 #[cfg(test)]
