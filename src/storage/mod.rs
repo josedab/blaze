@@ -143,3 +143,124 @@ pub fn read_delta_timestamp(
 ) -> Result<Arc<dyn TableProvider>> {
     Ok(Arc::new(DeltaTable::open_at_timestamp(path, timestamp)?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
+    use std::io::Write;
+
+    fn make_test_batch() -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int64, false),
+            ArrowField::new("name", ArrowDataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .expect("valid batch")
+    }
+
+    #[test]
+    fn test_read_file_csv() {
+        let provider = read_file("data/customers.csv").unwrap();
+        assert!(!provider.schema().fields().is_empty());
+    }
+
+    #[test]
+    fn test_read_file_parquet() {
+        let provider = read_file("data/customers.parquet").unwrap();
+        assert!(!provider.schema().fields().is_empty());
+    }
+
+    #[test]
+    fn test_read_file_unsupported_extension() {
+        let err = read_file("data/file.xyz").unwrap_err();
+        assert!(err.to_string().contains("Unsupported file format"));
+    }
+
+    #[test]
+    fn test_read_file_nonexistent() {
+        let err = read_file("data/does_not_exist.csv").unwrap_err();
+        // Should get an I/O or format-related error
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_read_csv() {
+        let provider = read_csv("data/customers.csv").unwrap();
+        assert!(!provider.schema().fields().is_empty());
+    }
+
+    #[test]
+    fn test_read_parquet() {
+        let provider = read_parquet("data/customers.parquet").unwrap();
+        assert!(!provider.schema().fields().is_empty());
+    }
+
+    #[test]
+    fn test_read_csv_inferred() {
+        let provider = read_csv_inferred("data/customers.csv", None).unwrap();
+        assert!(!provider.schema().fields().is_empty());
+    }
+
+    #[test]
+    fn test_read_csv_inferred_nonexistent() {
+        let err = read_csv_inferred("data/missing.csv", None).unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_memory_table_valid() {
+        let batch = make_test_batch();
+        let provider = memory_table(vec![batch]).unwrap();
+        assert_eq!(provider.schema().fields().len(), 2);
+    }
+
+    #[test]
+    fn test_memory_table_empty_batches_error() {
+        let err = memory_table(vec![]).unwrap_err();
+        assert!(err.to_string().contains("Empty batches"));
+    }
+
+    #[test]
+    fn test_read_csv_inferred_with_custom_config() {
+        let config = InferenceConfig {
+            sample_rows: 10,
+            ..InferenceConfig::default()
+        };
+        let provider = read_csv_inferred("data/customers.csv", Some(config)).unwrap();
+        assert!(!provider.schema().fields().is_empty());
+    }
+
+    #[test]
+    fn test_read_json_inferred_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.json");
+        std::fs::File::create(&path).unwrap();
+        // Empty JSON file should either succeed with empty table or return error
+        let result = read_json_inferred(&path);
+        // Both outcomes are acceptable; we just verify no panic
+        drop(result);
+    }
+
+    #[test]
+    fn test_read_csv_inferred_tsv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.tsv");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "id\tname").unwrap();
+        writeln!(f, "1\tAlice").unwrap();
+        writeln!(f, "2\tBob").unwrap();
+        drop(f);
+
+        let provider = read_csv_inferred(&path, None).unwrap();
+        assert!(!provider.schema().fields().is_empty());
+    }
+}
