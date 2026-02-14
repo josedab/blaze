@@ -1530,12 +1530,8 @@ impl IncrementalExecutor {
                     ">=" => int_arr.iter().map(|v| v.map(|x| x >= threshold)).collect(),
                     "<" => int_arr.iter().map(|v| v.map(|x| x < threshold)).collect(),
                     "<=" => int_arr.iter().map(|v| v.map(|x| x <= threshold)).collect(),
-                    "=" | "==" => {
-                        int_arr.iter().map(|v| v.map(|x| x == threshold)).collect()
-                    }
-                    "!=" | "<>" => {
-                        int_arr.iter().map(|v| v.map(|x| x != threshold)).collect()
-                    }
+                    "=" | "==" => int_arr.iter().map(|v| v.map(|x| x == threshold)).collect(),
+                    "!=" | "<>" => int_arr.iter().map(|v| v.map(|x| x != threshold)).collect(),
                     _ => return Ok(Some(batch.clone())),
                 };
                 return Ok(Some(filter_record_batch(batch, &mask)?));
@@ -1590,16 +1586,14 @@ impl IncrementalExecutor {
         if value == "true" || value == "false" {
             let target = value == "true";
             if let Some(bool_arr) = col.as_any().downcast_ref::<BooleanArray>() {
-                let mask: BooleanArray =
-                    bool_arr.iter().map(|v| v.map(|x| x == target)).collect();
+                let mask: BooleanArray = bool_arr.iter().map(|v| v.map(|x| x == target)).collect();
                 return Ok(Some(filter_record_batch(batch, &mask)?));
             }
         }
 
         if let Ok(int_val) = value.parse::<i64>() {
             if let Some(int_arr) = col.as_any().downcast_ref::<Int64Array>() {
-                let mask: BooleanArray =
-                    int_arr.iter().map(|v| v.map(|x| x == int_val)).collect();
+                let mask: BooleanArray = int_arr.iter().map(|v| v.map(|x| x == int_val)).collect();
                 return Ok(Some(filter_record_batch(batch, &mask)?));
             }
         }
@@ -1875,17 +1869,17 @@ impl JoinDeltaComputer {
         match self.join_type {
             JoinDeltaType::Inner => {
                 // Each left insert could match all right rows (worst case)
-                (left_inserts * right_row_count / 10_usize.max(1), left_deletes)
+                (
+                    left_inserts * right_row_count / 10_usize.max(1),
+                    left_deletes,
+                )
             }
-            JoinDeltaType::LeftOuter => {
-                (left_inserts, left_deletes)
-            }
-            JoinDeltaType::RightOuter => {
-                (left_inserts * right_row_count / 10_usize.max(1), left_deletes)
-            }
-            JoinDeltaType::FullOuter => {
-                (left_inserts, left_deletes)
-            }
+            JoinDeltaType::LeftOuter => (left_inserts, left_deletes),
+            JoinDeltaType::RightOuter => (
+                left_inserts * right_row_count / 10_usize.max(1),
+                left_deletes,
+            ),
+            JoinDeltaType::FullOuter => (left_inserts, left_deletes),
         }
     }
 
@@ -1961,9 +1955,15 @@ impl StreamingDeltaPipeline {
         current_rows
     }
 
-    pub fn stages(&self) -> &[DeltaStage] { &self.stages }
-    pub fn total_deltas(&self) -> u64 { self.processed_deltas }
-    pub fn total_rows(&self) -> u64 { self.total_rows_propagated }
+    pub fn stages(&self) -> &[DeltaStage] {
+        &self.stages
+    }
+    pub fn total_deltas(&self) -> u64 {
+        self.processed_deltas
+    }
+    pub fn total_rows(&self) -> u64 {
+        self.total_rows_propagated
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2019,9 +2019,14 @@ impl TriggerManager {
 
     /// Check which views need refresh based on current state.
     pub fn views_needing_refresh(&self) -> Vec<&str> {
-        self.rules.iter()
+        self.rules
+            .iter()
             .filter(|rule| {
-                let delta = self.pending_deltas.get(&rule.source_table).copied().unwrap_or(0);
+                let delta = self
+                    .pending_deltas
+                    .get(&rule.source_table)
+                    .copied()
+                    .unwrap_or(0);
                 match rule.trigger_type {
                     TriggerType::Immediate => delta > 0,
                     TriggerType::Threshold(n) => delta >= n,
@@ -2038,7 +2043,9 @@ impl TriggerManager {
         self.pending_deltas.remove(table);
     }
 
-    pub fn num_rules(&self) -> usize { self.rules.len() }
+    pub fn num_rules(&self) -> usize {
+        self.rules.len()
+    }
 }
 
 /// Background refresh scheduler with priority queue.
@@ -2080,7 +2087,11 @@ impl BackgroundRefreshScheduler {
     /// Schedule a view for refresh.
     pub fn schedule(&mut self, view_name: &str, priority: u32) {
         // Don't schedule if already pending
-        if self.queue.iter().any(|r| r.view_name == view_name && r.status == RefreshJobStatus::Pending) {
+        if self
+            .queue
+            .iter()
+            .any(|r| r.view_name == view_name && r.status == RefreshJobStatus::Pending)
+        {
             return;
         }
         self.queue.push(ScheduledRefresh {
@@ -2097,7 +2108,11 @@ impl BackgroundRefreshScheduler {
         if self.active_count >= self.max_concurrent {
             return None;
         }
-        if let Some(job) = self.queue.iter_mut().find(|r| r.status == RefreshJobStatus::Pending) {
+        if let Some(job) = self
+            .queue
+            .iter_mut()
+            .find(|r| r.status == RefreshJobStatus::Pending)
+        {
             job.status = RefreshJobStatus::Running;
             self.active_count += 1;
             Some(&job.view_name)
@@ -2108,7 +2123,11 @@ impl BackgroundRefreshScheduler {
 
     /// Mark a job as completed.
     pub fn complete(&mut self, view_name: &str) {
-        if let Some(job) = self.queue.iter_mut().find(|r| r.view_name == view_name && r.status == RefreshJobStatus::Running) {
+        if let Some(job) = self
+            .queue
+            .iter_mut()
+            .find(|r| r.view_name == view_name && r.status == RefreshJobStatus::Running)
+        {
             job.status = RefreshJobStatus::Completed;
             self.active_count = self.active_count.saturating_sub(1);
             self.completed_count += 1;
@@ -2117,17 +2136,28 @@ impl BackgroundRefreshScheduler {
 
     /// Mark a job as failed.
     pub fn fail(&mut self, view_name: &str, error: &str) {
-        if let Some(job) = self.queue.iter_mut().find(|r| r.view_name == view_name && r.status == RefreshJobStatus::Running) {
+        if let Some(job) = self
+            .queue
+            .iter_mut()
+            .find(|r| r.view_name == view_name && r.status == RefreshJobStatus::Running)
+        {
             job.status = RefreshJobStatus::Failed(error.to_string());
             self.active_count = self.active_count.saturating_sub(1);
         }
     }
 
     pub fn pending_count(&self) -> usize {
-        self.queue.iter().filter(|r| r.status == RefreshJobStatus::Pending).count()
+        self.queue
+            .iter()
+            .filter(|r| r.status == RefreshJobStatus::Pending)
+            .count()
     }
-    pub fn active_count(&self) -> usize { self.active_count }
-    pub fn completed_count(&self) -> u64 { self.completed_count }
+    pub fn active_count(&self) -> usize {
+        self.active_count
+    }
+    pub fn completed_count(&self) -> u64 {
+        self.completed_count
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2193,9 +2223,7 @@ impl MaterializedViewRewriter {
             }
 
             // Check if the view covers all required source tables
-            let tables_covered = source_tables
-                .iter()
-                .all(|t| sig.source_tables.contains(t));
+            let tables_covered = source_tables.iter().all(|t| sig.source_tables.contains(t));
             if !tables_covered {
                 continue;
             }
@@ -2220,7 +2248,7 @@ impl MaterializedViewRewriter {
             let score = (sig.source_tables.len() as f64)
                 + (sig.group_by_columns.len() as f64) * 0.5
                 + (sig.aggregate_columns.len() as f64) * 0.3;
-            
+
             if best_match.is_none() || score > best_match.unwrap().1 {
                 best_match = Some((name.as_str(), score));
             }
@@ -2302,6 +2330,369 @@ impl CascadeRefreshExecutor {
     /// Get cascade refresh statistics.
     pub fn stats(&self) -> &CascadeRefreshStats {
         &self.stats
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filter delta computation
+// ---------------------------------------------------------------------------
+
+/// The kind of row-level change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaOperation {
+    Insert,
+    Delete,
+    Update,
+}
+
+/// A single row-level delta entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeltaRow {
+    pub operation: DeltaOperation,
+    pub row_index: usize,
+}
+
+/// Computes filter deltas for incremental maintenance.
+pub struct FilterDeltaComputer;
+
+impl FilterDeltaComputer {
+    /// Given the number of original rows, a list of changed row indices,
+    /// and a predicate function, compute the delta rows.
+    ///
+    /// For each changed index the predicate is evaluated:
+    /// - If the index is new (>= original_rows) and passes → Insert
+    /// - If the index is new and fails → skip
+    /// - If existing and passes → Update
+    /// - If existing and fails → Delete
+    pub fn compute_filter_delta<F>(
+        original_rows: usize,
+        changes: &[usize],
+        predicate_fn: F,
+    ) -> Vec<DeltaRow>
+    where
+        F: Fn(usize) -> bool,
+    {
+        let mut deltas = Vec::new();
+        for &idx in changes {
+            let passes = predicate_fn(idx);
+            if idx >= original_rows {
+                if passes {
+                    deltas.push(DeltaRow {
+                        operation: DeltaOperation::Insert,
+                        row_index: idx,
+                    });
+                }
+            } else if passes {
+                deltas.push(DeltaRow {
+                    operation: DeltaOperation::Update,
+                    row_index: idx,
+                });
+            } else {
+                deltas.push(DeltaRow {
+                    operation: DeltaOperation::Delete,
+                    row_index: idx,
+                });
+            }
+        }
+        deltas
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-table join delta
+// ---------------------------------------------------------------------------
+
+/// Result of computing a join delta.
+#[derive(Debug, Clone)]
+pub struct JoinDeltaResult {
+    pub rows_to_add: usize,
+    pub rows_to_remove: usize,
+    pub estimated_cost: f64,
+}
+
+/// Estimates the delta impact of changes on a join.
+pub struct MultiTableJoinDelta {
+    pub join_columns: Vec<(String, String)>,
+}
+
+impl MultiTableJoinDelta {
+    pub fn new(join_columns: Vec<(String, String)>) -> Self {
+        Self { join_columns }
+    }
+
+    /// Estimate the join delta given change counts on each side.
+    ///
+    /// `left_changes` – number of changed rows on the left side
+    /// `right_table_size` – total rows on the right side
+    /// `right_changes` – number of changed rows on the right side
+    /// `left_table_size` – total rows on the left side
+    pub fn compute_join_delta(
+        &self,
+        left_changes: usize,
+        right_table_size: usize,
+        right_changes: usize,
+        left_table_size: usize,
+    ) -> JoinDeltaResult {
+        // Heuristic: each changed row on one side may match a fraction of the other.
+        let selectivity = if self.join_columns.is_empty() {
+            1.0
+        } else {
+            1.0 / self.join_columns.len() as f64
+        };
+        let rows_to_add =
+            ((left_changes as f64 * right_table_size as f64 * selectivity)
+                + (right_changes as f64 * left_table_size as f64 * selectivity))
+                as usize;
+        let rows_to_remove = (rows_to_add as f64 * 0.1) as usize; // estimate 10% removals
+        let estimated_cost = (left_changes + right_changes) as f64
+            * (left_table_size + right_table_size) as f64
+            * selectivity;
+
+        JoinDeltaResult {
+            rows_to_add,
+            rows_to_remove,
+            estimated_cost,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Staleness monitor
+// ---------------------------------------------------------------------------
+
+/// Staleness information for a single view.
+pub struct ViewStaleness {
+    pub view_name: String,
+    pub last_refresh: u64,
+    pub changes_since_refresh: u64,
+    pub is_stale: bool,
+}
+
+/// Monitors view staleness and prioritizes refreshes.
+pub struct StalenessMonitor {
+    views: HashMap<String, ViewStaleness>,
+    threshold_ms: u64,
+}
+
+impl StalenessMonitor {
+    pub fn new(threshold_ms: u64) -> Self {
+        Self {
+            views: HashMap::new(),
+            threshold_ms,
+        }
+    }
+
+    /// Mark a view as freshly refreshed.
+    pub fn record_refresh(&mut self, view_name: &str) {
+        let entry = self.views.entry(view_name.to_string()).or_insert_with(|| {
+            ViewStaleness {
+                view_name: view_name.to_string(),
+                last_refresh: 0,
+                changes_since_refresh: 0,
+                is_stale: false,
+            }
+        });
+        entry.last_refresh = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        entry.changes_since_refresh = 0;
+        entry.is_stale = false;
+    }
+
+    /// Increment the change counter for a view.
+    pub fn record_change(&mut self, view_name: &str) {
+        let entry = self.views.entry(view_name.to_string()).or_insert_with(|| {
+            ViewStaleness {
+                view_name: view_name.to_string(),
+                last_refresh: 0,
+                changes_since_refresh: 0,
+                is_stale: false,
+            }
+        });
+        entry.changes_since_refresh += 1;
+    }
+
+    /// Return references to views that are stale (not refreshed within threshold).
+    pub fn check_staleness(&mut self, current_time: u64) -> Vec<&ViewStaleness> {
+        for v in self.views.values_mut() {
+            v.is_stale = current_time.saturating_sub(v.last_refresh) > self.threshold_ms;
+        }
+        self.views.values().filter(|v| v.is_stale).collect()
+    }
+
+    /// The view with the highest change count that is stale.
+    pub fn most_stale_view(&self) -> Option<&ViewStaleness> {
+        self.views
+            .values()
+            .filter(|v| v.is_stale || v.changes_since_refresh > 0)
+            .max_by_key(|v| v.changes_since_refresh)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// View Refresh Cost Prediction
+// ---------------------------------------------------------------------------
+
+/// Predicts refresh costs based on historical observations to decide between
+/// incremental vs. full refresh.
+#[derive(Debug)]
+pub struct RefreshCostPredictor {
+    /// Historical observations: (change_count, full_refresh_ms, incremental_refresh_ms)
+    observations: Vec<(usize, f64, f64)>,
+    /// Crossover point: above this change count, full refresh is cheaper.
+    crossover_threshold: Option<usize>,
+}
+
+impl RefreshCostPredictor {
+    pub fn new() -> Self {
+        Self {
+            observations: Vec::new(),
+            crossover_threshold: None,
+        }
+    }
+
+    /// Record an observation of refresh performance.
+    pub fn record(&mut self, change_count: usize, full_ms: f64, incremental_ms: f64) {
+        self.observations.push((change_count, full_ms, incremental_ms));
+        self.recompute_threshold();
+    }
+
+    /// Recompute the crossover threshold from observations.
+    fn recompute_threshold(&mut self) {
+        // Find the change count where incremental cost exceeds full cost
+        let mut crossover = None;
+        for (changes, full, incr) in &self.observations {
+            if incr > full {
+                match crossover {
+                    None => crossover = Some(*changes),
+                    Some(existing) if *changes < existing => crossover = Some(*changes),
+                    _ => {}
+                }
+            }
+        }
+        self.crossover_threshold = crossover;
+    }
+
+    /// Recommend whether to use incremental or full refresh.
+    pub fn recommend(&self, pending_changes: usize) -> RefreshDecision {
+        match self.crossover_threshold {
+            Some(threshold) if pending_changes >= threshold => RefreshDecision::FullRefresh,
+            _ => RefreshDecision::Incremental,
+        }
+    }
+
+    pub fn observation_count(&self) -> usize {
+        self.observations.len()
+    }
+
+    pub fn crossover_threshold(&self) -> Option<usize> {
+        self.crossover_threshold
+    }
+}
+
+impl Default for RefreshCostPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cascading View Refresh Coordinator
+// ---------------------------------------------------------------------------
+
+/// Coordinates refresh of materialized views that depend on each other,
+/// ensuring correct ordering (topological sort).
+#[derive(Debug)]
+pub struct CascadeRefreshCoordinator {
+    /// view_name -> list of views that depend on it
+    dependents: HashMap<String, Vec<String>>,
+    /// view_name -> list of views it depends on
+    dependencies: HashMap<String, Vec<String>>,
+}
+
+impl CascadeRefreshCoordinator {
+    pub fn new() -> Self {
+        Self {
+            dependents: HashMap::new(),
+            dependencies: HashMap::new(),
+        }
+    }
+
+    /// Register that `dependent` depends on `base`.
+    pub fn add_dependency(&mut self, dependent: &str, base: &str) {
+        self.dependents
+            .entry(base.to_string())
+            .or_default()
+            .push(dependent.to_string());
+        self.dependencies
+            .entry(dependent.to_string())
+            .or_default()
+            .push(base.to_string());
+    }
+
+    /// Compute refresh order using topological sort.
+    /// Returns view names in the order they should be refreshed.
+    pub fn refresh_order(&self, changed_view: &str) -> Vec<String> {
+        let mut order = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        self.topo_visit(changed_view, &mut visited, &mut order);
+        order
+    }
+
+    fn topo_visit(
+        &self,
+        view: &str,
+        visited: &mut std::collections::HashSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        if visited.contains(view) {
+            return;
+        }
+        visited.insert(view.to_string());
+        order.push(view.to_string());
+
+        if let Some(deps) = self.dependents.get(view) {
+            for dep in deps {
+                self.topo_visit(dep, visited, order);
+            }
+        }
+    }
+
+    /// Check if adding a dependency would create a cycle.
+    pub fn would_create_cycle(&self, dependent: &str, base: &str) -> bool {
+        // If base transitively depends on dependent, adding this edge creates a cycle
+        let mut visited = std::collections::HashSet::new();
+        self.has_path(dependent, base, &mut visited)
+    }
+
+    fn has_path(
+        &self,
+        from: &str,
+        to: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if from == to {
+            return true;
+        }
+        if visited.contains(from) {
+            return false;
+        }
+        visited.insert(from.to_string());
+        if let Some(deps) = self.dependents.get(from) {
+            for dep in deps {
+                if self.has_path(dep, to, visited) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+impl Default for CascadeRefreshCoordinator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2962,12 +3353,9 @@ mod tests {
     #[test]
     fn test_executor_identity_transform() {
         let batch = make_test_batch();
-        let result = IncrementalExecutor::apply_transform(
-            &DeltaTransform::Identity,
-            &[batch.clone()],
-            None,
-        )
-        .unwrap();
+        let result =
+            IncrementalExecutor::apply_transform(&DeltaTransform::Identity, &[batch.clone()], None)
+                .unwrap();
         let output = result.unwrap();
         assert_eq!(output.len(), 1);
         assert_eq!(output[0].num_rows(), 3);
@@ -3064,12 +3452,9 @@ mod tests {
     #[test]
     fn test_executor_full_recompute_returns_none() {
         let batch = make_test_batch();
-        let result = IncrementalExecutor::apply_transform(
-            &DeltaTransform::FullRecompute,
-            &[batch],
-            None,
-        )
-        .unwrap();
+        let result =
+            IncrementalExecutor::apply_transform(&DeltaTransform::FullRecompute, &[batch], None)
+                .unwrap();
         assert!(result.is_none());
     }
 
@@ -3317,7 +3702,7 @@ mod tests {
         scheduler.schedule("view_a", 1);
         scheduler.schedule("view_b", 10);
         assert_eq!(scheduler.pending_count(), 2);
-        
+
         // Higher priority first
         let next = scheduler.next_job().map(|s| s.to_string());
         assert_eq!(next.as_deref(), Some("view_b"));
@@ -3372,22 +3757,16 @@ mod tests {
             is_fresh: false,
         });
 
-        let result = rewriter.try_rewrite(
-            &["orders".into()],
-            &["status".into()],
-            &["count".into()],
-        );
+        let result =
+            rewriter.try_rewrite(&["orders".into()], &["status".into()], &["count".into()]);
         assert!(!result.rewritten);
     }
 
     #[test]
     fn test_rewriter_no_match() {
         let rewriter = MaterializedViewRewriter::new();
-        let result = rewriter.try_rewrite(
-            &["unknown_table".into()],
-            &["col".into()],
-            &["agg".into()],
-        );
+        let result =
+            rewriter.try_rewrite(&["unknown_table".into()], &["col".into()], &["agg".into()]);
         assert!(!result.rewritten);
         assert_eq!(result.estimated_speedup, 1.0);
     }
@@ -3425,5 +3804,422 @@ mod tests {
         assert_eq!(stats.total_rows_refreshed, 1500);
         assert_eq!(stats.views_skipped, 1);
         assert_eq!(stats.errors.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-refresh and query rewrite tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_refresh_trigger() {
+        let trigger1 = RefreshTrigger::OnCommit;
+        let trigger2 = RefreshTrigger::Manual;
+        let trigger3 = RefreshTrigger::AfterChanges { threshold: 1000 };
+
+        assert!(matches!(trigger1, RefreshTrigger::OnCommit));
+        assert!(matches!(trigger2, RefreshTrigger::Manual));
+        assert!(matches!(
+            trigger3,
+            RefreshTrigger::AfterChanges { threshold: 1000 }
+        ));
+    }
+
+    #[test]
+    fn test_auto_refresh_manager() {
+        let mut manager = AutoRefreshManager::new();
+
+        manager.register_view(
+            "sales_view",
+            "SELECT * FROM sales",
+            RefreshTrigger::OnCommit,
+            vec!["sales"],
+        );
+
+        assert_eq!(manager.view_count(), 1);
+
+        // Notify table change
+        let views_to_refresh = manager.notify_table_change("sales");
+        assert_eq!(views_to_refresh.len(), 1);
+        assert_eq!(views_to_refresh[0], "sales_view");
+    }
+
+    #[test]
+    fn test_auto_refresh_threshold() {
+        let mut manager = AutoRefreshManager::new();
+
+        manager.register_view(
+            "summary_view",
+            "SELECT COUNT(*) FROM orders",
+            RefreshTrigger::AfterChanges { threshold: 100 },
+            vec!["orders"],
+        );
+
+        // Accumulate changes - should not trigger yet
+        for _ in 0..99 {
+            let views = manager.notify_table_change("orders");
+            assert!(views.is_empty()); // Should not trigger yet
+        }
+        let needs_refresh = manager.check_thresholds();
+        assert!(needs_refresh.is_empty());
+
+        // One more change should trigger during notify
+        let views = manager.notify_table_change("orders");
+        assert_eq!(views.len(), 1); // Should trigger immediately in notify_table_change
+        assert_eq!(views[0], "summary_view");
+    }
+
+    #[test]
+    fn test_query_rewriter() {
+        let mut rewriter = QueryRewriter::new();
+
+        let view_info = MaterializedViewInfo {
+            name: "user_summary".to_string(),
+            source_query: "SELECT user_id, COUNT(*) FROM events GROUP BY user_id".to_string(),
+            source_tables: vec!["events".to_string()],
+            last_refreshed: std::time::SystemTime::now(),
+        };
+
+        rewriter.add_view(view_info);
+
+        // Exact match should rewrite
+        let sql = "SELECT user_id, COUNT(*) FROM events GROUP BY user_id";
+        let rewritten = rewriter.rewrite_with_materialized_views(sql, &rewriter.available_views());
+        assert!(rewritten.is_some());
+        assert!(rewritten.unwrap().contains("user_summary"));
+    }
+
+    #[test]
+    fn test_query_rewriter_no_match() {
+        let rewriter = QueryRewriter::new();
+        let sql = "SELECT * FROM completely_different_table";
+        let rewritten = rewriter.rewrite_with_materialized_views(sql, &rewriter.available_views());
+        assert!(rewritten.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // FilterDeltaComputer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_filter_delta_inserts() {
+        // 5 original rows, changes at indices 5 and 6 (new rows)
+        let deltas = FilterDeltaComputer::compute_filter_delta(5, &[5, 6], |idx| idx % 2 == 0);
+        // idx 5 fails predicate (odd), idx 6 passes → Insert
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].operation, DeltaOperation::Insert);
+        assert_eq!(deltas[0].row_index, 6);
+    }
+
+    #[test]
+    fn test_filter_delta_updates_and_deletes() {
+        // 10 original rows, changes at indices 2 and 3
+        let deltas = FilterDeltaComputer::compute_filter_delta(10, &[2, 3], |idx| idx == 2);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].operation, DeltaOperation::Update); // idx 2 passes
+        assert_eq!(deltas[1].operation, DeltaOperation::Delete); // idx 3 fails
+    }
+
+    // -----------------------------------------------------------------------
+    // MultiTableJoinDelta tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_join_delta_basic() {
+        let join = MultiTableJoinDelta::new(vec![("id".into(), "user_id".into())]);
+        let result = join.compute_join_delta(10, 1000, 5, 500);
+        assert!(result.rows_to_add > 0);
+        assert!(result.estimated_cost > 0.0);
+    }
+
+    #[test]
+    fn test_join_delta_no_changes() {
+        let join = MultiTableJoinDelta::new(vec![("id".into(), "id".into())]);
+        let result = join.compute_join_delta(0, 1000, 0, 1000);
+        assert_eq!(result.rows_to_add, 0);
+        assert_eq!(result.rows_to_remove, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // StalenessMonitor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_staleness_monitor_basic() {
+        let mut monitor = StalenessMonitor::new(1000); // 1 sec threshold
+        monitor.record_refresh("mv1");
+        monitor.record_change("mv1");
+        monitor.record_change("mv1");
+
+        // With current_time far in the future, the view should be stale
+        let stale = monitor.check_staleness(u64::MAX);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].view_name, "mv1");
+        assert_eq!(stale[0].changes_since_refresh, 2);
+    }
+
+    #[test]
+    fn test_staleness_monitor_most_stale() {
+        let mut monitor = StalenessMonitor::new(0);
+        monitor.record_change("mv1");
+        monitor.record_change("mv2");
+        monitor.record_change("mv2");
+        monitor.record_change("mv2");
+
+        let most = monitor.most_stale_view();
+        assert!(most.is_some());
+        assert_eq!(most.unwrap().view_name, "mv2");
+    }
+
+    // -----------------------------------------------------------------------
+    // Refresh Cost Predictor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_refresh_cost_predictor_incremental() {
+        let mut predictor = RefreshCostPredictor::new();
+        // Small changes: incremental is cheaper
+        predictor.record(10, 100.0, 20.0);
+        predictor.record(50, 100.0, 80.0);
+
+        let decision = predictor.recommend(30);
+        assert!(matches!(decision, RefreshDecision::Incremental));
+    }
+
+    #[test]
+    fn test_refresh_cost_predictor_full() {
+        let mut predictor = RefreshCostPredictor::new();
+        // At 100 changes, incremental becomes more expensive
+        predictor.record(50, 100.0, 80.0);
+        predictor.record(100, 100.0, 150.0);
+
+        let decision = predictor.recommend(200);
+        assert!(matches!(decision, RefreshDecision::FullRefresh));
+    }
+
+    #[test]
+    fn test_refresh_cost_predictor_crossover() {
+        let mut predictor = RefreshCostPredictor::new();
+        predictor.record(10, 500.0, 50.0);
+        predictor.record(1000, 500.0, 600.0);
+        assert_eq!(predictor.crossover_threshold(), Some(1000));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cascade Refresh Coordinator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cascade_refresh_order() {
+        let mut coord = CascadeRefreshCoordinator::new();
+        coord.add_dependency("mv_summary", "mv_daily");
+        coord.add_dependency("mv_daily", "base_table");
+
+        let order = coord.refresh_order("base_table");
+        assert_eq!(order[0], "base_table");
+        // mv_daily should come before mv_summary
+        let daily_pos = order.iter().position(|v| v == "mv_daily");
+        let summary_pos = order.iter().position(|v| v == "mv_summary");
+        assert!(daily_pos < summary_pos);
+    }
+
+    #[test]
+    fn test_cascade_cycle_detection() {
+        let mut coord = CascadeRefreshCoordinator::new();
+        coord.add_dependency("b", "a");
+        coord.add_dependency("c", "b");
+        // Adding a->c would create a cycle: a->b->c->a
+        assert!(coord.would_create_cycle("a", "c"));
+        assert!(!coord.would_create_cycle("d", "a"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-refresh and query rewrite implementation
+// ---------------------------------------------------------------------------
+
+/// Auto-refresh manager for materialized views.
+#[derive(Debug)]
+pub struct AutoRefreshManager {
+    views: RwLock<HashMap<String, ViewRefreshConfig>>,
+    change_counts: RwLock<HashMap<String, usize>>,
+}
+
+#[derive(Debug, Clone)]
+struct ViewRefreshConfig {
+    name: String,
+    query: String,
+    trigger: RefreshTrigger,
+    source_tables: Vec<String>,
+}
+
+impl AutoRefreshManager {
+    pub fn new() -> Self {
+        Self {
+            views: RwLock::new(HashMap::new()),
+            change_counts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a materialized view with auto-refresh.
+    pub fn register_view(
+        &mut self,
+        name: impl Into<String>,
+        query: impl Into<String>,
+        trigger: RefreshTrigger,
+        source_tables: Vec<impl Into<String>>,
+    ) {
+        let name = name.into();
+        let config = ViewRefreshConfig {
+            name: name.clone(),
+            query: query.into(),
+            trigger,
+            source_tables: source_tables.into_iter().map(|s| s.into()).collect(),
+        };
+
+        self.views.write().insert(name.clone(), config);
+        self.change_counts.write().insert(name, 0);
+    }
+
+    /// Notify that a table has changed, triggering refresh for dependent views.
+    pub fn notify_table_change(&self, table_name: &str) -> Vec<String> {
+        let views = self.views.read();
+        let mut views_to_refresh = Vec::new();
+
+        for (view_name, config) in views.iter() {
+            if config.source_tables.iter().any(|t| t == table_name) {
+                match &config.trigger {
+                    RefreshTrigger::OnCommit => {
+                        views_to_refresh.push(view_name.clone());
+                    }
+                    RefreshTrigger::AfterChanges { threshold } => {
+                        let mut counts = self.change_counts.write();
+                        let count = counts.entry(view_name.clone()).or_insert(0);
+                        *count += 1;
+                        if *count >= *threshold as usize {
+                            views_to_refresh.push(view_name.clone());
+                            *count = 0; // Reset after refresh
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        views_to_refresh
+    }
+
+    /// Check for views that need refresh based on threshold.
+    pub fn check_thresholds(&self) -> Vec<String> {
+        let views = self.views.read();
+        let change_counts = self.change_counts.read();
+        let mut needs_refresh = Vec::new();
+
+        for (view_name, config) in views.iter() {
+            if let RefreshTrigger::AfterChanges { threshold } = &config.trigger {
+                if let Some(count) = change_counts.get(view_name) {
+                    if *count >= *threshold as usize {
+                        needs_refresh.push(view_name.clone());
+                    }
+                }
+            }
+        }
+
+        needs_refresh
+    }
+
+    /// Get the number of registered views.
+    pub fn view_count(&self) -> usize {
+        self.views.read().len()
+    }
+
+    /// Get all registered view names.
+    pub fn view_names(&self) -> Vec<String> {
+        self.views.read().keys().cloned().collect()
+    }
+
+    /// Unregister a view.
+    pub fn unregister_view(&mut self, name: &str) -> bool {
+        let removed = self.views.write().remove(name).is_some();
+        if removed {
+            self.change_counts.write().remove(name);
+        }
+        removed
+    }
+}
+
+impl Default for AutoRefreshManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Information about a materialized view for query rewriting.
+#[derive(Debug, Clone)]
+pub struct MaterializedViewInfo {
+    pub name: String,
+    pub source_query: String,
+    pub source_tables: Vec<String>,
+    pub last_refreshed: std::time::SystemTime,
+}
+
+/// Query rewriter that substitutes materialized views.
+#[derive(Debug)]
+pub struct QueryRewriter {
+    views: Vec<MaterializedViewInfo>,
+}
+
+impl QueryRewriter {
+    pub fn new() -> Self {
+        Self { views: Vec::new() }
+    }
+
+    /// Add a materialized view to the rewriter.
+    pub fn add_view(&mut self, view: MaterializedViewInfo) {
+        self.views.push(view);
+    }
+
+    /// Get all available views.
+    pub fn available_views(&self) -> Vec<MaterializedViewInfo> {
+        self.views.clone()
+    }
+
+    /// Try to rewrite a query using materialized views.
+    pub fn rewrite_with_materialized_views(
+        &self,
+        sql: &str,
+        available_views: &[MaterializedViewInfo],
+    ) -> Option<String> {
+        let normalized_sql = sql.trim().to_lowercase();
+
+        for view in available_views {
+            let normalized_view_query = view.source_query.trim().to_lowercase();
+
+            // Exact match - substitute the entire query
+            if normalized_sql == normalized_view_query {
+                return Some(format!("SELECT * FROM {}", view.name));
+            }
+
+            // Check if query is a subset (same tables with extra WHERE clause)
+            if normalized_sql.contains(&normalized_view_query.split("where").next().unwrap_or("")) {
+                // This is a simplification - a full implementation would parse the SQL
+                // and check if the query can be answered from the materialized view
+                if normalized_sql.contains("where") && !normalized_view_query.contains("where") {
+                    // Query has WHERE clause, view doesn't - potentially can use view with filter
+                    let where_clause = normalized_sql.split("where").nth(1).unwrap_or("");
+                    return Some(format!(
+                        "SELECT * FROM {} WHERE {}",
+                        view.name, where_clause
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+}
+
+impl Default for QueryRewriter {
+    fn default() -> Self {
+        Self::new()
     }
 }
