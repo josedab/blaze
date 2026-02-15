@@ -151,6 +151,7 @@ pub mod jit;
 pub mod json;
 pub mod lsp;
 pub mod materialized;
+pub mod migration;
 pub mod optimizer;
 pub mod output;
 pub mod parallel;
