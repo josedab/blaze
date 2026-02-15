@@ -545,6 +545,201 @@ struct IcebergMetadata {
     data_files: Vec<DataFileInfo>,
 }
 
+// ---------------------------------------------------------------------------
+// Schema Evolution
+// ---------------------------------------------------------------------------
+
+/// A schema evolution operation.
+#[derive(Debug, Clone)]
+pub enum SchemaEvolution {
+    /// Add a new column at the end.
+    AddColumn {
+        name: String,
+        data_type: DataType,
+        nullable: bool,
+    },
+    /// Drop an existing column.
+    DropColumn { name: String },
+    /// Rename a column.
+    RenameColumn { old_name: String, new_name: String },
+    /// Change a column's type (must be compatible).
+    ChangeType { name: String, new_type: DataType },
+}
+
+/// Applies schema evolution operations to a schema.
+pub struct SchemaEvolver;
+
+impl SchemaEvolver {
+    /// Apply a sequence of evolutions to a schema, returning the new schema.
+    pub fn evolve(schema: &Schema, ops: &[SchemaEvolution]) -> Result<Schema> {
+        let mut fields: Vec<Field> = schema.fields().to_vec();
+
+        for op in ops {
+            match op {
+                SchemaEvolution::AddColumn {
+                    name,
+                    data_type,
+                    nullable,
+                } => {
+                    if fields.iter().any(|f| f.name() == name) {
+                        return Err(BlazeError::analysis(format!(
+                            "Column '{}' already exists",
+                            name
+                        )));
+                    }
+                    fields.push(Field::new(name, data_type.clone(), *nullable));
+                }
+                SchemaEvolution::DropColumn { name } => {
+                    let before = fields.len();
+                    fields.retain(|f| f.name() != name);
+                    if fields.len() == before {
+                        return Err(BlazeError::analysis(format!("Column '{}' not found", name)));
+                    }
+                }
+                SchemaEvolution::RenameColumn { old_name, new_name } => {
+                    let field = fields
+                        .iter_mut()
+                        .find(|f| f.name() == old_name)
+                        .ok_or_else(|| {
+                            BlazeError::analysis(format!("Column '{}' not found", old_name))
+                        })?;
+                    *field = Field::new(new_name, field.data_type().clone(), field.is_nullable());
+                }
+                SchemaEvolution::ChangeType { name, new_type } => {
+                    let field = fields
+                        .iter_mut()
+                        .find(|f| f.name() == name)
+                        .ok_or_else(|| {
+                            BlazeError::analysis(format!("Column '{}' not found", name))
+                        })?;
+                    *field = Field::new(name, new_type.clone(), field.is_nullable());
+                }
+            }
+        }
+        Ok(Schema::new(fields))
+    }
+
+    /// Check if a type change is compatible (widening only).
+    pub fn is_compatible_change(from: &DataType, to: &DataType) -> bool {
+        matches!(
+            (from, to),
+            (DataType::Int32, DataType::Int64)
+                | (DataType::Int32, DataType::Float64)
+                | (DataType::Int64, DataType::Float64)
+                | (DataType::Float32, DataType::Float64)
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partition Evolution
+// ---------------------------------------------------------------------------
+
+/// A partition transform for Iceberg hidden partitioning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartitionTransform {
+    /// Use the raw column value.
+    Identity,
+    /// Bucket hash with N buckets.
+    Bucket { num_buckets: u32 },
+    /// Truncate to W characters/digits.
+    Truncate { width: u32 },
+    /// Extract year from a timestamp.
+    Year,
+    /// Extract month from a timestamp.
+    Month,
+    /// Extract day from a timestamp.
+    Day,
+    /// Extract hour from a timestamp.
+    Hour,
+}
+
+/// A partition field specification.
+#[derive(Debug, Clone)]
+pub struct PartitionField {
+    pub source_column: String,
+    pub transform: PartitionTransform,
+    pub name: String,
+    pub field_id: u32,
+}
+
+/// Manages partition spec evolution without data rewrite.
+#[derive(Debug)]
+pub struct PartitionSpecEvolver {
+    specs: Vec<Vec<PartitionField>>,
+    current_spec_id: usize,
+}
+
+impl PartitionSpecEvolver {
+    /// Create with an initial partition spec.
+    pub fn new(initial_spec: Vec<PartitionField>) -> Self {
+        Self {
+            specs: vec![initial_spec],
+            current_spec_id: 0,
+        }
+    }
+
+    /// Evolve to a new partition spec (old data files keep old spec).
+    pub fn evolve(&mut self, new_spec: Vec<PartitionField>) -> usize {
+        self.specs.push(new_spec);
+        self.current_spec_id = self.specs.len() - 1;
+        self.current_spec_id
+    }
+
+    /// Get the current partition spec.
+    pub fn current_spec(&self) -> &[PartitionField] {
+        &self.specs[self.current_spec_id]
+    }
+
+    /// Get a spec by ID.
+    pub fn spec(&self, spec_id: usize) -> Option<&[PartitionField]> {
+        self.specs.get(spec_id).map(|v| v.as_slice())
+    }
+
+    /// Total number of specs (including historical).
+    pub fn spec_count(&self) -> usize {
+        self.specs.len()
+    }
+
+    /// Current spec ID.
+    pub fn current_spec_id(&self) -> usize {
+        self.current_spec_id
+    }
+
+    /// Apply a partition transform to an i64 value.
+    pub fn apply_transform(transform: &PartitionTransform, value: i64) -> String {
+        match transform {
+            PartitionTransform::Identity => value.to_string(),
+            PartitionTransform::Bucket { num_buckets } => {
+                (value.unsigned_abs() as u32 % num_buckets).to_string()
+            }
+            PartitionTransform::Truncate { width } => {
+                let s = value.to_string();
+                s.chars().take(*width as usize).collect()
+            }
+            PartitionTransform::Year => {
+                // Epoch seconds → year (approximate)
+                let days = value / 86400;
+                let year = 1970 + (days / 365);
+                year.to_string()
+            }
+            PartitionTransform::Month => {
+                let days = value / 86400;
+                let month = (days % 365) / 30 + 1;
+                month.to_string()
+            }
+            PartitionTransform::Day => {
+                let days = value / 86400;
+                days.to_string()
+            }
+            PartitionTransform::Hour => {
+                let hours = value / 3600;
+                hours.to_string()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +775,122 @@ mod tests {
         assert_eq!(
             IcebergTable::parse_iceberg_type(Some(&serde_json::json!("double"))).unwrap(),
             DataType::Float64
+        );
+    }
+
+    // -- Schema Evolution tests -----------------------------------------------
+
+    #[test]
+    fn test_schema_add_column() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        let evolved = SchemaEvolver::evolve(
+            &schema,
+            &[SchemaEvolution::AddColumn {
+                name: "name".into(),
+                data_type: DataType::Utf8,
+                nullable: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(evolved.len(), 2);
+        assert_eq!(evolved.field(1).unwrap().name(), "name");
+    }
+
+    #[test]
+    fn test_schema_drop_column() {
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("temp", DataType::Utf8, true),
+        ]);
+        let evolved = SchemaEvolver::evolve(
+            &schema,
+            &[SchemaEvolution::DropColumn {
+                name: "temp".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(evolved.len(), 1);
+    }
+
+    #[test]
+    fn test_schema_rename_column() {
+        let schema = Schema::new(vec![Field::new("old_name", DataType::Utf8, true)]);
+        let evolved = SchemaEvolver::evolve(
+            &schema,
+            &[SchemaEvolution::RenameColumn {
+                old_name: "old_name".into(),
+                new_name: "new_name".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(evolved.field(0).unwrap().name(), "new_name");
+    }
+
+    #[test]
+    fn test_compatible_type_change() {
+        assert!(SchemaEvolver::is_compatible_change(
+            &DataType::Int32,
+            &DataType::Int64
+        ));
+        assert!(SchemaEvolver::is_compatible_change(
+            &DataType::Float32,
+            &DataType::Float64
+        ));
+        assert!(!SchemaEvolver::is_compatible_change(
+            &DataType::Utf8,
+            &DataType::Int64
+        ));
+    }
+
+    // -- Partition Evolution tests --------------------------------------------
+
+    #[test]
+    fn test_partition_spec_evolution() {
+        let initial = vec![PartitionField {
+            source_column: "date".into(),
+            transform: PartitionTransform::Day,
+            name: "date_day".into(),
+            field_id: 1,
+        }];
+        let mut evolver = PartitionSpecEvolver::new(initial);
+        assert_eq!(evolver.spec_count(), 1);
+        assert_eq!(evolver.current_spec_id(), 0);
+
+        let new_spec = vec![PartitionField {
+            source_column: "date".into(),
+            transform: PartitionTransform::Month,
+            name: "date_month".into(),
+            field_id: 2,
+        }];
+        let id = evolver.evolve(new_spec);
+        assert_eq!(id, 1);
+        assert_eq!(evolver.spec_count(), 2);
+        assert_eq!(
+            evolver.current_spec()[0].transform,
+            PartitionTransform::Month
+        );
+        assert!(evolver.spec(0).is_some());
+    }
+
+    #[test]
+    fn test_partition_transforms() {
+        assert_eq!(
+            PartitionSpecEvolver::apply_transform(&PartitionTransform::Identity, 42),
+            "42"
+        );
+        assert_eq!(
+            PartitionSpecEvolver::apply_transform(
+                &PartitionTransform::Bucket { num_buckets: 10 },
+                42
+            ),
+            "2"
+        );
+        assert_eq!(
+            PartitionSpecEvolver::apply_transform(
+                &PartitionTransform::Truncate { width: 3 },
+                12345
+            ),
+            "123"
         );
     }
 }
