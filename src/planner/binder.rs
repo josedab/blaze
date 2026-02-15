@@ -1722,4 +1722,233 @@ mod tests {
         let err = binder.bind(stmt).unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
+
+    // --- DML/DDL tests ---
+
+    #[test]
+    fn test_bind_create_table() {
+        let binder = create_binder();
+        let stmt =
+            sql::parser::Parser::parse_one("CREATE TABLE t1 (id INT, name VARCHAR)").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::CreateTable { .. }));
+        if let LogicalPlan::CreateTable {
+            name,
+            schema,
+            if_not_exists,
+        } = &plan
+        {
+            assert_eq!(name.table, "t1");
+            assert_eq!(schema.fields().len(), 2);
+            assert!(!if_not_exists);
+        }
+    }
+
+    #[test]
+    fn test_bind_create_table_if_not_exists() {
+        let binder = create_binder();
+        let stmt =
+            sql::parser::Parser::parse_one("CREATE TABLE IF NOT EXISTS t1 (id INT)").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        if let LogicalPlan::CreateTable { if_not_exists, .. } = &plan {
+            assert!(if_not_exists);
+        } else {
+            panic!("Expected CreateTable plan");
+        }
+    }
+
+    #[test]
+    fn test_bind_drop_table() {
+        let binder = create_binder();
+        let stmt = sql::parser::Parser::parse_one("DROP TABLE t1").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::DropTable { .. }));
+        if let LogicalPlan::DropTable { name, if_exists } = &plan {
+            assert_eq!(name.table, "t1");
+            assert!(!if_exists);
+        }
+    }
+
+    #[test]
+    fn test_bind_drop_table_if_exists() {
+        let binder = create_binder();
+        let stmt = sql::parser::Parser::parse_one("DROP TABLE IF EXISTS t1").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        if let LogicalPlan::DropTable { if_exists, .. } = &plan {
+            assert!(if_exists);
+        } else {
+            panic!("Expected DropTable plan");
+        }
+    }
+
+    #[test]
+    fn test_bind_insert_values() {
+        let binder = create_binder_with_table(
+            "users",
+            vec![
+                ("id", crate::types::DataType::Int64),
+                ("name", crate::types::DataType::Utf8),
+            ],
+        );
+        let stmt =
+            sql::parser::Parser::parse_one("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::Insert { .. }));
+        if let LogicalPlan::Insert { table_ref, .. } = &plan {
+            assert_eq!(table_ref.table, "users");
+        }
+    }
+
+    #[test]
+    fn test_bind_insert_into_nonexistent_table() {
+        // INSERT should still bind (table resolution happens at execution), but we can verify it creates the plan
+        let binder = create_binder();
+        let stmt =
+            sql::parser::Parser::parse_one("INSERT INTO no_table VALUES (1, 'x')").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::Insert { .. }));
+    }
+
+    #[test]
+    fn test_bind_update() {
+        let binder = create_binder_with_table(
+            "users",
+            vec![
+                ("id", crate::types::DataType::Int64),
+                ("name", crate::types::DataType::Utf8),
+            ],
+        );
+        let stmt =
+            sql::parser::Parser::parse_one("UPDATE users SET name = 'Bob' WHERE id = 1").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::Update { .. }));
+        if let LogicalPlan::Update {
+            table_ref,
+            assignments,
+            predicate,
+            ..
+        } = &plan
+        {
+            assert_eq!(table_ref.table, "users");
+            assert_eq!(assignments.len(), 1);
+            assert_eq!(assignments[0].0, "name");
+            assert!(predicate.is_some());
+        }
+    }
+
+    #[test]
+    fn test_bind_update_no_where() {
+        let binder = create_binder_with_table(
+            "users",
+            vec![("id", crate::types::DataType::Int64)],
+        );
+        let stmt = sql::parser::Parser::parse_one("UPDATE users SET id = 0").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        if let LogicalPlan::Update { predicate, .. } = &plan {
+            assert!(predicate.is_none());
+        } else {
+            panic!("Expected Update plan");
+        }
+    }
+
+    #[test]
+    fn test_bind_delete() {
+        let binder = create_binder_with_table(
+            "users",
+            vec![("id", crate::types::DataType::Int64)],
+        );
+        let stmt = sql::parser::Parser::parse_one("DELETE FROM users WHERE id = 1").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::Delete { .. }));
+        if let LogicalPlan::Delete {
+            table_ref,
+            predicate,
+            ..
+        } = &plan
+        {
+            assert_eq!(table_ref.table, "users");
+            assert!(predicate.is_some());
+        }
+    }
+
+    #[test]
+    fn test_bind_delete_no_where() {
+        let binder = create_binder_with_table(
+            "users",
+            vec![("id", crate::types::DataType::Int64)],
+        );
+        let stmt = sql::parser::Parser::parse_one("DELETE FROM users").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        if let LogicalPlan::Delete { predicate, .. } = &plan {
+            assert!(predicate.is_none());
+        } else {
+            panic!("Expected Delete plan");
+        }
+    }
+
+    #[test]
+    fn test_bind_copy_to_csv() {
+        let binder = create_binder_with_table(
+            "users",
+            vec![("id", crate::types::DataType::Int64)],
+        );
+        let stmt =
+            sql::parser::Parser::parse_one("COPY users TO '/tmp/out.csv'").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::Copy { .. }));
+        if let LogicalPlan::Copy { target, .. } = &plan {
+            assert_eq!(target, "/tmp/out.csv");
+        }
+    }
+
+    #[test]
+    fn test_bind_copy_to_parquet_extension() {
+        let binder = create_binder_with_table(
+            "data",
+            vec![("x", crate::types::DataType::Int64)],
+        );
+        let stmt =
+            sql::parser::Parser::parse_one("COPY data TO '/tmp/out.parquet'").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::Copy { .. }));
+    }
+
+    #[test]
+    fn test_bind_copy_nonexistent_table() {
+        let binder = create_binder();
+        let stmt =
+            sql::parser::Parser::parse_one("COPY no_table TO '/tmp/out.csv'").unwrap();
+        let err = binder.bind(stmt).unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_bind_context_depth_limit() {
+        let mut ctx = BindContext::new();
+        for _ in 0..MAX_PLAN_DEPTH {
+            ctx.enter_scope().unwrap();
+        }
+        // Next should fail
+        assert!(ctx.enter_scope().is_err());
+    }
+
+    #[test]
+    fn test_bind_context_cte() {
+        let mut ctx = BindContext::new();
+        assert!(ctx.get_cte("missing").is_none());
+        let plan = LogicalPlan::EmptyRelation {
+            produce_one_row: true,
+            schema: Schema::empty(),
+        };
+        ctx.with_cte("my_cte".to_string(), plan);
+        assert!(ctx.get_cte("my_cte").is_some());
+    }
+
+    #[test]
+    fn test_bind_explain() {
+        let binder = create_binder();
+        let stmt = sql::parser::Parser::parse_one("EXPLAIN SELECT 1").unwrap();
+        let plan = binder.bind(stmt).unwrap();
+        assert!(matches!(plan, LogicalPlan::Explain { .. }));
+    }
 }
