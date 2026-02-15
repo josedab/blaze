@@ -1372,7 +1372,7 @@ impl BTreeIndex {
     pub fn range_scan(&self, start: &[u8], end: &[u8]) -> Vec<(&Vec<u8>, &Vec<usize>)> {
         use std::ops::RangeInclusive;
         let range: RangeInclusive<Vec<u8>> = start.to_vec()..=end.to_vec();
-        self.tree.range(range).map(|(k, v)| (k, v)).collect()
+        self.tree.range(range).collect()
     }
 
     /// Remove all row indices associated with `key`.
@@ -1853,20 +1853,15 @@ impl IncrementalCheckpointManager {
 // ---------------------------------------------------------------------------
 
 /// Configurable durability guarantees for write operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DurabilityLevel {
     /// Full fsync after each commit group.
+    #[default]
     Fsync,
     /// Fdatasync (metadata may lag).
     Fdatasync,
     /// Async writes (fastest, data may be lost on crash).
     Async,
-}
-
-impl Default for DurabilityLevel {
-    fn default() -> Self {
-        Self::Fsync
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2021,6 +2016,12 @@ pub struct RecoveryManager {
     recovery_time_ms: u64,
 }
 
+impl Default for RecoveryManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecoveryManager {
     pub fn new() -> Self {
         Self {
@@ -2162,12 +2163,7 @@ impl ClockSweepBufferPool {
 
     /// Insert a page into the pool. Evicts if at capacity.
     /// Returns the evicted dirty page data if one was flushed.
-    pub fn insert_page(
-        &mut self,
-        page_id: u64,
-        data: Vec<u8>,
-        lsn: u64,
-    ) -> Option<(u64, Vec<u8>)> {
+    pub fn insert_page(&mut self, page_id: u64, data: Vec<u8>, lsn: u64) -> Option<(u64, Vec<u8>)> {
         // Already present — just update
         if let Some(&idx) = self.page_map.get(&page_id) {
             if let Some(ref mut frame) = self.frames[idx] {
@@ -2284,11 +2280,7 @@ impl<'a> Iterator for BTreeRangeScanIter<'a> {
 
 impl BTreeIndex {
     /// Lazy range scan returning an iterator instead of a collected Vec.
-    pub fn range_scan_iter<'a>(
-        &'a self,
-        start: &[u8],
-        end: &[u8],
-    ) -> BTreeRangeScanIter<'a> {
+    pub fn range_scan_iter<'a>(&'a self, start: &[u8], end: &[u8]) -> BTreeRangeScanIter<'a> {
         use std::ops::RangeInclusive;
         let range: RangeInclusive<Vec<u8>> = start.to_vec()..=end.to_vec();
         BTreeRangeScanIter {
@@ -2331,10 +2323,7 @@ impl BTreeIndex {
                 end.push(0);
             }
         }
-        self.tree
-            .range(start..end)
-            .map(|(k, v)| (k, v))
-            .collect()
+        self.tree.range(start..end).collect()
     }
 }
 
@@ -2486,7 +2475,9 @@ impl DatabaseFileHeader {
         let mut magic = [0u8; 4];
         magic.copy_from_slice(&data[0..4]);
         if magic != BLAZE_DB_MAGIC {
-            return Err(BlazeError::execution("Invalid database file: bad magic bytes"));
+            return Err(BlazeError::execution(
+                "Invalid database file: bad magic bytes",
+            ));
         }
         let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
         if version > BLAZE_DB_FORMAT_VERSION {
@@ -2657,7 +2648,7 @@ impl BitmapIndex {
 
     /// NOT a bitmap.
     pub fn bitmap_not(a: &[u64], total_rows: usize) -> Vec<u64> {
-        let words = (total_rows + 63) / 64;
+        let words = total_rows.div_ceil(64);
         (0..words)
             .map(|i| {
                 let va = a.get(i).copied().unwrap_or(0);
@@ -3798,7 +3789,8 @@ mod tests {
     #[test]
     fn test_btree_bulk_load() {
         let mut idx = BTreeIndex::new("col");
-        let entries: Vec<(Vec<u8>, usize)> = (0..1000).map(|i| (vec![(i % 256) as u8], i)).collect();
+        let entries: Vec<(Vec<u8>, usize)> =
+            (0..1000).map(|i| (vec![(i % 256) as u8], i)).collect();
         idx.bulk_load(entries);
         assert_eq!(idx.total_entries(), 1000);
     }
@@ -3831,10 +3823,34 @@ mod tests {
     #[test]
     fn test_pitr_filters_entries() {
         let entries = vec![
-            (1, WalEntry::CreateTable { name: "t1".into(), schema: Schema::new(vec![]) }),
-            (2, WalEntry::InsertBatch { table: "t1".into(), batch_data: vec![] }),
-            (3, WalEntry::InsertBatch { table: "t1".into(), batch_data: vec![] }),
-            (4, WalEntry::InsertBatch { table: "t1".into(), batch_data: vec![] }),
+            (
+                1,
+                WalEntry::CreateTable {
+                    name: "t1".into(),
+                    schema: Schema::new(vec![]),
+                },
+            ),
+            (
+                2,
+                WalEntry::InsertBatch {
+                    table: "t1".into(),
+                    batch_data: vec![],
+                },
+            ),
+            (
+                3,
+                WalEntry::InsertBatch {
+                    table: "t1".into(),
+                    batch_data: vec![],
+                },
+            ),
+            (
+                4,
+                WalEntry::InsertBatch {
+                    table: "t1".into(),
+                    batch_data: vec![],
+                },
+            ),
         ];
 
         let mut pitr = PointInTimeRecovery::new(2);
@@ -3992,7 +4008,10 @@ mod tests {
 
         // Email should get bloom filter
         let email_rec = recs.iter().find(|r| r.column == "email").unwrap();
-        assert_eq!(email_rec.recommended_type, RecommendedIndexType::BloomFilter);
+        assert_eq!(
+            email_rec.recommended_type,
+            RecommendedIndexType::BloomFilter
+        );
 
         // Customer_id should get B-tree
         let cid_rec = recs.iter().find(|r| r.column == "customer_id").unwrap();

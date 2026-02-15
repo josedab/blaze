@@ -171,18 +171,14 @@ impl CardinalityEstimator {
                 }
             }
             LogicalExpr::Exists { .. } => 0.5, // Assume 50% selectivity for EXISTS
-            LogicalExpr::Literal(value) => {
-                // Boolean literals
-                if let crate::types::ScalarValue::Boolean(Some(b)) = value {
-                    if *b {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                } else {
+            LogicalExpr::Literal(crate::types::ScalarValue::Boolean(Some(b))) => {
+                if *b {
                     1.0
+                } else {
+                    0.0
                 }
             }
+            LogicalExpr::Literal(_) => 1.0,
             _ => 1.0, // No filtering for other expressions
         }
     }

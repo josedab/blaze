@@ -846,7 +846,7 @@ impl ParallelRowGroupFetcher {
     pub fn plan_fetches(&self, row_groups: &[RowGroupMeta]) -> Vec<FetchPlan> {
         let mut plans = Vec::new();
         for (i, rg) in row_groups.iter().enumerate() {
-            let num_chunks = (rg.size_bytes + self.chunk_size_bytes - 1) / self.chunk_size_bytes;
+            let num_chunks = rg.size_bytes.div_ceil(self.chunk_size_bytes);
             for chunk in 0..num_chunks {
                 let offset = chunk * self.chunk_size_bytes;
                 let len = self.chunk_size_bytes.min(rg.size_bytes - offset);
@@ -1872,26 +1872,24 @@ impl PartitionedObjectStoreTable {
             .iter()
             .filter(|partition| {
                 predicates.iter().all(|pred| match pred {
-                    PartitionPredicate::Eq(col, val) => partition
-                        .partition_values
-                        .get(col)
-                        .map_or(true, |v| v == val),
-                    PartitionPredicate::NotEq(col, val) => partition
-                        .partition_values
-                        .get(col)
-                        .map_or(true, |v| v != val),
+                    PartitionPredicate::Eq(col, val) => {
+                        partition.partition_values.get(col).is_none_or(|v| v == val)
+                    }
+                    PartitionPredicate::NotEq(col, val) => {
+                        partition.partition_values.get(col) != Some(val)
+                    }
                     PartitionPredicate::In(col, vals) => partition
                         .partition_values
                         .get(col)
-                        .map_or(true, |v| vals.contains(v)),
+                        .is_none_or(|v| vals.contains(v)),
                     PartitionPredicate::Gt(col, val) => partition
                         .partition_values
                         .get(col)
-                        .map_or(true, |v| v.as_str() > val.as_str()),
+                        .is_none_or(|v| v.as_str() > val.as_str()),
                     PartitionPredicate::Lt(col, val) => partition
                         .partition_values
                         .get(col)
-                        .map_or(true, |v| v.as_str() < val.as_str()),
+                        .is_none_or(|v| v.as_str() < val.as_str()),
                 })
             })
             .collect()
