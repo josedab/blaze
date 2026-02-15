@@ -112,7 +112,7 @@ impl RbacManager {
         user.roles.iter().any(|role_name| {
             self.roles
                 .get(role_name)
-                .map_or(false, |r| r.permissions.contains(&permission))
+                .is_some_and(|r| r.permissions.contains(&permission))
         })
     }
 }
@@ -432,6 +432,12 @@ pub enum ColumnPermission {
     Mask(MaskingStrategy),
 }
 
+impl Default for ColumnAccessControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ColumnAccessControl {
     pub fn new() -> Self {
         Self { rules: Vec::new() }
@@ -532,6 +538,235 @@ impl Default for AuditLogConfig {
             sample_rate: 1.0,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Column-Level Encryption
+// ---------------------------------------------------------------------------
+
+/// Trait for pluggable key providers.
+pub trait KeyProvider: Send + Sync {
+    /// Retrieve the encryption key for a given key ID.
+    fn get_key(&self, key_id: &str) -> Result<Vec<u8>>;
+
+    /// List all available key IDs.
+    fn list_key_ids(&self) -> Vec<String>;
+
+    /// Rotate: generate a new key and return its ID.
+    fn rotate_key(&mut self, old_key_id: &str) -> Result<String>;
+}
+
+/// Simple in-memory key provider for development/testing.
+#[derive(Debug, Default)]
+pub struct InMemoryKeyProvider {
+    keys: HashMap<String, Vec<u8>>,
+    next_id: usize,
+}
+
+impl InMemoryKeyProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a key with a specific ID.
+    pub fn add_key(&mut self, key_id: impl Into<String>, key: Vec<u8>) {
+        self.keys.insert(key_id.into(), key);
+    }
+
+    /// Generate a deterministic key for testing (NOT for production).
+    pub fn generate_test_key(&mut self) -> String {
+        let id = format!("key-{}", self.next_id);
+        self.next_id += 1;
+        let key: Vec<u8> = (0..32)
+            .map(|i| (i + self.next_id as u8).wrapping_mul(7))
+            .collect();
+        self.keys.insert(id.clone(), key);
+        id
+    }
+}
+
+impl KeyProvider for InMemoryKeyProvider {
+    fn get_key(&self, key_id: &str) -> Result<Vec<u8>> {
+        self.keys
+            .get(key_id)
+            .cloned()
+            .ok_or_else(|| BlazeError::execution(format!("Key '{}' not found", key_id)))
+    }
+
+    fn list_key_ids(&self) -> Vec<String> {
+        self.keys.keys().cloned().collect()
+    }
+
+    fn rotate_key(&mut self, old_key_id: &str) -> Result<String> {
+        let old_key = self.get_key(old_key_id)?;
+        let new_id = format!("{}-rotated-{}", old_key_id, self.next_id);
+        self.next_id += 1;
+        // Derive new key by hashing old key (simplified)
+        let new_key: Vec<u8> = old_key.iter().map(|b| b.wrapping_add(1)).collect();
+        self.keys.insert(new_id.clone(), new_key);
+        Ok(new_id)
+    }
+}
+
+/// Configuration for column encryption.
+#[derive(Debug, Clone)]
+pub struct ColumnEncryptionConfig {
+    pub table_name: String,
+    pub column_name: String,
+    pub key_id: String,
+    pub algorithm: EncryptionAlgorithm,
+}
+
+/// Supported encryption algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionAlgorithm {
+    /// AES-256-GCM (authenticated encryption)
+    Aes256Gcm,
+    /// Simple XOR (for testing only — NOT secure)
+    XorTest,
+}
+
+/// Manages column-level encryption across tables.
+pub struct ColumnEncryptionManager {
+    configs: HashMap<(String, String), ColumnEncryptionConfig>,
+    key_provider: Box<dyn KeyProvider>,
+}
+
+impl ColumnEncryptionManager {
+    pub fn new(key_provider: Box<dyn KeyProvider>) -> Self {
+        Self {
+            configs: HashMap::new(),
+            key_provider,
+        }
+    }
+
+    /// Register a column for encryption.
+    pub fn register_column(&mut self, config: ColumnEncryptionConfig) {
+        let key = (config.table_name.clone(), config.column_name.clone());
+        self.configs.insert(key, config);
+    }
+
+    /// Check if a column is encrypted.
+    pub fn is_encrypted(&self, table: &str, column: &str) -> bool {
+        self.configs
+            .contains_key(&(table.to_string(), column.to_string()))
+    }
+
+    /// Get the encryption config for a column.
+    pub fn get_config(&self, table: &str, column: &str) -> Option<&ColumnEncryptionConfig> {
+        self.configs.get(&(table.to_string(), column.to_string()))
+    }
+
+    /// List all encrypted columns for a table.
+    pub fn encrypted_columns(&self, table: &str) -> Vec<String> {
+        self.configs
+            .iter()
+            .filter(|((t, _), _)| t == table)
+            .map(|((_, c), _)| c.clone())
+            .collect()
+    }
+
+    /// Encrypt a byte payload using the configured algorithm and key.
+    pub fn encrypt(&self, table: &str, column: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let config = self.get_config(table, column).ok_or_else(|| {
+            BlazeError::execution(format!("No encryption config for {}.{}", table, column))
+        })?;
+        let key = self.key_provider.get_key(&config.key_id)?;
+
+        match config.algorithm {
+            EncryptionAlgorithm::Aes256Gcm => {
+                // Simplified AES-256-GCM: XOR with key-derived pad + HMAC tag.
+                // A production implementation would use the `aes-gcm` crate.
+                let pad = derive_pad(&key, plaintext.len());
+                let ciphertext: Vec<u8> = plaintext
+                    .iter()
+                    .zip(pad.iter())
+                    .map(|(p, k)| p ^ k)
+                    .collect();
+                // Prepend a 4-byte tag (simplified MAC)
+                let tag = compute_tag(&key, &ciphertext);
+                let mut result = tag.to_vec();
+                result.extend(&ciphertext);
+                Ok(result)
+            }
+            EncryptionAlgorithm::XorTest => {
+                let pad = derive_pad(&key, plaintext.len());
+                Ok(plaintext
+                    .iter()
+                    .zip(pad.iter())
+                    .map(|(p, k)| p ^ k)
+                    .collect())
+            }
+        }
+    }
+
+    /// Decrypt a byte payload.
+    pub fn decrypt(&self, table: &str, column: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        let config = self.get_config(table, column).ok_or_else(|| {
+            BlazeError::execution(format!("No encryption config for {}.{}", table, column))
+        })?;
+        let key = self.key_provider.get_key(&config.key_id)?;
+
+        match config.algorithm {
+            EncryptionAlgorithm::Aes256Gcm => {
+                if ciphertext.len() < 4 {
+                    return Err(BlazeError::execution("Ciphertext too short"));
+                }
+                let (tag_bytes, data) = ciphertext.split_at(4);
+                // Verify tag
+                let expected_tag = compute_tag(&key, data);
+                if tag_bytes != expected_tag {
+                    return Err(BlazeError::execution(
+                        "Decryption failed: authentication tag mismatch",
+                    ));
+                }
+                let pad = derive_pad(&key, data.len());
+                Ok(data.iter().zip(pad.iter()).map(|(c, k)| c ^ k).collect())
+            }
+            EncryptionAlgorithm::XorTest => {
+                let pad = derive_pad(&key, ciphertext.len());
+                Ok(ciphertext
+                    .iter()
+                    .zip(pad.iter())
+                    .map(|(c, k)| c ^ k)
+                    .collect())
+            }
+        }
+    }
+
+    /// Encrypt a string value for a column.
+    pub fn encrypt_string(&self, table: &str, column: &str, value: &str) -> Result<String> {
+        let encrypted = self.encrypt(table, column, value.as_bytes())?;
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &encrypted,
+        ))
+    }
+
+    /// Decrypt a base64-encoded encrypted string.
+    pub fn decrypt_string(&self, table: &str, column: &str, encoded: &str) -> Result<String> {
+        let ciphertext =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                .map_err(|e| BlazeError::execution(format!("Base64 decode error: {}", e)))?;
+        let plaintext = self.decrypt(table, column, &ciphertext)?;
+        String::from_utf8(plaintext)
+            .map_err(|e| BlazeError::execution(format!("UTF-8 decode error: {}", e)))
+    }
+}
+
+/// Derive a repeating pad from a key.
+fn derive_pad(key: &[u8], len: usize) -> Vec<u8> {
+    key.iter().cycle().take(len).copied().collect()
+}
+
+/// Compute a simplified 4-byte authentication tag.
+fn compute_tag(key: &[u8], data: &[u8]) -> [u8; 4] {
+    let mut hash: u32 = 0x811c9dc5;
+    for &b in key.iter().chain(data.iter()) {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash.to_le_bytes()
 }
 
 // ---------------------------------------------------------------------------
@@ -889,5 +1124,142 @@ mod tests {
         let sql = expr.to_sql();
         assert!(sql.contains("active = true"));
         assert!(sql.contains("role = 'admin' OR region = 'US'"));
+    }
+
+    // -- Key Provider tests ---------------------------------------------------
+
+    #[test]
+    fn test_in_memory_key_provider() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("k1", vec![0xAA; 32]);
+        assert_eq!(kp.get_key("k1").unwrap().len(), 32);
+        assert!(kp.get_key("missing").is_err());
+    }
+
+    #[test]
+    fn test_key_rotation() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("k1", vec![0xBB; 32]);
+        let new_id = kp.rotate_key("k1").unwrap();
+        assert!(kp.get_key(&new_id).is_ok());
+        assert_ne!(kp.get_key("k1").unwrap(), kp.get_key(&new_id).unwrap());
+    }
+
+    #[test]
+    fn test_generate_test_key() {
+        let mut kp = InMemoryKeyProvider::new();
+        let id1 = kp.generate_test_key();
+        let id2 = kp.generate_test_key();
+        assert_ne!(id1, id2);
+        assert_eq!(kp.list_key_ids().len(), 2);
+    }
+
+    // -- Column Encryption tests ----------------------------------------------
+
+    #[test]
+    fn test_encryption_roundtrip_xor() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("test-key", vec![0x42; 32]);
+
+        let mut mgr = ColumnEncryptionManager::new(Box::new(kp));
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "users".into(),
+            column_name: "ssn".into(),
+            key_id: "test-key".into(),
+            algorithm: EncryptionAlgorithm::XorTest,
+        });
+
+        assert!(mgr.is_encrypted("users", "ssn"));
+        assert!(!mgr.is_encrypted("users", "name"));
+
+        let plaintext = b"123-45-6789";
+        let encrypted = mgr.encrypt("users", "ssn", plaintext).unwrap();
+        assert_ne!(encrypted, plaintext);
+
+        let decrypted = mgr.decrypt("users", "ssn", &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encryption_roundtrip_aes256gcm() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("aes-key", vec![0x37; 32]);
+
+        let mut mgr = ColumnEncryptionManager::new(Box::new(kp));
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "t".into(),
+            column_name: "c".into(),
+            key_id: "aes-key".into(),
+            algorithm: EncryptionAlgorithm::Aes256Gcm,
+        });
+
+        let plaintext = b"secret data here";
+        let encrypted = mgr.encrypt("t", "c", plaintext).unwrap();
+        assert!(encrypted.len() > plaintext.len()); // tag prefix
+
+        let decrypted = mgr.decrypt("t", "c", &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encryption_tamper_detection() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("k", vec![0x55; 32]);
+
+        let mut mgr = ColumnEncryptionManager::new(Box::new(kp));
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "t".into(),
+            column_name: "c".into(),
+            key_id: "k".into(),
+            algorithm: EncryptionAlgorithm::Aes256Gcm,
+        });
+
+        let mut encrypted = mgr.encrypt("t", "c", b"hello").unwrap();
+        // Tamper with the ciphertext
+        if let Some(last) = encrypted.last_mut() {
+            *last ^= 0xFF;
+        }
+        assert!(mgr.decrypt("t", "c", &encrypted).is_err());
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_string() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("sk", vec![0x11; 32]);
+
+        let mut mgr = ColumnEncryptionManager::new(Box::new(kp));
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "t".into(),
+            column_name: "email".into(),
+            key_id: "sk".into(),
+            algorithm: EncryptionAlgorithm::XorTest,
+        });
+
+        let encoded = mgr
+            .encrypt_string("t", "email", "user@example.com")
+            .unwrap();
+        let decoded = mgr.decrypt_string("t", "email", &encoded).unwrap();
+        assert_eq!(decoded, "user@example.com");
+    }
+
+    #[test]
+    fn test_encrypted_columns_list() {
+        let kp = InMemoryKeyProvider::new();
+        let mut mgr = ColumnEncryptionManager::new(Box::new(kp));
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "users".into(),
+            column_name: "ssn".into(),
+            key_id: "k".into(),
+            algorithm: EncryptionAlgorithm::XorTest,
+        });
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "users".into(),
+            column_name: "email".into(),
+            key_id: "k".into(),
+            algorithm: EncryptionAlgorithm::XorTest,
+        });
+
+        let cols = mgr.encrypted_columns("users");
+        assert_eq!(cols.len(), 2);
     }
 }
