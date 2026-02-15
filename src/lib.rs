@@ -144,6 +144,7 @@ pub mod dataframe;
 pub mod error;
 pub mod executor;
 pub mod fts;
+pub mod git_warehouse;
 pub mod ingestion;
 pub mod ipc;
 pub mod jit;
