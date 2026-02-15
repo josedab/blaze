@@ -137,6 +137,7 @@
 
 // Core modules (always available)
 pub mod approx;
+pub mod benchmark;
 pub mod cache;
 pub mod catalog;
 pub mod dataframe;
@@ -165,8 +166,8 @@ pub mod security;
 pub mod sql;
 pub mod storage;
 pub mod transaction;
-pub mod types;
 pub mod tvf;
+pub mod types;
 pub mod udf;
 pub mod vector;
 pub mod visualization;
