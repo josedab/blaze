@@ -516,6 +516,12 @@ pub struct WasmFeatureInfo {
     pub is_required: bool,
 }
 
+impl Default for TreeShakingAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TreeShakingAnalyzer {
     pub fn new() -> Self {
         let all_features = vec![
@@ -631,6 +637,12 @@ pub struct WasmChunk {
     pub is_core: bool,
 }
 
+impl Default for WasmCodeSplitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WasmCodeSplitter {
     pub fn new() -> Self {
         Self {
@@ -737,7 +749,7 @@ impl WasmSizeRegression {
 
     /// Generate a CI report string.
     pub fn report(&self) -> String {
-        let mut report = format!("WASM Size Report\n");
+        let mut report = "WASM Size Report\n".to_string();
         report.push_str(&format!(
             "  Current: {} bytes ({:.1} KB)\n",
             self.current_size,

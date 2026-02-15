@@ -2976,7 +2976,11 @@ impl TelemetryCollector {
                 count += 1;
             }
         }
-        if count == 0 { 1.0 } else { total_ratio / count as f64 }
+        if count == 0 {
+            1.0
+        } else {
+            total_ratio / count as f64
+        }
     }
 
     /// Return the fraction of operators that spilled.
@@ -3142,7 +3146,9 @@ impl BanditJoinSelector {
             .max_by(|a, b| {
                 let avg_a = a.1 .0 / a.1 .1 as f64;
                 let avg_b = b.1 .0 / b.1 .1 as f64;
-                avg_a.partial_cmp(&avg_b).unwrap_or(std::cmp::Ordering::Equal)
+                avg_a
+                    .partial_cmp(&avg_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(name, _)| name.clone())
     }

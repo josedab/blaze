@@ -189,6 +189,12 @@ pub struct FtsIndex {
     name: String,
 }
 
+impl Default for FtsIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FtsIndex {
     pub fn new() -> Self {
         Self {
@@ -587,7 +593,6 @@ pub fn highlight_snippet(
 ) -> String {
     let lower = text.to_lowercase();
     let mut result = String::new();
-    let mut last_end = 0;
     let mut found_first = false;
     let mut start_offset = 0;
 
@@ -610,7 +615,7 @@ pub fn highlight_snippet(
     };
 
     let snippet_lower = snippet_text.to_lowercase();
-    last_end = 0;
+    let mut last_end = 0;
 
     for term in query_terms {
         let term_lower = term.to_lowercase();
@@ -685,6 +690,12 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
 #[derive(Debug)]
 pub struct FtsIndexManager {
     indexes: HashMap<String, FtsIndex>,
+}
+
+impl Default for FtsIndexManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FtsIndexManager {

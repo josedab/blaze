@@ -911,7 +911,10 @@ impl OperatorPlacement {
 
         if row_count < self.min_gpu_rows {
             return PlacementDecision::Cpu {
-                reason: format!("Row count ({row_count}) below GPU threshold ({})", self.min_gpu_rows),
+                reason: format!(
+                    "Row count ({row_count}) below GPU threshold ({})",
+                    self.min_gpu_rows
+                ),
             };
         }
 
@@ -932,7 +935,10 @@ impl OperatorPlacement {
             }
         } else {
             PlacementDecision::Cpu {
-                reason: format!("Transfer overhead makes CPU cheaper for {} bytes", data_size),
+                reason: format!(
+                    "Transfer overhead makes CPU cheaper for {} bytes",
+                    data_size
+                ),
             }
         }
     }
@@ -1007,7 +1013,8 @@ impl GpuMemoryPressureMonitor {
         if device_id >= self.device_memory.len() || !self.is_under_pressure(device_id) {
             return 0;
         }
-        let target = (self.device_memory[device_id] as f64 * self.pressure_threshold * 0.8) as usize;
+        let target =
+            (self.device_memory[device_id] as f64 * self.pressure_threshold * 0.8) as usize;
         self.device_usage[device_id].saturating_sub(target)
     }
 

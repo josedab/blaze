@@ -722,8 +722,9 @@ pub fn json_agg(values: &[String]) -> Result<String> {
 pub fn json_object_agg(pairs: &[(String, String)]) -> Result<String> {
     let mut obj = serde_json::Map::new();
     for (key, val_str) in pairs {
-        let val: Value = serde_json::from_str(val_str)
-            .map_err(|e| BlazeError::execution(format!("Invalid JSON value for key '{key}': {e}")))?;
+        let val: Value = serde_json::from_str(val_str).map_err(|e| {
+            BlazeError::execution(format!("Invalid JSON value for key '{key}': {e}"))
+        })?;
         obj.insert(key.clone(), val);
     }
     serde_json::to_string(&Value::Object(obj))
@@ -963,10 +964,7 @@ mod tests {
             json_extract(json, "$.name").unwrap(),
             Some("\"John\"".to_string())
         );
-        assert_eq!(
-            json_extract(json, "$.age").unwrap(),
-            Some("30".to_string())
-        );
+        assert_eq!(json_extract(json, "$.age").unwrap(), Some("30".to_string()));
     }
 
     #[test]

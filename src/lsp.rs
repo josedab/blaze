@@ -105,13 +105,12 @@ impl SqlAnalyzer {
 
         for (i, tok) in upper_tokens.iter().enumerate() {
             if (*tok == "FROM" || *tok == "JOIN") && i + 1 < tokens.len() {
-                let name =
-                    tokens[i + 1].trim_end_matches(|c: char| c == ',' || c == ';' || c == ')');
+                let name = tokens[i + 1].trim_end_matches([',', ';', ')']);
                 if !name.is_empty()
                     && name
                         .chars()
                         .next()
-                        .map_or(false, |c| c.is_alphabetic() || c == '_')
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
                 {
                     names.push(name.to_string());
                 }
@@ -130,8 +129,8 @@ impl SqlAnalyzer {
 
         let bytes = line.as_bytes();
         let mut start = col;
-        while start > 0 && (bytes[start - 1] as char).is_alphanumeric()
-            || (start > 0 && bytes[start - 1] == b'_')
+        while start > 0
+            && ((bytes[start - 1] as char).is_alphanumeric() || bytes[start - 1] == b'_')
         {
             start -= 1;
         }
@@ -163,8 +162,8 @@ impl SqlAnalyzer {
         let trimmed = upper.trim_end();
 
         // Check for dot-qualification (e.g. "t.")
-        if trimmed.ends_with('.') {
-            let before_dot = trimmed[..trimmed.len() - 1].trim();
+        if let Some(before_dot) = trimmed.strip_suffix('.') {
+            let before_dot = before_dot.trim();
             if let Some(table) = before_dot.rsplit_once(|c: char| c.is_whitespace() || c == ',') {
                 return CompletionContext::AfterDot(table.1.to_lowercase());
             }
@@ -447,8 +446,7 @@ impl SqlLanguageService {
             let upper_tokens: Vec<String> = tokens.iter().map(|t| t.to_uppercase()).collect();
             for (i, tok) in upper_tokens.iter().enumerate() {
                 if (*tok == "FROM" || *tok == "JOIN") && i + 2 < upper_tokens.len() {
-                    let alias_candidate =
-                        upper_tokens[i + 2].trim_end_matches(|c: char| c == ',' || c == ')');
+                    let alias_candidate = upper_tokens[i + 2].trim_end_matches([',', ')']);
                     if alias_candidate == upper_word {
                         // Find the byte position of the alias in the line
                         if let Some(alias_pos) = line.rfind(tokens[i + 2]) {
@@ -648,6 +646,12 @@ pub struct FunctionSignature {
 /// Provides signature help for Blaze's built-in SQL functions.
 pub struct SignatureHelpProvider {
     signatures: HashMap<String, FunctionSignature>,
+}
+
+impl Default for SignatureHelpProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SignatureHelpProvider {
@@ -883,6 +887,12 @@ pub struct NextGenCodeAction {
 /// Analyzes SQL text and suggests code actions.
 pub struct CodeActionProvider;
 
+impl Default for CodeActionProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CodeActionProvider {
     pub fn new() -> Self {
         Self
@@ -981,6 +991,12 @@ pub struct PerformanceHint {
 
 /// Analyzes SQL queries for potential performance issues.
 pub struct PerformanceAnalyzer;
+
+impl Default for PerformanceAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PerformanceAnalyzer {
     pub fn new() -> Self {
@@ -1113,6 +1129,12 @@ pub struct ExplainOutput {
 
 /// Provides simplified query explain / estimation for SQL queries.
 pub struct QueryExplainProvider;
+
+impl Default for QueryExplainProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl QueryExplainProvider {
     pub fn new() -> Self {
@@ -1581,7 +1603,8 @@ impl WorkspaceAnalyzer {
         for i in 0..tokens.len().saturating_sub(1) {
             let kw = tokens[i].to_uppercase();
             if kw == "FROM" || kw == "JOIN" {
-                let name = tokens[i + 1].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                let name =
+                    tokens[i + 1].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
                 if !name.is_empty() {
                     tables_referenced.push(name.to_string());
                 }
@@ -1591,7 +1614,8 @@ impl WorkspaceAnalyzer {
         // Extract table names after CREATE TABLE
         for i in 0..tokens.len().saturating_sub(2) {
             if tokens[i].to_uppercase() == "CREATE" && tokens[i + 1].to_uppercase() == "TABLE" {
-                let name = tokens[i + 2].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                let name =
+                    tokens[i + 2].trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
                 if !name.is_empty() {
                     tables_created.push(name.to_string());
                 }
@@ -1813,10 +1837,32 @@ impl QuickFixProvider {
             .filter(|s| {
                 !matches!(
                     s.to_uppercase().as_str(),
-                    "SELECT" | "FROM" | "WHERE" | "AND" | "OR" | "GROUP" | "BY"
-                    | "ORDER" | "INSERT" | "UPDATE" | "DELETE" | "INTO" | "VALUES"
-                    | "SET" | "JOIN" | "ON" | "AS" | "IN" | "NOT" | "NULL"
-                    | "IS" | "LIKE" | "BETWEEN" | "HAVING" | "LIMIT" | "OFFSET"
+                    "SELECT"
+                        | "FROM"
+                        | "WHERE"
+                        | "AND"
+                        | "OR"
+                        | "GROUP"
+                        | "BY"
+                        | "ORDER"
+                        | "INSERT"
+                        | "UPDATE"
+                        | "DELETE"
+                        | "INTO"
+                        | "VALUES"
+                        | "SET"
+                        | "JOIN"
+                        | "ON"
+                        | "AS"
+                        | "IN"
+                        | "NOT"
+                        | "NULL"
+                        | "IS"
+                        | "LIKE"
+                        | "BETWEEN"
+                        | "HAVING"
+                        | "LIMIT"
+                        | "OFFSET"
                 )
             })
             .map(|s| s.to_string())
@@ -1841,15 +1887,19 @@ impl QuickFixProvider {
         let m = a_bytes.len();
         let n = b_bytes.len();
         let mut dp = vec![vec![0usize; n + 1]; m + 1];
-        for i in 0..=m {
-            dp[i][0] = i;
+        for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
+            row[0] = i;
         }
-        for j in 0..=n {
-            dp[0][j] = j;
+        for (j, val) in dp[0].iter_mut().enumerate().take(n + 1) {
+            *val = j;
         }
         for i in 1..=m {
             for j in 1..=n {
-                let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
+                let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+                    0
+                } else {
+                    1
+                };
                 dp[i][j] = (dp[i - 1][j] + 1)
                     .min(dp[i][j - 1] + 1)
                     .min(dp[i - 1][j - 1] + cost);
@@ -2514,7 +2564,10 @@ mod tests {
     #[test]
     fn test_workspace_analyzer_add_and_find() {
         let mut wa = WorkspaceAnalyzer::new();
-        wa.add_file("a.sql", "SELECT * FROM users JOIN orders ON users.id = orders.uid");
+        wa.add_file(
+            "a.sql",
+            "SELECT * FROM users JOIN orders ON users.id = orders.uid",
+        );
         wa.add_file("b.sql", "SELECT * FROM products");
 
         let refs = wa.find_references("users");
@@ -2586,8 +2639,14 @@ mod tests {
     fn test_quick_fix_missing_from() {
         let diags = vec![Diagnostic {
             range: Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: 0, character: 10 },
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 10,
+                },
             },
             severity: DiagnosticSeverity::Error,
             message: "Missing FROM keyword".to_string(),
@@ -2604,8 +2663,14 @@ mod tests {
         let sql = "SELECT naem, name FROM users";
         let diags = vec![Diagnostic {
             range: Range {
-                start: Position { line: 0, character: 7 },
-                end: Position { line: 0, character: 11 },
+                start: Position {
+                    line: 0,
+                    character: 7,
+                },
+                end: Position {
+                    line: 0,
+                    character: 11,
+                },
             },
             severity: DiagnosticSeverity::Error,
             message: "Unknown column 'naem'".to_string(),
@@ -2620,8 +2685,14 @@ mod tests {
     fn test_quick_fix_group_by() {
         let diags = vec![Diagnostic {
             range: Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: 0, character: 30 },
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 30,
+                },
             },
             severity: DiagnosticSeverity::Error,
             message: "'name' must appear in the GROUP BY clause".to_string(),
@@ -2657,7 +2728,8 @@ mod tests {
     fn test_cost_estimator_join_increases_cost() {
         let est = InlineCostEstimator::new();
         let simple = est.estimate_query("SELECT * FROM users");
-        let joined = est.estimate_query("SELECT * FROM users JOIN orders ON users.id = orders.user_id");
+        let joined =
+            est.estimate_query("SELECT * FROM users JOIN orders ON users.id = orders.user_id");
         assert!(joined.cost_score > simple.cost_score);
     }
 

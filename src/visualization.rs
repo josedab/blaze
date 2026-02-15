@@ -664,7 +664,7 @@ impl ChartRenderer {
             };
             let fill = ((pct / 100.0) * bar_width as f64).round() as usize;
             let ch = pie_chars[i % pie_chars.len()];
-            let bar: String = std::iter::repeat(ch).take(fill).collect();
+            let bar: String = std::iter::repeat_n(ch, fill).collect();
             let padded = self.pad_label(label);
             writeln!(
                 out,
@@ -918,7 +918,13 @@ pub struct VegaLiteGenerator;
 
 impl VegaLiteGenerator {
     /// Generate a Vega-Lite JSON specification from a chart type and data.
-    pub fn generate(chart_type: ChartType, title: &str, width: usize, height: usize, data: &[Vec<(String, f64)>]) -> Result<String> {
+    pub fn generate(
+        chart_type: ChartType,
+        title: &str,
+        width: usize,
+        height: usize,
+        data: &[Vec<(String, f64)>],
+    ) -> Result<String> {
         let mark = match chart_type {
             ChartType::Bar | ChartType::Column | ChartType::Histogram => "bar",
             ChartType::Line => "line",
@@ -956,11 +962,7 @@ impl VegaLiteGenerator {
     "y": {{"field": "value", "type": "quantitative"}}
   }}
 }}"#,
-            title,
-            width,
-            height,
-            mark,
-            values_str
+            title, width, height, mark, values_str
         );
 
         Ok(spec)
@@ -1037,7 +1039,9 @@ impl Dashboard {
     /// Generate an HTML page with all charts embedded.
     pub fn to_html(&self) -> String {
         let mut html = String::new();
-        let _ = write!(html, r#"<!DOCTYPE html>
+        let _ = write!(
+            html,
+            r#"<!DOCTYPE html>
 <html>
 <head><title>{}</title>
 <style>
@@ -1050,7 +1054,9 @@ impl Dashboard {
 <body>
 <h1>{}</h1>
 <div class="dashboard">
-"#, self.title, self.columns, self.title);
+"#,
+            self.title, self.columns, self.title
+        );
 
         for panel in &self.panels {
             let span_style = if panel.width_span > 1 || panel.height_span > 1 {
@@ -1061,9 +1067,9 @@ impl Dashboard {
             } else {
                 String::new()
             };
-            let _ = write!(
+            let _ = writeln!(
                 html,
-                "<div class=\"panel\"{}><pre>{}</pre></div>\n",
+                "<div class=\"panel\"{}><pre>{}</pre></div>",
                 span_style, panel.chart.output
             );
         }
@@ -1124,7 +1130,11 @@ impl InteractiveFilterBuilder {
                 FilterOp::LessThan(col, val) => format!("{col} < {val}"),
                 FilterOp::Between(col, lo, hi) => format!("{col} BETWEEN {lo} AND {hi}"),
                 FilterOp::In(col, vals) => {
-                    let list = vals.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(", ");
+                    let list = vals
+                        .iter()
+                        .map(|v| format!("'{v}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     format!("{col} IN ({list})")
                 }
                 FilterOp::Like(col, pat) => format!("{col} LIKE '{pat}'"),
@@ -1476,7 +1486,8 @@ mod tests {
                 config: ChartConfig::default(),
                 output: "Bar chart output".into(),
             },
-            0, 0,
+            0,
+            0,
         );
         dash.add_wide_panel(
             Chart {
@@ -1484,7 +1495,10 @@ mod tests {
                 config: ChartConfig::default(),
                 output: "Wide line chart".into(),
             },
-            1, 0, 2, 1,
+            1,
+            0,
+            2,
+            1,
         );
 
         let html = dash.to_html();
@@ -1511,7 +1525,10 @@ mod tests {
     #[test]
     fn test_filter_builder_complex() {
         let mut builder = InteractiveFilterBuilder::new();
-        builder.add_filter(FilterOp::In("color".into(), vec!["red".into(), "blue".into()]));
+        builder.add_filter(FilterOp::In(
+            "color".into(),
+            vec!["red".into(), "blue".into()],
+        ));
         builder.add_filter(FilterOp::Between("price".into(), "10".into(), "100".into()));
         builder.add_filter(FilterOp::IsNotNull("email".into()));
 
