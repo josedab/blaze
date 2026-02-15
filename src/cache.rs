@@ -363,7 +363,7 @@ impl QueryFingerprinter {
         while let Some(ch) = chars.next() {
             if ch == '\'' {
                 // Replace string literal
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if c == '\'' {
                         break;
                     }
@@ -644,6 +644,145 @@ impl PlanCache {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Partial Result Cache (for LIMIT/OFFSET queries)
+// ---------------------------------------------------------------------------
+
+/// Cache that stores full result sets and serves partial slices.
+pub struct PartialResultCache {
+    inner: QueryCache,
+}
+
+impl PartialResultCache {
+    pub fn new(config: CacheConfig) -> Self {
+        Self {
+            inner: QueryCache::new(config),
+        }
+    }
+
+    /// Store a full result set keyed by the base query (without LIMIT/OFFSET).
+    pub fn put_full(&self, base_sql: &str, tables: &[String], batches: Vec<RecordBatch>) {
+        self.inner.put(base_sql, batches, tables);
+    }
+
+    /// Retrieve a result with LIMIT and OFFSET applied.
+    pub fn get_partial(
+        &self,
+        base_sql: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Option<Vec<RecordBatch>> {
+        let full = self.inner.get(base_sql)?;
+        let mut remaining_offset = offset;
+        let mut remaining_limit = limit;
+        let mut result = Vec::new();
+
+        for batch in &full {
+            let rows = batch.num_rows();
+            if remaining_offset >= rows {
+                remaining_offset -= rows;
+                continue;
+            }
+
+            let start = remaining_offset;
+            let take = (rows - start).min(remaining_limit);
+            remaining_offset = 0;
+
+            let sliced = batch.slice(start, take);
+            result.push(sliced);
+            remaining_limit -= take;
+            if remaining_limit == 0 {
+                break;
+            }
+        }
+
+        Some(result)
+    }
+
+    /// Access the inner cache for statistics.
+    pub fn stats(&self) -> CacheStats {
+        self.inner.stats()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EXPLAIN CACHE Report
+// ---------------------------------------------------------------------------
+
+/// A report entry for EXPLAIN CACHE.
+#[derive(Debug, Clone)]
+pub struct CacheReportEntry {
+    pub sql: String,
+    pub size_bytes: usize,
+    pub access_count: u64,
+    pub age_secs: f64,
+    pub tables: Vec<String>,
+}
+
+/// Generates EXPLAIN CACHE output.
+pub struct CacheExplainer;
+
+impl CacheExplainer {
+    /// Generate a report of all cached entries.
+    pub fn explain(cache: &QueryCache) -> Vec<CacheReportEntry> {
+        let entries = cache.entries.read();
+        let now = Instant::now();
+        entries
+            .values()
+            .map(|entry| CacheReportEntry {
+                sql: entry.sql.clone(),
+                size_bytes: entry.size_bytes,
+                access_count: entry.access_count,
+                age_secs: now.duration_since(entry.created_at).as_secs_f64(),
+                tables: entry.table_versions.keys().cloned().collect(),
+            })
+            .collect()
+    }
+
+    /// Format as a human-readable string.
+    pub fn explain_text(cache: &QueryCache) -> String {
+        let stats = cache.stats();
+        let entries = Self::explain(cache);
+        let mut lines = vec![
+            format!("Cache Statistics:"),
+            format!(
+                "  Hits: {}, Misses: {}, Hit Rate: {:.1}%",
+                stats.hits,
+                stats.misses,
+                stats.hit_rate() * 100.0
+            ),
+            format!(
+                "  Entries: {}, Total Bytes: {}",
+                stats.total_entries, stats.total_bytes
+            ),
+            format!(
+                "  Evictions: {}, Invalidations: {}",
+                stats.evictions, stats.invalidations
+            ),
+            String::new(),
+            format!("Cached Queries ({}):", entries.len()),
+        ];
+
+        for (i, entry) in entries.iter().enumerate() {
+            lines.push(format!(
+                "  [{}] {} ({}B, {} accesses, {:.1}s old, tables: [{}])",
+                i + 1,
+                if entry.sql.len() > 60 {
+                    format!("{}...", &entry.sql[..57])
+                } else {
+                    entry.sql.clone()
+                },
+                entry.size_bytes,
+                entry.access_count,
+                entry.age_secs,
+                entry.tables.join(", "),
+            ));
+        }
+
+        lines.join("\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,5 +1060,71 @@ mod tests {
         let normalized = normalize_join_order(sql);
         // Basic normalization - this is a simple implementation
         assert!(!normalized.is_empty());
+    }
+
+    // -- Partial Result Cache tests -------------------------------------------
+
+    fn make_large_batch(n: usize) -> Vec<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let arr = Arc::new(Int64Array::from((0..n as i64).collect::<Vec<_>>()));
+        vec![RecordBatch::try_new(schema, vec![arr]).unwrap()]
+    }
+
+    #[test]
+    fn test_partial_cache_basic() {
+        let cache = PartialResultCache::new(CacheConfig::default());
+        let batches = make_large_batch(5);
+        cache.put_full("SELECT * FROM t", &["t".into()], batches);
+
+        let partial = cache.get_partial("SELECT * FROM t", 0, 3);
+        assert!(partial.is_some());
+        let rows: usize = partial.unwrap().iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn test_partial_cache_offset() {
+        let cache = PartialResultCache::new(CacheConfig::default());
+        let batches = make_large_batch(10);
+        cache.put_full("SELECT * FROM t", &["t".into()], batches);
+
+        let partial = cache.get_partial("SELECT * FROM t", 3, 4);
+        assert!(partial.is_some());
+        let rows: usize = partial.unwrap().iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 4);
+    }
+
+    #[test]
+    fn test_partial_cache_miss() {
+        let cache = PartialResultCache::new(CacheConfig::default());
+        let result = cache.get_partial("SELECT * FROM missing", 0, 10);
+        assert!(result.is_none());
+    }
+
+    // -- EXPLAIN CACHE tests --------------------------------------------------
+
+    #[test]
+    fn test_cache_explainer_empty() {
+        let cache = QueryCache::new(CacheConfig::default());
+        let report = CacheExplainer::explain(&cache);
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn test_cache_explainer_with_entries() {
+        let cache = QueryCache::new(CacheConfig::default());
+        cache.put("SELECT 1", make_batch(1), &["t".into()]);
+        cache.put("SELECT 2", make_batch(2), &["u".into()]);
+
+        let report = CacheExplainer::explain(&cache);
+        assert_eq!(report.len(), 2);
+
+        let text = CacheExplainer::explain_text(&cache);
+        assert!(text.contains("Cache Statistics"));
+        assert!(text.contains("Cached Queries (2)"));
     }
 }
