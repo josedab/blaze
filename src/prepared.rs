@@ -1141,4 +1141,158 @@ mod tests {
         assert!(cache.is_empty());
         assert_eq!(cache.capacity(), 10);
     }
+
+    fn setup_conn_with_table() -> crate::Connection {
+        let conn = crate::Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE users (id BIGINT, name VARCHAR, active BOOLEAN)")
+            .unwrap();
+        conn.execute("INSERT INTO users VALUES (1, 'Alice', true)")
+            .unwrap();
+        conn.execute("INSERT INTO users VALUES (2, 'Bob', false)")
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_prepared_no_params() {
+        let conn = setup_conn_with_table();
+        let stmt = conn.prepare("SELECT * FROM users").unwrap();
+        assert_eq!(stmt.parameter_count(), 0);
+        assert_eq!(stmt.sql(), "SELECT * FROM users");
+        let result = stmt.execute(&[]).unwrap();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_prepared_no_params_reuse() {
+        let conn = setup_conn_with_table();
+        let stmt = conn.prepare("SELECT * FROM users").unwrap();
+        // Execute multiple times
+        let r1 = stmt.execute(&[]).unwrap();
+        let r2 = stmt.execute(&[]).unwrap();
+        assert_eq!(
+            r1.iter().map(|b| b.num_rows()).sum::<usize>(),
+            r2.iter().map(|b| b.num_rows()).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn test_prepared_no_params_wrong_count() {
+        let conn = setup_conn_with_table();
+        let stmt = conn.prepare("SELECT * FROM users").unwrap();
+        // Providing params when none expected
+        let err = stmt.execute(&[ScalarValue::Int64(Some(1))]).unwrap_err();
+        assert!(err.to_string().contains("Expected 0 parameters, got 1"));
+    }
+
+    #[test]
+    fn test_prepared_execute_named_empty_params() {
+        let conn = setup_conn_with_table();
+        let stmt = conn.prepare("SELECT * FROM users").unwrap();
+        let params = HashMap::new();
+        let result = stmt.execute_named(&params).unwrap();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_prepared_cache_eviction() {
+        let cache = PreparedStatementCache::new(2);
+        assert!(cache.is_empty());
+
+        let conn = crate::Connection::in_memory().unwrap();
+
+        // Fill cache with 2 entries
+        let _s1 = conn.prepare_cached("SELECT 1", &cache).unwrap();
+        assert_eq!(cache.len(), 1);
+
+        let _s2 = conn.prepare_cached("SELECT 2", &cache).unwrap();
+        assert_eq!(cache.len(), 2);
+
+        // Third entry should evict the LRU
+        let _s3 = conn.prepare_cached("SELECT 3", &cache).unwrap();
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_prepared_cache_hit() {
+        let cache = PreparedStatementCache::new(10);
+        let conn = crate::Connection::in_memory().unwrap();
+
+        let _s1 = conn.prepare_cached("SELECT 1 + 1", &cache).unwrap();
+        assert_eq!(cache.len(), 1);
+
+        // Same query should reuse cache
+        let _s2 = conn.prepare_cached("SELECT 1 + 1", &cache).unwrap();
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_prepared_cache_clear() {
+        let cache = PreparedStatementCache::new(10);
+        let conn = crate::Connection::in_memory().unwrap();
+
+        let _s1 = conn.prepare_cached("SELECT 1", &cache).unwrap();
+        let _s2 = conn.prepare_cached("SELECT 2", &cache).unwrap();
+        assert_eq!(cache.len(), 2);
+
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_prepared_debug() {
+        let conn = setup_conn_with_table();
+        let stmt = conn.prepare("SELECT * FROM users").unwrap();
+        let debug = format!("{:?}", stmt);
+        assert!(debug.contains("PreparedStatement"));
+        assert!(debug.contains("SELECT * FROM users"));
+    }
+
+    #[test]
+    fn test_substitute_parameters_literal() {
+        // Test the substitute_expr function directly
+        let expr = LogicalExpr::Placeholder { id: 1 };
+        let mut params = HashMap::new();
+        params.insert(1, ScalarValue::Int64(Some(42)));
+        let result = substitute_expr(&expr, &params).unwrap();
+        assert!(matches!(result, LogicalExpr::Literal(ScalarValue::Int64(Some(42)))));
+    }
+
+    #[test]
+    fn test_substitute_parameters_missing() {
+        let expr = LogicalExpr::Placeholder { id: 1 };
+        let params = HashMap::new();
+        let err = substitute_expr(&expr, &params).unwrap_err();
+        assert!(err.to_string().contains("Missing parameter"));
+    }
+
+    #[test]
+    fn test_substitute_parameters_in_binary_expr() {
+        use crate::planner::BinaryOp;
+        let expr = LogicalExpr::BinaryExpr {
+            left: Box::new(LogicalExpr::Placeholder { id: 1 }),
+            op: BinaryOp::Plus,
+            right: Box::new(LogicalExpr::Placeholder { id: 2 }),
+        };
+        let mut params = HashMap::new();
+        params.insert(1, ScalarValue::Int64(Some(10)));
+        params.insert(2, ScalarValue::Int64(Some(20)));
+        let result = substitute_expr(&expr, &params).unwrap();
+        if let LogicalExpr::BinaryExpr { left, right, .. } = result {
+            assert!(matches!(*left, LogicalExpr::Literal(ScalarValue::Int64(Some(10)))));
+            assert!(matches!(*right, LogicalExpr::Literal(ScalarValue::Int64(Some(20)))));
+        } else {
+            panic!("Expected BinaryExpr");
+        }
+    }
+
+    #[test]
+    fn test_substitute_parameters_null() {
+        let expr = LogicalExpr::Placeholder { id: 1 };
+        let mut params = HashMap::new();
+        params.insert(1, ScalarValue::Null);
+        let result = substitute_expr(&expr, &params).unwrap();
+        assert!(matches!(result, LogicalExpr::Literal(ScalarValue::Null)));
+    }
 }
