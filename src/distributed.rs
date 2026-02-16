@@ -1549,6 +1549,649 @@ impl StreamingResultCollector {
 }
 
 // ---------------------------------------------------------------------------
+// Two-Phase Aggregation
+// ---------------------------------------------------------------------------
+
+/// Supported aggregate operations for distributed two-phase aggregation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateOp {
+    /// Sum of values.
+    Sum,
+    /// Count of non-null values.
+    Count,
+    /// Average — tracked as (sum, count) internally.
+    Avg,
+    /// Minimum value.
+    Min,
+    /// Maximum value.
+    Max,
+}
+
+/// Partial aggregate produced by the local phase.
+///
+/// For most operations a single `value` is sufficient.  `Avg` uses
+/// both `value` (the running sum) and `count`.
+#[derive(Debug, Clone)]
+pub struct PartialAggregate {
+    pub op: AggregateOp,
+    pub column_index: usize,
+    pub value: f64,
+    pub count: u64,
+}
+
+/// Two-phase aggregation engine for distributed execution.
+///
+/// The local phase runs on each node and produces [`PartialAggregate`]s.
+/// The global phase merges partials into final scalar results.
+#[derive(Debug)]
+pub struct TwoPhaseAggregator {
+    /// (operation, column index) pairs to aggregate.
+    ops: Vec<(AggregateOp, usize)>,
+}
+
+impl TwoPhaseAggregator {
+    /// Create a new aggregator for the given operations.
+    pub fn new(ops: Vec<(AggregateOp, usize)>) -> Self {
+        Self { ops }
+    }
+
+    /// **Local phase** – compute partial aggregates from a slice of batches.
+    pub fn local_aggregate(&self, batches: &[RecordBatch]) -> Result<Vec<PartialAggregate>> {
+        use arrow::array::{Array, AsArray};
+
+        let mut partials: Vec<PartialAggregate> = self
+            .ops
+            .iter()
+            .map(|(op, col)| PartialAggregate {
+                op: op.clone(),
+                column_index: *col,
+                value: match op {
+                    AggregateOp::Min => f64::INFINITY,
+                    AggregateOp::Max => f64::NEG_INFINITY,
+                    _ => 0.0,
+                },
+                count: 0,
+            })
+            .collect();
+
+        for batch in batches {
+            for partial in partials.iter_mut() {
+                if partial.column_index >= batch.num_columns() {
+                    return Err(BlazeError::execution(format!(
+                        "Column index {} out of range ({})",
+                        partial.column_index,
+                        batch.num_columns()
+                    )));
+                }
+                let col = batch.column(partial.column_index);
+                let arr = col
+                    .as_primitive_opt::<arrow::datatypes::Float64Type>()
+                    .or_else(|| None);
+
+                // Try Int64 first, then Float64.
+                let values: Vec<f64> =
+                    if let Some(int_arr) = col.as_primitive_opt::<arrow::datatypes::Int64Type>() {
+                        (0..int_arr.len())
+                            .filter(|&i| !int_arr.is_null(i))
+                            .map(|i| int_arr.value(i) as f64)
+                            .collect()
+                    } else if let Some(f_arr) = arr {
+                        (0..f_arr.len())
+                            .filter(|&i| !f_arr.is_null(i))
+                            .map(|i| f_arr.value(i))
+                            .collect()
+                    } else {
+                        return Err(BlazeError::execution(
+                        "TwoPhaseAggregator: unsupported column type (expected Int64 or Float64)",
+                    ));
+                    };
+
+                for &v in &values {
+                    match partial.op {
+                        AggregateOp::Sum | AggregateOp::Avg => {
+                            partial.value += v;
+                            partial.count += 1;
+                        }
+                        AggregateOp::Count => {
+                            partial.count += 1;
+                        }
+                        AggregateOp::Min => {
+                            if v < partial.value {
+                                partial.value = v;
+                            }
+                            partial.count += 1;
+                        }
+                        AggregateOp::Max => {
+                            if v > partial.value {
+                                partial.value = v;
+                            }
+                            partial.count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(partials)
+    }
+
+    /// **Global phase** – merge partial aggregates from all nodes into final results.
+    pub fn global_aggregate(&self, node_partials: &[Vec<PartialAggregate>]) -> Result<Vec<f64>> {
+        if node_partials.is_empty() {
+            return Ok(vec![0.0; self.ops.len()]);
+        }
+        let num_ops = self.ops.len();
+        let mut merged: Vec<PartialAggregate> = self
+            .ops
+            .iter()
+            .map(|(op, col)| PartialAggregate {
+                op: op.clone(),
+                column_index: *col,
+                value: match op {
+                    AggregateOp::Min => f64::INFINITY,
+                    AggregateOp::Max => f64::NEG_INFINITY,
+                    _ => 0.0,
+                },
+                count: 0,
+            })
+            .collect();
+
+        for partials in node_partials {
+            if partials.len() != num_ops {
+                return Err(BlazeError::execution(
+                    "Partial aggregate vector length mismatch",
+                ));
+            }
+            for (m, p) in merged.iter_mut().zip(partials.iter()) {
+                match m.op {
+                    AggregateOp::Sum | AggregateOp::Avg => {
+                        m.value += p.value;
+                        m.count += p.count;
+                    }
+                    AggregateOp::Count => {
+                        m.count += p.count;
+                    }
+                    AggregateOp::Min => {
+                        if p.value < m.value {
+                            m.value = p.value;
+                        }
+                        m.count += p.count;
+                    }
+                    AggregateOp::Max => {
+                        if p.value > m.value {
+                            m.value = p.value;
+                        }
+                        m.count += p.count;
+                    }
+                }
+            }
+        }
+
+        Ok(merged
+            .iter()
+            .map(|m| match m.op {
+                AggregateOp::Sum | AggregateOp::Min | AggregateOp::Max => m.value,
+                AggregateOp::Count => m.count as f64,
+                AggregateOp::Avg => {
+                    if m.count == 0 {
+                        0.0
+                    } else {
+                        m.value / m.count as f64
+                    }
+                }
+            })
+            .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Distributed Hash Join
+// ---------------------------------------------------------------------------
+
+/// Strategy for executing a distributed join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinStrategy {
+    /// Broadcast the smaller side to all nodes holding the larger side.
+    Broadcast,
+    /// Repartition both sides by join key hash, then join co-located partitions.
+    ShuffleHash,
+    /// Both sides are already partitioned on the join key – join in place.
+    ColocatedHash,
+}
+
+/// Distributed hash-join executor.
+///
+/// Given build-side and probe-side `RecordBatch`es plus join-key column
+/// indices, it selects an optimal [`JoinStrategy`] and executes the join.
+#[derive(Debug)]
+pub struct DistributedHashJoin {
+    build_batches: Vec<RecordBatch>,
+    probe_batches: Vec<RecordBatch>,
+    build_key_index: usize,
+    probe_key_index: usize,
+    /// Threshold (in rows) below which the smaller side is broadcast.
+    broadcast_threshold: usize,
+    colocated: bool,
+}
+
+impl DistributedHashJoin {
+    /// Create a new distributed hash join.
+    pub fn new(
+        build_batches: Vec<RecordBatch>,
+        probe_batches: Vec<RecordBatch>,
+        build_key_index: usize,
+        probe_key_index: usize,
+    ) -> Self {
+        Self {
+            build_batches,
+            probe_batches,
+            build_key_index,
+            probe_key_index,
+            broadcast_threshold: 10_000,
+            colocated: false,
+        }
+    }
+
+    /// Set the broadcast-threshold (in rows).
+    pub fn with_broadcast_threshold(mut self, threshold: usize) -> Self {
+        self.broadcast_threshold = threshold;
+        self
+    }
+
+    /// Indicate that both sides are already co-located on the join key.
+    pub fn with_colocated(mut self, colocated: bool) -> Self {
+        self.colocated = colocated;
+        self
+    }
+
+    /// Automatically choose the best join strategy.
+    pub fn select_strategy(&self) -> JoinStrategy {
+        if self.colocated {
+            return JoinStrategy::ColocatedHash;
+        }
+        let build_rows: usize = self.build_batches.iter().map(|b| b.num_rows()).sum();
+        let probe_rows: usize = self.probe_batches.iter().map(|b| b.num_rows()).sum();
+        let smaller = build_rows.min(probe_rows);
+        if smaller <= self.broadcast_threshold {
+            JoinStrategy::Broadcast
+        } else {
+            JoinStrategy::ShuffleHash
+        }
+    }
+
+    /// Execute the distributed join and return matched rows.
+    ///
+    /// This is a simplified implementation that performs an inner
+    /// equi-join using a hash map built from the build side.
+    pub fn execute(&self) -> Result<Vec<RecordBatch>> {
+        use arrow::array::{Array, AsArray};
+
+        let strategy = self.select_strategy();
+        // For all strategies we ultimately do a local hash-join; the
+        // strategy only affects how data is shuffled beforehand. In this
+        // single-process implementation the shuffle is a no-op.
+        let _ = strategy;
+
+        // Build hash table: key → Vec<(batch_idx, row_idx)>
+        let mut ht: HashMap<i64, Vec<(usize, usize)>> = HashMap::new();
+        for (bi, batch) in self.build_batches.iter().enumerate() {
+            if self.build_key_index >= batch.num_columns() {
+                return Err(BlazeError::execution("Build key index out of range"));
+            }
+            let col = batch.column(self.build_key_index);
+            let arr = col
+                .as_primitive_opt::<arrow::datatypes::Int64Type>()
+                .ok_or_else(|| {
+                    BlazeError::execution("DistributedHashJoin: build key must be Int64")
+                })?;
+            for row in 0..arr.len() {
+                if !arr.is_null(row) {
+                    ht.entry(arr.value(row)).or_default().push((bi, row));
+                }
+            }
+        }
+
+        // Probe
+        let mut result_batches = Vec::new();
+        for probe_batch in &self.probe_batches {
+            if self.probe_key_index >= probe_batch.num_columns() {
+                return Err(BlazeError::execution("Probe key index out of range"));
+            }
+            let probe_col = probe_batch.column(self.probe_key_index);
+            let probe_arr = probe_col
+                .as_primitive_opt::<arrow::datatypes::Int64Type>()
+                .ok_or_else(|| {
+                    BlazeError::execution("DistributedHashJoin: probe key must be Int64")
+                })?;
+
+            let mut build_indices: Vec<(usize, usize)> = Vec::new();
+            let mut probe_indices: Vec<usize> = Vec::new();
+            for probe_row in 0..probe_arr.len() {
+                if probe_arr.is_null(probe_row) {
+                    continue;
+                }
+                let key = probe_arr.value(probe_row);
+                if let Some(matches) = ht.get(&key) {
+                    for &(bi, br) in matches {
+                        build_indices.push((bi, br));
+                        probe_indices.push(probe_row);
+                    }
+                }
+            }
+
+            if probe_indices.is_empty() {
+                continue;
+            }
+
+            // Assemble result columns: build columns then probe columns.
+            let mut result_cols: Vec<arrow::array::ArrayRef> = Vec::new();
+
+            // Build side columns.
+            for col_idx in 0..self.build_batches[0].num_columns() {
+                let mut vals: Vec<i64> = Vec::with_capacity(build_indices.len());
+                for &(bi, br) in &build_indices {
+                    let arr = self.build_batches[bi]
+                        .column(col_idx)
+                        .as_primitive_opt::<arrow::datatypes::Int64Type>()
+                        .ok_or_else(|| BlazeError::execution("expected Int64 in build side"))?;
+                    vals.push(arr.value(br));
+                }
+                result_cols.push(Arc::new(arrow::array::Int64Array::from(vals)));
+            }
+
+            // Probe side columns.
+            for col_idx in 0..probe_batch.num_columns() {
+                let arr = probe_batch
+                    .column(col_idx)
+                    .as_primitive_opt::<arrow::datatypes::Int64Type>()
+                    .ok_or_else(|| BlazeError::execution("expected Int64 in probe side"))?;
+                let vals: Vec<i64> = probe_indices.iter().map(|&r| arr.value(r)).collect();
+                result_cols.push(Arc::new(arrow::array::Int64Array::from(vals)));
+            }
+
+            // Build output schema: build fields + probe fields.
+            let mut fields: Vec<arrow::datatypes::Field> = self.build_batches[0]
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| {
+                    arrow::datatypes::Field::new(
+                        format!("build_{}", f.name()),
+                        f.data_type().clone(),
+                        f.is_nullable(),
+                    )
+                })
+                .collect();
+            fields.extend(probe_batch.schema().fields().iter().map(|f| {
+                arrow::datatypes::Field::new(
+                    format!("probe_{}", f.name()),
+                    f.data_type().clone(),
+                    f.is_nullable(),
+                )
+            }));
+            let schema = Arc::new(arrow::datatypes::Schema::new(fields));
+            result_batches.push(
+                RecordBatch::try_new(schema, result_cols)
+                    .map_err(|e| BlazeError::execution(format!("join batch error: {e}")))?,
+            );
+        }
+
+        Ok(result_batches)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partition Metadata
+// ---------------------------------------------------------------------------
+
+/// Metadata describing how a table's data is partitioned across cluster nodes.
+#[derive(Debug)]
+pub struct PartitionMetadata {
+    table_name: String,
+    /// Maps partition ID → node ID.
+    partition_to_node: RwLock<HashMap<usize, String>>,
+    next_partition_id: RwLock<usize>,
+}
+
+impl PartitionMetadata {
+    /// Create empty partition metadata for a table.
+    pub fn new(table_name: impl Into<String>) -> Self {
+        Self {
+            table_name: table_name.into(),
+            partition_to_node: RwLock::new(HashMap::new()),
+            next_partition_id: RwLock::new(0),
+        }
+    }
+
+    /// Table name this metadata belongs to.
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    /// Register a new partition on the given node, returning the partition ID.
+    pub fn add_partition(&self, node_id: impl Into<String>) -> usize {
+        let mut next = self.next_partition_id.write();
+        let id = *next;
+        *next += 1;
+        self.partition_to_node.write().insert(id, node_id.into());
+        id
+    }
+
+    /// Get all partition IDs assigned to a given node.
+    pub fn get_partitions_for_node(&self, node_id: &str) -> Vec<usize> {
+        self.partition_to_node
+            .read()
+            .iter()
+            .filter(|(_, nid)| nid.as_str() == node_id)
+            .map(|(&pid, _)| pid)
+            .collect()
+    }
+
+    /// Total number of partitions.
+    pub fn partition_count(&self) -> usize {
+        self.partition_to_node.read().len()
+    }
+
+    /// Rebalance partitions evenly across the given set of nodes.
+    ///
+    /// Returns a map of partition ID → new node ID for partitions that moved.
+    pub fn rebalance(&self, node_ids: &[String]) -> Result<HashMap<usize, String>> {
+        if node_ids.is_empty() {
+            return Err(BlazeError::execution("Cannot rebalance: no nodes provided"));
+        }
+        let mut map = self.partition_to_node.write();
+        let mut partition_ids: Vec<usize> = map.keys().copied().collect();
+        partition_ids.sort();
+
+        let mut moves: HashMap<usize, String> = HashMap::new();
+        for (i, &pid) in partition_ids.iter().enumerate() {
+            let target = &node_ids[i % node_ids.len()];
+            let current = map.get(&pid).cloned().unwrap_or_default();
+            if current != *target {
+                moves.insert(pid, target.clone());
+            }
+            map.insert(pid, target.clone());
+        }
+        Ok(moves)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partition-Aware Query Planner
+// ---------------------------------------------------------------------------
+
+/// Data locality information for a table partition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionLocality {
+    pub table_name: String,
+    pub partition_id: usize,
+    pub node_id: String,
+    pub row_count: usize,
+    pub size_bytes: usize,
+}
+
+/// Decides whether a join can be co-located or requires a shuffle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinPlacement {
+    /// Both sides are on the same nodes, partitioned by the join key.
+    Colocated,
+    /// The smaller side should be broadcast to all nodes holding the larger side.
+    BroadcastSmall { broadcast_side: BroadcastSide },
+    /// Both sides must be repartitioned by the join key.
+    Repartition { num_partitions: usize },
+}
+
+/// Which side of a join to broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastSide {
+    Left,
+    Right,
+}
+
+/// Partition-aware query planner that optimises fragment placement.
+pub struct PartitionAwarePlanner {
+    /// Locality information per table.
+    localities: HashMap<String, Vec<PartitionLocality>>,
+    /// Threshold (bytes) below which a side is broadcast.
+    broadcast_threshold_bytes: usize,
+}
+
+impl PartitionAwarePlanner {
+    pub fn new(broadcast_threshold_bytes: usize) -> Self {
+        Self {
+            localities: HashMap::new(),
+            broadcast_threshold_bytes,
+        }
+    }
+
+    /// Register locality information for a table.
+    pub fn register_locality(&mut self, info: Vec<PartitionLocality>) {
+        if let Some(first) = info.first() {
+            self.localities.insert(first.table_name.clone(), info);
+        }
+    }
+
+    /// Total byte size of a table across all partitions.
+    pub fn table_size_bytes(&self, table: &str) -> usize {
+        self.localities
+            .get(table)
+            .map(|parts| parts.iter().map(|p| p.size_bytes).sum())
+            .unwrap_or(0)
+    }
+
+    /// Determine join placement given two tables and their join keys.
+    pub fn plan_join_placement(
+        &self,
+        left_table: &str,
+        right_table: &str,
+        _left_key: &str,
+        _right_key: &str,
+    ) -> JoinPlacement {
+        let left_parts = self.localities.get(left_table);
+        let right_parts = self.localities.get(right_table);
+
+        // Check co-location: all partitions share the same nodes.
+        if let (Some(lp), Some(rp)) = (left_parts, right_parts) {
+            let left_nodes: std::collections::HashSet<&str> =
+                lp.iter().map(|p| p.node_id.as_str()).collect();
+            let right_nodes: std::collections::HashSet<&str> =
+                rp.iter().map(|p| p.node_id.as_str()).collect();
+            if left_nodes == right_nodes {
+                return JoinPlacement::Colocated;
+            }
+        }
+
+        let left_size = self.table_size_bytes(left_table);
+        let right_size = self.table_size_bytes(right_table);
+
+        if left_size <= self.broadcast_threshold_bytes {
+            JoinPlacement::BroadcastSmall {
+                broadcast_side: BroadcastSide::Left,
+            }
+        } else if right_size <= self.broadcast_threshold_bytes {
+            JoinPlacement::BroadcastSmall {
+                broadcast_side: BroadcastSide::Right,
+            }
+        } else {
+            let num_partitions = left_parts
+                .map(|p| p.len())
+                .unwrap_or(4)
+                .max(right_parts.map(|p| p.len()).unwrap_or(4));
+            JoinPlacement::Repartition { num_partitions }
+        }
+    }
+
+    /// Return the set of node IDs that hold data for a table.
+    pub fn nodes_for_table(&self, table: &str) -> Vec<String> {
+        self.localities
+            .get(table)
+            .map(|parts| {
+                let mut nodes: Vec<String> = parts.iter().map(|p| p.node_id.clone()).collect();
+                nodes.sort();
+                nodes.dedup();
+                nodes
+            })
+            .unwrap_or_default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Distributed Sort (merge-sort across partitions)
+// ---------------------------------------------------------------------------
+
+/// Performs a distributed merge-sort on pre-sorted partitions.
+///
+/// Each partition is assumed to be sorted individually; this struct
+/// merges them into a single globally-sorted `RecordBatch`.
+pub struct DistributedSort {
+    column_name: String,
+    descending: bool,
+}
+
+impl DistributedSort {
+    pub fn new(column_name: impl Into<String>, descending: bool) -> Self {
+        Self {
+            column_name: column_name.into(),
+            descending,
+        }
+    }
+
+    /// Merge pre-sorted partition results into a single sorted output.
+    pub fn merge_sorted(&self, partitions: Vec<Vec<RecordBatch>>) -> Result<Vec<RecordBatch>> {
+        let mut all: Vec<RecordBatch> = partitions.into_iter().flatten().collect();
+        if all.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let schema = all[0].schema();
+        let col_idx = schema.index_of(&self.column_name).map_err(|_| {
+            BlazeError::execution(format!("Sort column '{}' not found", self.column_name))
+        })?;
+
+        // Compact then sort.
+        let compacted = concat_batches(&schema, &all)
+            .map_err(|e| BlazeError::execution(format!("concat error: {e}")))?;
+        let sort_col = compacted.column(col_idx).clone();
+        let options = arrow::compute::SortOptions {
+            descending: self.descending,
+            nulls_first: false,
+        };
+        let indices = arrow::compute::sort_to_indices(&sort_col, Some(options), None)
+            .map_err(|e| BlazeError::execution(format!("sort error: {e}")))?;
+        let sorted_cols = compacted
+            .columns()
+            .iter()
+            .map(|c| {
+                arrow::compute::take(c.as_ref(), &indices, None)
+                    .map_err(|e| BlazeError::execution(format!("take error: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let sorted = RecordBatch::try_new(schema, sorted_cols)
+            .map_err(|e| BlazeError::execution(format!("batch error: {e}")))?;
+        Ok(vec![sorted])
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2139,5 +2782,344 @@ mod tests {
         let merged = collector.merge_results().unwrap();
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].num_rows(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Two-Phase Aggregation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_two_phase_sum() {
+        let agg = TwoPhaseAggregator::new(vec![(AggregateOp::Sum, 0)]);
+        let b1 = make_int_batch(vec![1, 2, 3]);
+        let b2 = make_int_batch(vec![4, 5]);
+
+        let p1 = agg.local_aggregate(&[b1]).unwrap();
+        let p2 = agg.local_aggregate(&[b2]).unwrap();
+        let results = agg.global_aggregate(&[p1, p2]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!((results[0] - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_two_phase_count() {
+        let agg = TwoPhaseAggregator::new(vec![(AggregateOp::Count, 0)]);
+        let b1 = make_int_batch(vec![10, 20, 30]);
+        let b2 = make_int_batch(vec![40]);
+
+        let p1 = agg.local_aggregate(&[b1]).unwrap();
+        let p2 = agg.local_aggregate(&[b2]).unwrap();
+        let results = agg.global_aggregate(&[p1, p2]).unwrap();
+        assert!((results[0] - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_two_phase_avg() {
+        let agg = TwoPhaseAggregator::new(vec![(AggregateOp::Avg, 0)]);
+        let b1 = make_int_batch(vec![10, 20]);
+        let b2 = make_int_batch(vec![30]);
+
+        let p1 = agg.local_aggregate(&[b1]).unwrap();
+        let p2 = agg.local_aggregate(&[b2]).unwrap();
+        let results = agg.global_aggregate(&[p1, p2]).unwrap();
+        // avg = (10+20+30)/3 = 20
+        assert!((results[0] - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_two_phase_min_max() {
+        let agg = TwoPhaseAggregator::new(vec![(AggregateOp::Min, 0), (AggregateOp::Max, 0)]);
+        let b1 = make_int_batch(vec![5, 3, 8]);
+        let b2 = make_int_batch(vec![1, 9]);
+
+        let p1 = agg.local_aggregate(&[b1]).unwrap();
+        let p2 = agg.local_aggregate(&[b2]).unwrap();
+        let results = agg.global_aggregate(&[p1, p2]).unwrap();
+        assert!((results[0] - 1.0).abs() < f64::EPSILON); // min
+        assert!((results[1] - 9.0).abs() < f64::EPSILON); // max
+    }
+
+    #[test]
+    fn test_two_phase_empty_partials() {
+        let agg = TwoPhaseAggregator::new(vec![(AggregateOp::Sum, 0)]);
+        let results = agg.global_aggregate(&[]).unwrap();
+        assert!((results[0] - 0.0).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // Distributed Hash Join tests
+    // -----------------------------------------------------------------------
+
+    fn make_two_col_batch(ids: Vec<i64>, vals: Vec<i64>) -> RecordBatch {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
+            arrow::datatypes::Field::new("val", arrow::datatypes::DataType::Int64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::Int64Array::from(ids)),
+                Arc::new(arrow::array::Int64Array::from(vals)),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_distributed_join_strategy_broadcast() {
+        let build = vec![make_int_batch(vec![1, 2])];
+        let probe = vec![make_int_batch(vec![1, 2, 3, 4, 5])];
+        let join = DistributedHashJoin::new(build, probe, 0, 0).with_broadcast_threshold(100);
+        assert_eq!(join.select_strategy(), JoinStrategy::Broadcast);
+    }
+
+    #[test]
+    fn test_distributed_join_strategy_shuffle() {
+        let build = vec![make_int_batch(vec![1; 200])];
+        let probe = vec![make_int_batch(vec![1; 200])];
+        let join = DistributedHashJoin::new(build, probe, 0, 0).with_broadcast_threshold(10);
+        assert_eq!(join.select_strategy(), JoinStrategy::ShuffleHash);
+    }
+
+    #[test]
+    fn test_distributed_join_strategy_colocated() {
+        let build = vec![make_int_batch(vec![1])];
+        let probe = vec![make_int_batch(vec![1])];
+        let join = DistributedHashJoin::new(build, probe, 0, 0).with_colocated(true);
+        assert_eq!(join.select_strategy(), JoinStrategy::ColocatedHash);
+    }
+
+    #[test]
+    fn test_distributed_join_execute() {
+        let build = vec![make_two_col_batch(vec![1, 2, 3], vec![10, 20, 30])];
+        let probe = vec![make_two_col_batch(vec![2, 3, 4], vec![200, 300, 400])];
+        let join = DistributedHashJoin::new(build, probe, 0, 0);
+        let result = join.execute().unwrap();
+
+        assert_eq!(result.len(), 1);
+        let batch = &result[0];
+        // Two matching keys (2, 3): 2 result rows, 4 columns (build id+val, probe id+val)
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 4);
+    }
+
+    #[test]
+    fn test_distributed_join_no_matches() {
+        let build = vec![make_int_batch(vec![1, 2])];
+        let probe = vec![make_int_batch(vec![3, 4])];
+        let join = DistributedHashJoin::new(build, probe, 0, 0);
+        let result = join.execute().unwrap();
+        assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Partition Metadata tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_partition_metadata_add_and_query() {
+        let pm = PartitionMetadata::new("orders");
+        assert_eq!(pm.table_name(), "orders");
+
+        let p0 = pm.add_partition("node-1");
+        let p1 = pm.add_partition("node-2");
+        let p2 = pm.add_partition("node-1");
+
+        assert_eq!(pm.partition_count(), 3);
+        assert_eq!(p0, 0);
+        assert_eq!(p1, 1);
+        assert_eq!(p2, 2);
+
+        let mut n1 = pm.get_partitions_for_node("node-1");
+        n1.sort();
+        assert_eq!(n1, vec![0, 2]);
+        assert_eq!(pm.get_partitions_for_node("node-2"), vec![1]);
+        assert!(pm.get_partitions_for_node("node-3").is_empty());
+    }
+
+    #[test]
+    fn test_partition_metadata_rebalance() {
+        let pm = PartitionMetadata::new("events");
+        pm.add_partition("node-1");
+        pm.add_partition("node-1");
+        pm.add_partition("node-1");
+        pm.add_partition("node-1");
+
+        let nodes = vec!["node-A".to_string(), "node-B".to_string()];
+        let moves = pm.rebalance(&nodes).unwrap();
+        // All 4 partitions were on node-1, so all should move.
+        assert_eq!(moves.len(), 4);
+
+        // After rebalance, each node should have 2 partitions.
+        let mut a = pm.get_partitions_for_node("node-A");
+        let mut b = pm.get_partitions_for_node("node-B");
+        a.sort();
+        b.sort();
+        assert_eq!(a.len(), 2);
+        assert_eq!(b.len(), 2);
+    }
+
+    #[test]
+    fn test_partition_metadata_rebalance_empty_nodes_error() {
+        let pm = PartitionMetadata::new("t");
+        pm.add_partition("n1");
+        assert!(pm.rebalance(&[]).is_err());
+    }
+
+    // -- Partition-Aware Planner tests ----------------------------------------
+
+    #[test]
+    fn test_partition_aware_planner_colocated() {
+        let mut planner = PartitionAwarePlanner::new(1024);
+        planner.register_locality(vec![PartitionLocality {
+            table_name: "orders".into(),
+            partition_id: 0,
+            node_id: "n1".into(),
+            row_count: 1000,
+            size_bytes: 4096,
+        }]);
+        planner.register_locality(vec![PartitionLocality {
+            table_name: "items".into(),
+            partition_id: 0,
+            node_id: "n1".into(),
+            row_count: 2000,
+            size_bytes: 8192,
+        }]);
+
+        let placement = planner.plan_join_placement("orders", "items", "id", "order_id");
+        assert_eq!(placement, JoinPlacement::Colocated);
+    }
+
+    #[test]
+    fn test_partition_aware_planner_broadcast_small() {
+        let mut planner = PartitionAwarePlanner::new(5000);
+        planner.register_locality(vec![PartitionLocality {
+            table_name: "big".into(),
+            partition_id: 0,
+            node_id: "n1".into(),
+            row_count: 100_000,
+            size_bytes: 100_000,
+        }]);
+        planner.register_locality(vec![PartitionLocality {
+            table_name: "small".into(),
+            partition_id: 0,
+            node_id: "n2".into(),
+            row_count: 10,
+            size_bytes: 100,
+        }]);
+
+        let placement = planner.plan_join_placement("big", "small", "id", "id");
+        assert_eq!(
+            placement,
+            JoinPlacement::BroadcastSmall {
+                broadcast_side: BroadcastSide::Right
+            }
+        );
+    }
+
+    #[test]
+    fn test_partition_aware_planner_repartition() {
+        let mut planner = PartitionAwarePlanner::new(100);
+        planner.register_locality(vec![PartitionLocality {
+            table_name: "a".into(),
+            partition_id: 0,
+            node_id: "n1".into(),
+            row_count: 10_000,
+            size_bytes: 50_000,
+        }]);
+        planner.register_locality(vec![PartitionLocality {
+            table_name: "b".into(),
+            partition_id: 0,
+            node_id: "n2".into(),
+            row_count: 10_000,
+            size_bytes: 50_000,
+        }]);
+
+        let placement = planner.plan_join_placement("a", "b", "id", "id");
+        assert!(matches!(placement, JoinPlacement::Repartition { .. }));
+    }
+
+    #[test]
+    fn test_nodes_for_table() {
+        let mut planner = PartitionAwarePlanner::new(1024);
+        planner.register_locality(vec![
+            PartitionLocality {
+                table_name: "t".into(),
+                partition_id: 0,
+                node_id: "n2".into(),
+                row_count: 100,
+                size_bytes: 400,
+            },
+            PartitionLocality {
+                table_name: "t".into(),
+                partition_id: 1,
+                node_id: "n1".into(),
+                row_count: 100,
+                size_bytes: 400,
+            },
+        ]);
+
+        let nodes = planner.nodes_for_table("t");
+        assert_eq!(nodes, vec!["n1".to_string(), "n2".to_string()]);
+    }
+
+    // -- Distributed Sort tests -----------------------------------------------
+
+    #[test]
+    fn test_distributed_sort_merge() {
+        let schema = Arc::new(ArrowSchema::new(vec![arrow::datatypes::Field::new(
+            "id",
+            arrow::datatypes::DataType::Int64,
+            false,
+        )]));
+
+        let b1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(arrow::array::Int64Array::from(vec![1, 5, 9]))],
+        )
+        .unwrap();
+        let b2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(arrow::array::Int64Array::from(vec![2, 4, 7]))],
+        )
+        .unwrap();
+
+        let sorter = DistributedSort::new("id", false);
+        let result = sorter.merge_sorted(vec![vec![b1], vec![b2]]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_rows(), 6);
+
+        let col = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(col.value(0), 1);
+        assert_eq!(col.value(5), 9);
+    }
+
+    #[test]
+    fn test_distributed_sort_descending() {
+        let schema = Arc::new(ArrowSchema::new(vec![arrow::datatypes::Field::new(
+            "val",
+            arrow::datatypes::DataType::Int64,
+            false,
+        )]));
+
+        let b1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(arrow::array::Int64Array::from(vec![10, 3]))],
+        )
+        .unwrap();
+
+        let sorter = DistributedSort::new("val", true);
+        let result = sorter.merge_sorted(vec![vec![b1]]).unwrap();
+        let col = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(col.value(0), 10);
+        assert_eq!(col.value(1), 3);
     }
 }
