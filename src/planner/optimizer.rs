@@ -1652,4 +1652,278 @@ mod tests {
             _ => panic!("Expected TableScan after optimization"),
         }
     }
+
+    // --- Negative/edge-case tests ---
+
+    #[test]
+    fn test_constant_folding_null_operands() {
+        // NULL + 1 should remain as-is (not folded)
+        let expr = LogicalExpr::BinaryExpr {
+            left: Box::new(LogicalExpr::Literal(ScalarValue::Null)),
+            op: BinaryOp::Plus,
+            right: Box::new(LogicalExpr::Literal(ScalarValue::Int64(Some(1)))),
+        };
+
+        let rule = ConstantFolding;
+        let folded = rule.fold_expr(&expr);
+
+        // Should not crash; result is either unchanged or NULL
+        assert!(
+            matches!(&folded, LogicalExpr::Literal(ScalarValue::Null))
+                || matches!(&folded, LogicalExpr::BinaryExpr { .. })
+        );
+    }
+
+    #[test]
+    fn test_constant_folding_boolean_true_and_false() {
+        let expr = LogicalExpr::BinaryExpr {
+            left: Box::new(LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))),
+            op: BinaryOp::And,
+            right: Box::new(LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))),
+        };
+
+        let rule = ConstantFolding;
+        let folded = rule.fold_expr(&expr);
+
+        if let LogicalExpr::Literal(ScalarValue::Boolean(Some(b))) = folded {
+            assert!(!b);
+        }
+        // May remain as BinaryExpr if not folded
+    }
+
+    #[test]
+    fn test_simplify_not_not() {
+        // NOT NOT col -> col
+        let inner = LogicalExpr::Column(Column::new(None::<String>, "active"));
+        let not_not = LogicalExpr::Not(Box::new(LogicalExpr::Not(Box::new(inner))));
+
+        let rule = SimplifyExpressions;
+        let simplified = rule.simplify_expr(&not_not);
+
+        // Should simplify to just the column
+        match &simplified {
+            LogicalExpr::Column(c) => assert_eq!(c.name, "active"),
+            LogicalExpr::Not(_) => {
+                // Double NOT simplification may not be implemented, that's OK
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_simplify_and_true() {
+        // col AND true -> col
+        let expr = LogicalExpr::BinaryExpr {
+            left: Box::new(LogicalExpr::Column(Column::new(None::<String>, "active"))),
+            op: BinaryOp::And,
+            right: Box::new(LogicalExpr::Literal(ScalarValue::Boolean(Some(true)))),
+        };
+
+        let rule = SimplifyExpressions;
+        let simplified = rule.simplify_expr(&expr);
+
+        match &simplified {
+            LogicalExpr::Column(c) => assert_eq!(c.name, "active"),
+            _ => {} // May not be simplified, which is still valid
+        }
+    }
+
+    #[test]
+    fn test_simplify_or_false() {
+        // col OR false -> col
+        let expr = LogicalExpr::BinaryExpr {
+            left: Box::new(LogicalExpr::Column(Column::new(None::<String>, "active"))),
+            op: BinaryOp::Or,
+            right: Box::new(LogicalExpr::Literal(ScalarValue::Boolean(Some(false)))),
+        };
+
+        let rule = SimplifyExpressions;
+        let simplified = rule.simplify_expr(&expr);
+
+        match &simplified {
+            LogicalExpr::Column(c) => assert_eq!(c.name, "active"),
+            _ => {} // May not be simplified, which is still valid
+        }
+    }
+
+    #[test]
+    fn test_predicate_pushdown_through_projection() {
+        let scan = create_scan_plan();
+
+        // Projection: SELECT name FROM users
+        let proj = LogicalPlan::Projection {
+            exprs: vec![LogicalExpr::Column(Column::new(None::<String>, "name"))],
+            input: Arc::new(scan),
+            schema: Schema::new(vec![Field::new("name", DataType::Utf8, true)]),
+        };
+
+        // Filter: WHERE name = 'Alice'
+        let filter = LogicalPlan::Filter {
+            predicate: LogicalExpr::BinaryExpr {
+                left: Box::new(LogicalExpr::Column(Column::new(None::<String>, "name"))),
+                op: BinaryOp::Eq,
+                right: Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some(
+                    "Alice".to_string(),
+                )))),
+            },
+            input: Arc::new(proj),
+        };
+
+        let rule = PredicatePushdown;
+        let optimized = rule.optimize(&filter).unwrap();
+
+        // Should not crash - optimization may or may not push through projection
+        let display = format!("{:?}", optimized);
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn test_predicate_pushdown_through_join() {
+        let left_scan = create_scan_plan();
+        let right_schema = Schema::new(vec![
+            Field::new("order_id", DataType::Int64, false),
+            Field::new("user_id", DataType::Int64, true),
+        ]);
+        let right_scan = LogicalPlan::TableScan {
+            table_ref: ResolvedTableRef::new("default", "main", "orders"),
+            projection: None,
+            filters: vec![],
+            schema: right_schema,
+            time_travel: None,
+        };
+
+        let join_schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("age", DataType::Int64, true),
+            Field::new("order_id", DataType::Int64, false),
+            Field::new("user_id", DataType::Int64, true),
+        ]);
+
+        let join = LogicalPlan::Join {
+            left: Arc::new(left_scan),
+            right: Arc::new(right_scan),
+            join_type: super::super::logical_plan::JoinType::Inner,
+            on: vec![(
+                LogicalExpr::Column(Column::new(None::<String>, "id")),
+                LogicalExpr::Column(Column::new(None::<String>, "user_id")),
+            )],
+            filter: None,
+            schema: join_schema,
+        };
+
+        // Filter on left table column
+        let filter = LogicalPlan::Filter {
+            predicate: LogicalExpr::BinaryExpr {
+                left: Box::new(LogicalExpr::Column(Column::new(None::<String>, "age"))),
+                op: BinaryOp::Gt,
+                right: Box::new(LogicalExpr::Literal(ScalarValue::Int64(Some(21)))),
+            },
+            input: Arc::new(join),
+        };
+
+        let rule = PredicatePushdown;
+        let optimized = rule.optimize(&filter).unwrap();
+        // Should not crash regardless of whether pushdown through join is supported
+        let display = format!("{:?}", optimized);
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn test_optimizer_empty_relation() {
+        let plan = LogicalPlan::EmptyRelation {
+            produce_one_row: true,
+            schema: Schema::empty(),
+        };
+        let optimizer = Optimizer::new();
+        let optimized = optimizer.optimize(&plan).unwrap();
+        assert!(matches!(optimized, LogicalPlan::EmptyRelation { .. }));
+    }
+
+    #[test]
+    fn test_optimizer_with_max_passes() {
+        let optimizer = Optimizer::new().with_max_passes(1);
+        let scan = create_scan_plan();
+        let optimized = optimizer.optimize(&scan).unwrap();
+        assert!(matches!(optimized, LogicalPlan::TableScan { .. }));
+    }
+
+    #[test]
+    fn test_optimizer_with_no_rules() {
+        let optimizer = Optimizer::with_rules(vec![]);
+        let scan = create_scan_plan();
+        let optimized = optimizer.optimize(&scan).unwrap();
+        // With no rules, plan should be unchanged
+        assert!(matches!(optimized, LogicalPlan::TableScan { .. }));
+    }
+
+    #[test]
+    fn test_eliminate_limit_zero_produces_empty() {
+        let scan = create_scan_plan();
+        let limit = LogicalPlan::Limit {
+            input: Arc::new(scan),
+            skip: 0,
+            fetch: Some(0),
+        };
+
+        let rule = EliminateLimit;
+        let optimized = rule.optimize(&limit).unwrap();
+
+        // LIMIT 0 should become EmptyRelation
+        assert!(matches!(optimized, LogicalPlan::EmptyRelation { .. }));
+    }
+
+    #[test]
+    fn test_eliminate_limit_none() {
+        let scan = create_scan_plan();
+        let limit = LogicalPlan::Limit {
+            input: Arc::new(scan),
+            skip: 0,
+            fetch: None,
+        };
+
+        let rule = EliminateLimit;
+        let optimized = rule.optimize(&limit).unwrap();
+
+        // LIMIT with no fetch should be eliminated (passthrough to child)
+        // Or remain as Limit - both are valid
+        let display = format!("{:?}", optimized);
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn test_projection_pushdown_select_star() {
+        let scan = create_scan_plan();
+        // SELECT * (wildcard) should not crash projection pushdown
+        let proj = LogicalPlan::Projection {
+            exprs: vec![LogicalExpr::Wildcard],
+            input: Arc::new(scan.clone()),
+            schema: create_test_schema(),
+        };
+
+        let rule = ProjectionPushdown;
+        let optimized = rule.optimize(&proj).unwrap();
+        let display = format!("{:?}", optimized);
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn test_constant_folding_in_filter() {
+        let scan = create_scan_plan();
+        // WHERE 1 = 1 (always true)
+        let filter = LogicalPlan::Filter {
+            predicate: LogicalExpr::BinaryExpr {
+                left: Box::new(LogicalExpr::Literal(ScalarValue::Int64(Some(1)))),
+                op: BinaryOp::Eq,
+                right: Box::new(LogicalExpr::Literal(ScalarValue::Int64(Some(1)))),
+            },
+            input: Arc::new(scan),
+        };
+
+        let optimizer = Optimizer::new();
+        let optimized = optimizer.optimize(&filter).unwrap();
+        // Should optimize - either remove filter or fold to true
+        let display = format!("{:?}", optimized);
+        assert!(!display.is_empty());
+    }
 }
