@@ -649,3 +649,474 @@ impl ExecutionStats {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
+    use crate::planner::physical_expr::ColumnExpr;
+    use crate::planner::logical_expr::AggregateFunc;
+
+    fn test_schema() -> Arc<ArrowSchema> {
+        Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int64, false),
+            ArrowField::new("name", ArrowDataType::Utf8, true),
+        ]))
+    }
+
+    fn scan_plan() -> PhysicalPlan {
+        PhysicalPlan::Scan {
+            table_name: "test".to_string(),
+            projection: None,
+            schema: test_schema(),
+            filters: vec![],
+            time_travel: None,
+        }
+    }
+
+    // --- schema() tests ---
+
+    #[test]
+    fn test_scan_schema() {
+        let plan = scan_plan();
+        assert_eq!(plan.schema().fields().len(), 2);
+    }
+
+    #[test]
+    fn test_filter_schema() {
+        let col: Arc<dyn PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
+        let plan = PhysicalPlan::Filter {
+            predicate: col,
+            input: Box::new(scan_plan()),
+        };
+        assert_eq!(plan.schema().fields().len(), 2);
+    }
+
+    #[test]
+    fn test_projection_schema() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("x", ArrowDataType::Int64, false),
+        ]));
+        let plan = PhysicalPlan::Projection {
+            exprs: vec![Arc::new(ColumnExpr::new("id", 0))],
+            schema: schema.clone(),
+            input: Box::new(scan_plan()),
+        };
+        assert_eq!(plan.schema().fields().len(), 1);
+    }
+
+    #[test]
+    fn test_sort_schema_inherits_input() {
+        let plan = PhysicalPlan::Sort {
+            exprs: vec![SortExpr::new(Arc::new(ColumnExpr::new("id", 0)), true, false)],
+            input: Box::new(scan_plan()),
+        };
+        assert_eq!(plan.schema().fields().len(), 2);
+    }
+
+    #[test]
+    fn test_limit_schema_inherits_input() {
+        let plan = PhysicalPlan::Limit {
+            skip: 0,
+            fetch: Some(10),
+            input: Box::new(scan_plan()),
+        };
+        assert_eq!(plan.schema().fields().len(), 2);
+    }
+
+    #[test]
+    fn test_empty_schema() {
+        let schema = Arc::new(ArrowSchema::empty());
+        let plan = PhysicalPlan::Empty {
+            produce_one_row: false,
+            schema: schema.clone(),
+        };
+        assert_eq!(plan.schema().fields().len(), 0);
+    }
+
+    #[test]
+    fn test_values_schema() {
+        let schema = test_schema();
+        let plan = PhysicalPlan::Values {
+            schema,
+            data: vec![],
+        };
+        assert_eq!(plan.schema().fields().len(), 2);
+    }
+
+    #[test]
+    fn test_hash_join_schema() {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Int64, false),
+            ArrowField::new("name", ArrowDataType::Utf8, true),
+            ArrowField::new("id2", ArrowDataType::Int64, false),
+        ]));
+        let plan = PhysicalPlan::HashJoin {
+            left: Box::new(scan_plan()),
+            right: Box::new(scan_plan()),
+            join_type: JoinType::Inner,
+            left_keys: vec![],
+            right_keys: vec![],
+            schema,
+        };
+        assert_eq!(plan.schema().fields().len(), 3);
+    }
+
+    #[test]
+    fn test_union_schema() {
+        let plan = PhysicalPlan::Union {
+            inputs: vec![scan_plan(), scan_plan()],
+            schema: test_schema(),
+        };
+        assert_eq!(plan.schema().fields().len(), 2);
+    }
+
+    // --- children() tests ---
+
+    #[test]
+    fn test_scan_children_empty() {
+        assert!(scan_plan().children().is_empty());
+    }
+
+    #[test]
+    fn test_filter_children_one() {
+        let plan = PhysicalPlan::Filter {
+            predicate: Arc::new(ColumnExpr::new("id", 0)),
+            input: Box::new(scan_plan()),
+        };
+        assert_eq!(plan.children().len(), 1);
+    }
+
+    #[test]
+    fn test_hash_join_children_two() {
+        let plan = PhysicalPlan::HashJoin {
+            left: Box::new(scan_plan()),
+            right: Box::new(scan_plan()),
+            join_type: JoinType::Inner,
+            left_keys: vec![],
+            right_keys: vec![],
+            schema: test_schema(),
+        };
+        assert_eq!(plan.children().len(), 2);
+    }
+
+    #[test]
+    fn test_union_children() {
+        let plan = PhysicalPlan::Union {
+            inputs: vec![scan_plan(), scan_plan(), scan_plan()],
+            schema: test_schema(),
+        };
+        assert_eq!(plan.children().len(), 3);
+    }
+
+    #[test]
+    fn test_values_children_empty() {
+        let plan = PhysicalPlan::Values {
+            schema: test_schema(),
+            data: vec![],
+        };
+        assert!(plan.children().is_empty());
+    }
+
+    #[test]
+    fn test_empty_children_empty() {
+        let plan = PhysicalPlan::Empty {
+            produce_one_row: true,
+            schema: test_schema(),
+        };
+        assert!(plan.children().is_empty());
+    }
+
+    // --- display_indent() tests ---
+
+    #[test]
+    fn test_display_indent_scan() {
+        let plan = PhysicalPlan::Scan {
+            table_name: "orders".to_string(),
+            projection: Some(vec![0, 1]),
+            schema: test_schema(),
+            filters: vec![],
+            time_travel: None,
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("Scan: orders"));
+        assert!(output.contains("projection="));
+    }
+
+    #[test]
+    fn test_display_indent_filter() {
+        let plan = PhysicalPlan::Filter {
+            predicate: Arc::new(ColumnExpr::new("id", 0)),
+            input: Box::new(scan_plan()),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("Filter"));
+        assert!(output.contains("Scan"));
+    }
+
+    #[test]
+    fn test_display_indent_nested() {
+        let plan = PhysicalPlan::Limit {
+            skip: 5,
+            fetch: Some(10),
+            input: Box::new(PhysicalPlan::Sort {
+                exprs: vec![SortExpr::new(Arc::new(ColumnExpr::new("id", 0)), true, false)],
+                input: Box::new(scan_plan()),
+            }),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("Limit: skip=5, fetch=Some(10)"));
+        assert!(output.contains("Sort"));
+        assert!(output.contains("Scan"));
+    }
+
+    #[test]
+    fn test_display_format_trait() {
+        let plan = scan_plan();
+        let display = format!("{}", plan);
+        assert!(display.contains("Scan: test"));
+    }
+
+    // --- AggregateExpr tests ---
+
+    #[test]
+    fn test_aggregate_expr_name_with_alias() {
+        let expr = AggregateExpr {
+            func: AggregateFunc::Count,
+            args: vec![],
+            distinct: false,
+            alias: Some("total".to_string()),
+        };
+        assert_eq!(expr.name(), "total");
+    }
+
+    #[test]
+    fn test_aggregate_expr_name_no_alias() {
+        let expr = AggregateExpr {
+            func: AggregateFunc::Sum,
+            args: vec![],
+            distinct: false,
+            alias: None,
+        };
+        assert_eq!(expr.name(), "Sum");
+    }
+
+    // --- WindowExpr tests ---
+
+    #[test]
+    fn test_window_expr_name_with_alias() {
+        let expr = WindowExpr::new(
+            WindowFunction::RowNumber,
+            vec![],
+            vec![],
+            vec![],
+            Some("rn".to_string()),
+        );
+        assert_eq!(expr.name(), "rn");
+    }
+
+    #[test]
+    fn test_window_expr_name_no_alias() {
+        let expr = WindowExpr::new(
+            WindowFunction::Rank,
+            vec![],
+            vec![],
+            vec![],
+            None,
+        );
+        assert_eq!(expr.name(), "RANK");
+    }
+
+    #[test]
+    fn test_window_function_display() {
+        assert_eq!(format!("{}", WindowFunction::RowNumber), "ROW_NUMBER");
+        assert_eq!(format!("{}", WindowFunction::Lag), "LAG");
+        assert_eq!(format!("{}", WindowFunction::Lead), "LEAD");
+        assert_eq!(format!("{}", WindowFunction::DenseRank), "DENSE_RANK");
+        assert_eq!(format!("{}", WindowFunction::Ntile), "NTILE");
+        assert_eq!(format!("{}", WindowFunction::PercentRank), "PERCENT_RANK");
+        assert_eq!(format!("{}", WindowFunction::CumeDist), "CUME_DIST");
+        assert_eq!(format!("{}", WindowFunction::FirstValue), "FIRST_VALUE");
+        assert_eq!(format!("{}", WindowFunction::LastValue), "LAST_VALUE");
+        assert_eq!(format!("{}", WindowFunction::NthValue), "NTH_VALUE");
+        assert_eq!(
+            format!("{}", WindowFunction::Aggregate(AggregateFunc::Sum)),
+            "Sum"
+        );
+    }
+
+    // --- ExecutionStats tests ---
+
+    #[test]
+    fn test_execution_stats_new() {
+        let stats = ExecutionStats::new("HashJoin");
+        assert_eq!(stats.operator_name, "HashJoin");
+        assert_eq!(stats.elapsed_nanos, 0);
+        assert_eq!(stats.rows_processed, 0);
+    }
+
+    #[test]
+    fn test_execution_stats_add_elapsed() {
+        let mut stats = ExecutionStats::new("Scan");
+        stats.add_elapsed(100);
+        stats.add_elapsed(200);
+        assert_eq!(stats.elapsed_nanos, 300);
+    }
+
+    #[test]
+    fn test_execution_stats_add_rows_processed() {
+        let mut stats = ExecutionStats::new("Scan");
+        stats.add_rows_processed(1000);
+        stats.add_rows_processed(500);
+        assert_eq!(stats.rows_processed, 1500);
+    }
+
+    #[test]
+    fn test_execution_stats_add_metric() {
+        let mut stats = ExecutionStats::new("Join");
+        stats.add_metric("probe_count", "42");
+        assert_eq!(stats.extra_metrics.len(), 1);
+        assert_eq!(stats.extra_metrics[0].0, "probe_count");
+    }
+
+    #[test]
+    fn test_execution_stats_total_elapsed() {
+        let mut parent = ExecutionStats::new("Join");
+        parent.add_elapsed(100);
+        let mut child = ExecutionStats::new("Scan");
+        child.add_elapsed(50);
+        parent.children.push(child);
+        assert_eq!(parent.total_elapsed_nanos(), 150);
+    }
+
+    #[test]
+    fn test_execution_stats_format_tree() {
+        let mut stats = ExecutionStats::new("Scan");
+        stats.add_elapsed(1_500_000); // 1.5ms
+        stats.rows_processed = 1000;
+        stats.rows_output = 500;
+        stats.batches_processed = 2;
+        let output = stats.format_tree(0);
+        assert!(output.contains("Scan"));
+        assert!(output.contains("rows_in=1000"));
+        assert!(output.contains("rows_out=500"));
+    }
+
+    #[test]
+    fn test_execution_stats_format_tree_large_memory() {
+        let mut stats = ExecutionStats::new("HashJoin");
+        stats.peak_memory_bytes = 2 * 1024 * 1024; // 2MB
+        let output = stats.format_tree(0);
+        assert!(output.contains("MB"));
+    }
+
+    // --- SortExpr tests ---
+
+    #[test]
+    fn test_sort_expr_new() {
+        let expr = SortExpr::new(Arc::new(ColumnExpr::new("id", 0)), true, false);
+        assert!(expr.ascending);
+        assert!(!expr.nulls_first);
+    }
+
+    // --- CopyFormat tests ---
+
+    #[test]
+    fn test_copy_format_debug() {
+        assert_eq!(format!("{:?}", CopyFormat::Csv), "Csv");
+        assert_eq!(format!("{:?}", CopyFormat::Parquet), "Parquet");
+        assert_eq!(format!("{:?}", CopyFormat::Json), "Json");
+    }
+
+    #[test]
+    fn test_copy_format_eq() {
+        assert_eq!(CopyFormat::Csv, CopyFormat::Csv);
+        assert_ne!(CopyFormat::Csv, CopyFormat::Parquet);
+    }
+
+    // --- display_indent for more variants ---
+
+    #[test]
+    fn test_display_indent_cross_join() {
+        let plan = PhysicalPlan::CrossJoin {
+            left: Box::new(scan_plan()),
+            right: Box::new(scan_plan()),
+            schema: test_schema(),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("CrossJoin"));
+    }
+
+    #[test]
+    fn test_display_indent_hash_aggregate() {
+        let plan = PhysicalPlan::HashAggregate {
+            group_by: vec![Arc::new(ColumnExpr::new("id", 0))],
+            aggr_exprs: vec![AggregateExpr {
+                func: AggregateFunc::Count,
+                args: vec![],
+                distinct: false,
+                alias: Some("cnt".to_string()),
+            }],
+            schema: test_schema(),
+            input: Box::new(scan_plan()),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("HashAggregate"));
+        assert!(output.contains("cnt"));
+    }
+
+    #[test]
+    fn test_display_indent_window() {
+        let we = WindowExpr::new(
+            WindowFunction::RowNumber,
+            vec![],
+            vec![],
+            vec![],
+            Some("rn".to_string()),
+        );
+        let plan = PhysicalPlan::Window {
+            window_exprs: vec![we],
+            schema: test_schema(),
+            input: Box::new(scan_plan()),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("Window"));
+        assert!(output.contains("rn"));
+    }
+
+    #[test]
+    fn test_display_indent_empty() {
+        let plan = PhysicalPlan::Empty {
+            produce_one_row: true,
+            schema: test_schema(),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("Empty: produce_one_row=true"));
+    }
+
+    #[test]
+    fn test_display_indent_explain() {
+        let plan = PhysicalPlan::Explain {
+            input: Box::new(scan_plan()),
+            verbose: true,
+            schema: test_schema(),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("Explain: verbose=true"));
+    }
+
+    #[test]
+    fn test_display_indent_copy() {
+        let plan = PhysicalPlan::Copy {
+            input: Box::new(scan_plan()),
+            target: "/tmp/out.csv".to_string(),
+            format: CopyFormat::Csv,
+            options: super::super::logical_plan::CopyOptions::default(),
+            schema: test_schema(),
+        };
+        let output = plan.display_indent(0);
+        assert!(output.contains("Copy"));
+        assert!(output.contains("/tmp/out.csv"));
+        assert!(output.contains("Csv"));
+    }
+}
