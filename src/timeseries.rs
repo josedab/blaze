@@ -1297,7 +1297,7 @@ impl DownsamplingEngine {
                 DownsampleAgg::Max => vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
                 DownsampleAgg::Count => vals.len() as f64,
                 DownsampleAgg::First => vals[0],
-                DownsampleAgg::Last => *vals.last().unwrap(),
+                DownsampleAgg::Last => *vals.last().unwrap_or(&0.0),
             };
             out_timestamps.push(ts);
             out_values.push(aggregated);

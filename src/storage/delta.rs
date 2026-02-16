@@ -493,7 +493,8 @@ impl DeltaTable {
                 current_rows = batch.num_rows();
             } else {
                 // Concatenate with existing
-                let existing = current_batch_columns.take().unwrap();
+                let existing = current_batch_columns.take()
+                    .ok_or_else(|| BlazeError::execution("Expected batch columns during compaction"))?;
                 let mut new_columns = Vec::with_capacity(schema.fields().len());
 
                 for (i, col) in batch.columns().iter().enumerate() {
@@ -506,7 +507,8 @@ impl DeltaTable {
 
                 // Check if we've reached target size
                 if current_rows >= target_rows_per_file {
-                    let cols = current_batch_columns.take().unwrap();
+                    let cols = current_batch_columns.take()
+                        .ok_or_else(|| BlazeError::execution("Expected batch columns during compaction"))?;
                     let compacted = RecordBatch::try_new(schema.clone(), cols)?;
                     compacted_batches.push(compacted);
                     current_rows = 0;

@@ -1705,7 +1705,7 @@ impl IndexRecommender {
         recs.sort_by(|a, b| {
             b.estimated_speedup
                 .partial_cmp(&a.estimated_speedup)
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         recs
     }

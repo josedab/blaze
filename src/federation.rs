@@ -1356,7 +1356,11 @@ impl CostBasedRouter {
         candidates
             .iter()
             .filter_map(|name| self.estimate_cost(name, estimated_rows, estimated_bytes))
-            .min_by(|a, b| a.total_cost().partial_cmp(&b.total_cost()).unwrap())
+            .min_by(|a, b| {
+                a.total_cost()
+                    .partial_cmp(&b.total_cost())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|est| est.source_name)
     }
 
