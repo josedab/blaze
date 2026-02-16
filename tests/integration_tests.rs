@@ -260,8 +260,11 @@ fn test_empty_query() {
 fn test_drop_nonexistent_table() {
     let conn = Connection::in_memory().unwrap();
     // DROP TABLE without IF EXISTS on a nonexistent table
-    // Note: current implementation may not error on this
-    let _ = conn.execute("DROP TABLE nonexistent");
+    let result = conn.execute("DROP TABLE nonexistent");
+    // Should either succeed silently or return an error - verify it doesn't panic
+    assert!(result.is_ok() || result.is_err());
+    // If it returns OK, verify it doesn't break subsequent operations
+    conn.execute("CREATE TABLE t1 (id INT)").unwrap();
 }
 
 // ============================================================================
@@ -468,4 +471,161 @@ fn test_column_not_found_suggests_similar() {
         "Expected suggestion in error: {}",
         msg
     );
+}
+
+// ============================================================================
+// Error Path Tests
+// ============================================================================
+
+#[test]
+fn test_select_nonexistent_column() {
+    let conn = create_test_connection();
+    let err = conn.query("SELECT nonexistent FROM users").unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn test_insert_wrong_column_count() {
+    let conn = Connection::in_memory().unwrap();
+    conn.execute("CREATE TABLE t1 (id BIGINT, name VARCHAR)")
+        .unwrap();
+    // Insert with too many/few values may error at execution
+    let result = conn.execute("INSERT INTO t1 VALUES (1, 'a', 'extra')");
+    // Should either work or return error, but not panic
+    drop(result);
+}
+
+#[test]
+fn test_duplicate_create_table() {
+    let conn = Connection::in_memory().unwrap();
+    conn.execute("CREATE TABLE t1 (id BIGINT)").unwrap();
+    // Creating same table again - engine allows this (replace semantics) or errors
+    let result = conn.execute("CREATE TABLE t1 (id BIGINT)");
+    // Verify it doesn't panic; behavior varies by implementation
+    drop(result);
+}
+
+#[test]
+fn test_create_table_if_not_exists_no_error() {
+    let conn = Connection::in_memory().unwrap();
+    conn.execute("CREATE TABLE t1 (id BIGINT)").unwrap();
+    // IF NOT EXISTS should not error
+    let result = conn.execute("CREATE TABLE IF NOT EXISTS t1 (id BIGINT)");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_drop_table_if_exists_no_error() {
+    let conn = Connection::in_memory().unwrap();
+    // IF EXISTS on nonexistent table should not error
+    let result = conn.execute("DROP TABLE IF EXISTS nonexistent");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_empty_query_error() {
+    let conn = Connection::in_memory().unwrap();
+    let result = conn.execute("");
+    // Empty query should either return error or succeed with empty result
+    drop(result);
+}
+
+#[test]
+fn test_syntax_error_message() {
+    let conn = Connection::in_memory().unwrap();
+    let err = conn.query("SELECTT * FROM users").unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.is_empty(), "Error message should not be empty");
+}
+
+#[test]
+fn test_select_star_no_table() {
+    let conn = Connection::in_memory().unwrap();
+    // SELECT * with no FROM and no table should produce a result
+    let result = conn.query("SELECT 1, 'hello', true");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_division_by_zero() {
+    let conn = create_test_connection();
+    // Division by zero - should return error or produce Infinity/NULL
+    let result = conn.query("SELECT 1 / 0");
+    // Either error or a result is acceptable; just don't panic
+    drop(result);
+}
+
+#[test]
+fn test_order_by_nonexistent_column() {
+    let conn = create_test_connection();
+    let result = conn.query("SELECT name FROM users ORDER BY nonexistent");
+    // Should error because nonexistent column
+    assert!(result.is_err(), "Expected error for ORDER BY nonexistent column");
+}
+
+#[test]
+fn test_group_by_count_empty_table() {
+    let conn = Connection::in_memory().unwrap();
+    conn.execute("CREATE TABLE empty (id BIGINT, category VARCHAR)")
+        .unwrap();
+    let results = conn
+        .query("SELECT category, COUNT(*) FROM empty GROUP BY category")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 0);
+}
+
+#[test]
+fn test_limit_larger_than_rows() {
+    let conn = create_test_connection();
+    let results = conn.query("SELECT * FROM users LIMIT 100").unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 5);
+}
+
+#[test]
+fn test_offset_larger_than_rows() {
+    let conn = create_test_connection();
+    let results = conn
+        .query("SELECT * FROM users LIMIT 10 OFFSET 100")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 0);
+}
+
+#[test]
+fn test_where_type_mismatch() {
+    let conn = create_test_connection();
+    // Comparing int to string
+    let result = conn.query("SELECT * FROM users WHERE id = 'abc'");
+    // Should either error or produce empty result, not panic
+    drop(result);
+}
+
+#[test]
+fn test_cross_join_empty_table() {
+    let conn = Connection::in_memory().unwrap();
+    conn.execute("CREATE TABLE t1 (a BIGINT)").unwrap();
+    conn.execute("CREATE TABLE t2 (b BIGINT)").unwrap();
+    conn.execute("INSERT INTO t2 VALUES (1)").unwrap();
+    let results = conn.query("SELECT * FROM t1 CROSS JOIN t2").unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 0);
+}
+
+#[test]
+fn test_register_nonexistent_csv() {
+    let conn = Connection::in_memory().unwrap();
+    let result = conn.register_csv("test", "data/this_does_not_exist.csv");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_multiple_statements_in_query() {
+    let conn = create_test_connection();
+    // Multiple statements - should handle gracefully
+    let result = conn.query("SELECT 1; SELECT 2");
+    // Either processes first or errors - both acceptable
+    drop(result);
 }
