@@ -1,0 +1,16 @@
+{
+    "rust-analyzer.cargo.features": "all-extensions",
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.extraArgs": ["--", "-D", "warnings"],
+    "editor.formatOnSave": true,
+    "files.watcherExclude": {
+        "**/target/**": true
+    },
+    "files.exclude": {
+        "**/target": true
+    },
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer",
+        "editor.tabSize": 4
+    }
+}

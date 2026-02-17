@@ -1,0 +1,11 @@
+id,name,email,city,signup_date
+1,Alice Johnson,alice@example.com,New York,2023-06-15
+2,Bob Smith,bob@example.com,Los Angeles,2023-07-20
+3,Charlie Brown,charlie@example.com,Chicago,2023-08-10
+4,Diana Prince,diana@example.com,Houston,2023-09-05
+5,Eve Davis,eve@example.com,Phoenix,2023-10-01
+6,Frank Miller,frank@example.com,Philadelphia,2023-10-15
+7,Grace Lee,grace@example.com,San Antonio,2023-11-01
+8,Henry Wilson,henry@example.com,San Diego,2023-11-20
+9,Ivy Chen,ivy@example.com,Dallas,2023-12-01
+10,Jack Taylor,jack@example.com,San Jose,2024-01-10
