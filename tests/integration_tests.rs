@@ -440,3 +440,32 @@ fn test_upper() {
         .value(0);
     assert_eq!(val, "ALICE");
 }
+
+#[test]
+fn test_table_not_found_suggests_similar() {
+    let conn = create_test_connection();
+    let err = conn.query("SELECT * FROM uers").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Did you mean"),
+        "Expected suggestion in error: {}",
+        msg
+    );
+    assert!(
+        msg.contains("users"),
+        "Expected 'users' suggestion: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_column_not_found_suggests_similar() {
+    let conn = create_test_connection();
+    let err = conn.query("SELECT nam FROM users").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Did you mean") || msg.contains("name"),
+        "Expected suggestion in error: {}",
+        msg
+    );
+}

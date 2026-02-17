@@ -1,4 +1,5 @@
 #![warn(clippy::all)]
+#![allow(clippy::type_complexity)]
 #![deny(unused_imports)]
 //! Blaze - Next-Generation Embedded OLAP Query Engine
 //!
@@ -162,8 +163,10 @@ pub mod pool;
 pub mod prepared;
 pub mod profiler;
 pub mod progress;
+pub mod query_advisor;
 pub mod recursive_cte;
 pub mod resource_governor;
+pub mod rest;
 pub mod security;
 pub mod sql;
 pub mod storage;
@@ -534,12 +537,13 @@ impl Connection {
         let table_name = insert.table_name.last().cloned().unwrap_or_default();
 
         // Get the table from the catalog
-        let table = self
+        let catalog = self
             .catalog_list
             .catalog("default")
-            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?
-            .get_table(&table_name)
-            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
+        let table = catalog.get_table(&table_name).ok_or_else(|| {
+            BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
+        })?;
 
         // Get the table as MemoryTable (DML only works on MemoryTable)
         let memory_table = table
@@ -608,12 +612,13 @@ impl Connection {
         let table_name = update.table_name.last().cloned().unwrap_or_default();
 
         // Get the table from the catalog
-        let table = self
+        let catalog = self
             .catalog_list
             .catalog("default")
-            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?
-            .get_table(&table_name)
-            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
+        let table = catalog.get_table(&table_name).ok_or_else(|| {
+            BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
+        })?;
 
         // Get the table as MemoryTable
         let memory_table = table
@@ -711,12 +716,13 @@ impl Connection {
         let table_name = delete.table_name.last().cloned().unwrap_or_default();
 
         // Get the table from the catalog
-        let table = self
+        let catalog = self
             .catalog_list
             .catalog("default")
-            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?
-            .get_table(&table_name)
-            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
+        let table = catalog.get_table(&table_name).ok_or_else(|| {
+            BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
+        })?;
 
         // Get the table as MemoryTable
         let memory_table = table
@@ -1275,12 +1281,13 @@ impl Connection {
     /// This collects row count, null counts, and byte sizes for each column
     /// in the table. The statistics are computed by scanning the table data.
     pub fn analyze_table(&self, table_name: &str) -> Result<optimizer::TableStatistics> {
-        let table = self
+        let catalog = self
             .catalog_list
             .catalog("default")
-            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?
-            .get_table(table_name)
-            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
+        let table = catalog.get_table(table_name).ok_or_else(|| {
+            BlazeError::catalog_with_suggestions(table_name, &catalog.list_tables())
+        })?;
 
         // Query all data from the table
         let batches = self.query(&format!("SELECT * FROM {}", table_name))?;
@@ -1293,8 +1300,12 @@ impl Connection {
 
         for batch in &batches {
             total_rows += batch.num_rows();
-            for i in 0..num_cols.min(batch.num_columns()) {
-                null_counts[i] += batch.column(i).null_count();
+            for (null_count, col) in null_counts
+                .iter_mut()
+                .zip(batch.columns().iter())
+                .take(num_cols.min(batch.num_columns()))
+            {
+                *null_count += col.null_count();
             }
         }
 
