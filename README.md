@@ -1,5 +1,9 @@
 # Blaze Query Engine
 
+[![CI](https://github.com/blaze-db/blaze/actions/workflows/ci.yml/badge.svg)](https://github.com/blaze-db/blaze/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/blaze-db/blaze/branch/main/graph/badge.svg)](https://codecov.io/gh/blaze-db/blaze)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A high-performance, memory-safe embedded OLAP query engine written in Rust with SQL:2016 compliance and native Apache Arrow/Parquet integration.
 
 ## Features
@@ -37,13 +41,17 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 
 **Legend**: ✅ Production-ready • ⚠️ API may change • 🚧 Not feature-complete
 
+> **⚠️ Experimental & Preview Features**: Features marked ⚠️ or 🚧 are **not production-ready**.
+> APIs will change, implementations may be incomplete, and bugs are expected.
+> Enable them with `--features <flag>` for evaluation only. Core features (✅ Stable) are safe to depend on.
+
 ## Quick Start
 
 ### Prerequisites
 
 - **Rust 1.92.0+** — Install via [rustup](https://rustup.rs/)
-- Build takes ~10s (debug) or ~3-4min (release)
-- Tests run in ~0.3s (650+ tests)
+- Build takes ~10s (debug) or ~4-6min (release)
+- Tests run in ~0.3s (900+ tests)
 
 ```bash
 # Clone and verify everything works
@@ -214,8 +222,8 @@ cargo run -- -c "SELECT * FROM users" --format csv --output results.csv
 
 ```bash
 cargo build            # Debug build (~10s)
-cargo build --release  # Release build (~3-4min)
-cargo test             # Run tests (~0.2s, 500+ tests)
+cargo build --release  # Release build (~4-6min)
+cargo test             # Run tests (~0.2s, 900+ tests)
 cargo clippy           # Linting
 ```
 
@@ -325,7 +333,7 @@ cargo run --example advanced_queries
 
 | Problem | Solution |
 |---------|----------|
-| `target/` is very large (>10GB) | Run `cargo clean` to reclaim disk space |
+| `target/` is very large (>10GB) | Run `cargo clean` to reclaim disk space. The target directory can grow to 15-20GB with all features, benchmarks, and examples. Use `cargo clean --release` to only remove release artifacts. |
 | Tests fail after checkout | Run `make setup` to ensure correct toolchain |
 | Type mismatch errors in queries | Use float literals (`80000.0`) when comparing to `FLOAT`/`DOUBLE` columns |
 

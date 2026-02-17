@@ -14,7 +14,7 @@ make setup
 
 # Or manually:
 cargo build        # ~10s debug build
-cargo test         # Run 500+ tests (~0.2s)
+cargo test         # Run 900+ tests (~0.2s)
 cargo fmt          # Format code
 ```
 
@@ -35,6 +35,7 @@ Optional:
 | `make` | Format + test | Before every commit |
 | `make quick` | Syntax check + test | Fast iteration |
 | `make fix` | Auto-fix formatting + clippy | Clean up before PR |
+| `make ci` | Run all CI checks locally | Before submitting PR |
 | `make watch` | Re-run checks on save | During development |
 | `make lint` | Run clippy (advisory) | Check for issues |
 | `make test-all` | Test all feature flags | Before submitting PR |
