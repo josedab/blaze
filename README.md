@@ -70,6 +70,14 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 - First build takes ~4-5 minutes (debug), ~10s incremental rebuilds; ~4-6min (release)
 - Tests run in ~0.3s (900+ tests)
 
+#### Minimum Supported Rust Version (MSRV)
+
+The current MSRV is **1.92.0**, declared in both `Cargo.toml` (`rust-version`) and `rust-toolchain.toml`. We follow this policy:
+
+- The MSRV is only bumped when a dependency requires it, or to access a language feature with clear benefits
+- MSRV bumps are considered **breaking changes** and noted in the changelog
+- CI tests against the declared MSRV to prevent accidental breakage
+
 ```bash
 # Clone and verify everything works
 git clone <repo-url> && cd blaze
