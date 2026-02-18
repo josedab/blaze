@@ -1,0 +1,27 @@
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  status:
+    project:
+      default:
+        target: 60%
+        threshold: 2%
+        if_ci_failed: error
+    patch:
+      default:
+        target: 70%
+        threshold: 5%
+
+comment:
+  layout: "diff, flags, files"
+  behavior: default
+  require_changes: true
+
+ignore:
+  - "benches/**"
+  - "examples/**"
+  - "tests/**"
+  - "src/python.rs"
+  - "src/wasm/**"
+  - "src/ffi/**"
