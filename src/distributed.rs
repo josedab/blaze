@@ -640,7 +640,7 @@ impl DistributedCoordinator {
                     .cloned()
                     .unwrap_or_else(|| vec![available[idx % available.len()].id.clone()]);
 
-                let fragment_sql = format!("SELECT * FROM {}", table);
+                let fragment_sql = format!("SELECT * FROM \"{}\"", table.replace('"', "\"\""));
                 let exchange = if target_nodes.len() > 1 {
                     ExchangeStrategy::Shuffle { keys: vec![] }
                 } else {
