@@ -593,8 +593,11 @@ pub fn simd_min_i64(data: &[i64], level: SimdLevel) -> i64 {
         #[cfg(target_arch = "x86_64")]
         SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_min_i64_avx2(data) },
         _ => {
-            // Scalar fallback
-            *data.iter().min().unwrap()
+            // Safety: data is non-empty (checked above)
+            #[allow(clippy::unwrap_used)]
+            {
+                *data.iter().min().unwrap()
+            }
         }
     }
 }
@@ -624,8 +627,11 @@ pub fn simd_max_i64(data: &[i64], level: SimdLevel) -> i64 {
         #[cfg(target_arch = "x86_64")]
         SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_max_i64_avx2(data) },
         _ => {
-            // Scalar fallback
-            *data.iter().max().unwrap()
+            // Safety: data is non-empty (checked above)
+            #[allow(clippy::unwrap_used)]
+            {
+                *data.iter().max().unwrap()
+            }
         }
     }
 }

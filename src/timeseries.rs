@@ -1376,6 +1376,8 @@ impl DeltaDeltaEncoder {
         result.push(encoded[0] + prev_delta);
         for &dod in &encoded[2..] {
             let delta = prev_delta + dod;
+            // Safety: result always has at least one element (pushed on line above)
+            #[allow(clippy::unwrap_used)]
             let value = *result.last().unwrap() + delta;
             result.push(value);
             prev_delta = delta;

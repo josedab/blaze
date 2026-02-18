@@ -437,6 +437,8 @@ impl FusionOptimizer {
             let mut fused: Vec<GpuOperationType> = vec![ops[i]];
 
             // Greedily extend the fusion group while the next op is fusible
+            // Safety: `fused` always has at least one element (pushed on the line above)
+            #[allow(clippy::unwrap_used)]
             while i + 1 < ops.len() && Self::can_fuse(*fused.last().unwrap(), ops[i + 1]) {
                 i += 1;
                 fused.push(ops[i]);

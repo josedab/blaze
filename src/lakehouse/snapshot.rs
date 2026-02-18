@@ -62,6 +62,8 @@ impl TableVersion {
 
     /// Create a timestamp version from current time.
     pub fn now() -> Self {
+        // Safety: UNIX_EPOCH is always before SystemTime::now()
+        #[allow(clippy::unwrap_used)]
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

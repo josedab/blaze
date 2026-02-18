@@ -1,3 +1,8 @@
+// PyO3 bindings use .unwrap() extensively for Arrow array downcasts that are
+// guaranteed by the match arms on DataType. Replacing each with error handling
+// would add noise without safety benefit.
+#![allow(clippy::unwrap_used)]
+
 //! Python bindings for Blaze using PyO3.
 //!
 //! This module provides Python bindings for the Blaze query engine,

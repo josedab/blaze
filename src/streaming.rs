@@ -362,6 +362,8 @@ impl<S: RecordBatchStream> CoalesceStream<S> {
 
         if self.buffer.len() == 1 {
             self.buffer_rows = 0;
+            // Safety: buffer.len() == 1 confirmed above
+            #[allow(clippy::unwrap_used)]
             return Ok(self.buffer.pop().unwrap());
         }
 
@@ -586,6 +588,8 @@ impl AsyncConnection {
             return Err(BlazeError::analysis("Empty SQL statement"));
         }
 
+        // Safety: checked is_empty() above, so next() always returns Some
+        #[allow(clippy::unwrap_used)]
         let statement = statements.into_iter().next().unwrap();
         let binder = Binder::new(self.catalog_list.clone());
         let logical_plan = binder.bind(statement)?;
@@ -627,6 +631,8 @@ impl AsyncConnection {
             return Ok(0);
         }
 
+        // Safety: checked is_empty() above, so next() always returns Some
+        #[allow(clippy::unwrap_used)]
         let statement = statements.into_iter().next().unwrap();
 
         match &statement {
@@ -1349,6 +1355,8 @@ impl WindowAssigner {
 
         let mut merged: Vec<TimeWindow> = vec![sorted[0].clone()];
         for w in &sorted[1..] {
+            // Safety: merged is non-empty (initialized with sorted[0] above)
+            #[allow(clippy::unwrap_used)]
             let last = merged.last_mut().unwrap();
             if w.start <= last.end {
                 last.end = last.end.max(w.end);

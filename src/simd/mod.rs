@@ -390,7 +390,11 @@ impl SimdContext {
             self.stats.simd_operations += 1;
             vectorize::simd_min_i64(data, self.simd_level)
         } else {
-            *data.iter().min().unwrap()
+            // Safety: data is non-empty (checked above)
+            #[allow(clippy::unwrap_used)]
+            {
+                *data.iter().min().unwrap()
+            }
         };
 
         Ok(Some(result))
@@ -409,7 +413,11 @@ impl SimdContext {
             self.stats.simd_operations += 1;
             vectorize::simd_max_i64(data, self.simd_level)
         } else {
-            *data.iter().max().unwrap()
+            // Safety: data is non-empty (checked above)
+            #[allow(clippy::unwrap_used)]
+            {
+                *data.iter().max().unwrap()
+            }
         };
 
         Ok(Some(result))

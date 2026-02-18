@@ -65,6 +65,8 @@ impl PartitionCoalescer {
 
         for partition in sorted_partitions {
             // Find the group with the smallest total size
+            // Safety: `groups` is non-empty because `target > 0` (enforced above)
+            #[allow(clippy::unwrap_used)]
             let min_group = groups.iter_mut().min_by_key(|g| g.total_bytes).unwrap();
 
             min_group.add_partition(partition);
