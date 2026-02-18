@@ -547,8 +547,9 @@ impl Expr {
     }
 
     pub fn like(self, pattern: &str) -> Self {
+        let escaped = pattern.replace('\'', "''");
         Self {
-            sql: format!("{} LIKE '{}'", self.sql, pattern),
+            sql: format!("{} LIKE '{}'", self.sql, escaped),
         }
     }
 
