@@ -1,4 +1,4 @@
-.PHONY: build check test lint fmt doc bench bench-tpch clean clean-deep release all setup fix quick watch bump-patch bump-minor bump-major examples example deps deps-why ci
+.PHONY: build check test lint fmt doc bench bench-tpch clean clean-deep release all setup fix quick watch bump-patch bump-minor bump-major examples example deps deps-why ci new-module
 
 # Default: format + test (always works for new contributors)
 all: fmt test
@@ -30,7 +30,7 @@ lint:
 lint-strict:
 	cargo clippy -- -D warnings
 
-# Run clippy on all features
+# Run clippy on all features (enforces deny(clippy::unwrap_used) on extension modules)
 lint-all:
 	cargo clippy --features all-extensions
 
@@ -104,13 +104,15 @@ run:
 setup:
 	@echo "==> Installing Rust toolchain..."
 	rustup show
-	@echo "==> Installing cargo-watch (optional, for 'make watch')..."
-	-cargo install cargo-watch 2>/dev/null || echo "  (skipped, install manually if needed)"
-	@echo "==> Installing pre-commit hook..."
+	@echo "==> Installing cargo-watch (for 'make watch')..."
+	@cargo install cargo-watch --quiet 2>/dev/null || echo "  ⚠ cargo-watch install failed (optional). Install manually: cargo install cargo-watch"
+	@echo "==> Installing git hooks..."
 	@mkdir -p .git/hooks
 	@cp scripts/pre-commit .git/hooks/pre-commit 2>/dev/null || \
 		echo '#!/bin/sh\ncargo fmt --check || { echo "Run cargo fmt first"; exit 1; }' > .git/hooks/pre-commit
 	@chmod +x .git/hooks/pre-commit
+	@cp scripts/commit-msg .git/hooks/commit-msg 2>/dev/null || true
+	@chmod +x .git/hooks/commit-msg 2>/dev/null || true
 	@echo "==> Building project..."
 	cargo build
 	@echo "==> Running tests..."
@@ -139,3 +141,8 @@ bump-minor:
 
 bump-major:
 	./scripts/bump-version.sh major
+
+# Scaffold a new module: make new-module NAME=my_feature [TYPE=file|dir]
+new-module:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make new-module NAME=<module_name> [TYPE=file|dir]"; exit 1; fi
+	@./scripts/new-module.sh $(NAME) $(or $(TYPE),dir)

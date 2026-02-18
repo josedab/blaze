@@ -1,0 +1,31 @@
+#!/bin/sh
+# commit-msg hook: validates commit messages follow Conventional Commits format.
+# Install with: cp scripts/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
+# Or run: make setup
+
+commit_msg_file="$1"
+commit_msg=$(head -1 "$commit_msg_file")
+
+# Allow merge commits and fixup/squash commits
+if echo "$commit_msg" | grep -qE '^(Merge|Revert|fixup!|squash!) '; then
+    exit 0
+fi
+
+# Conventional Commits pattern: type(optional-scope)!: description
+pattern='^(feat|fix|docs|style|refactor|perf|test|chore|ci)(\([a-zA-Z0-9_-]+\))?!?: .+'
+
+if ! echo "$commit_msg" | grep -qE "$pattern"; then
+    echo ""
+    echo "❌ Commit message does not follow Conventional Commits format."
+    echo ""
+    echo "Expected: <type>(<scope>): <description>"
+    echo "Types: feat, fix, docs, style, refactor, perf, test, chore, ci"
+    echo ""
+    echo "Examples:"
+    echo "  feat(parser): add LATERAL JOIN support"
+    echo "  fix(executor): handle NULL in hash join"
+    echo "  docs: update README with new examples"
+    echo ""
+    echo "Your message: $commit_msg"
+    exit 1
+fi
