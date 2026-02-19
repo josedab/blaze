@@ -669,7 +669,14 @@ impl WorkloadAnalyzer {
             .filter(|(_, count)| *count >= 2)
             .map(|(features, count)| {
                 let tables = features.tables.clone();
-                let query = format!("SELECT * FROM {}", tables.join(", "));
+                let query = format!(
+                    "SELECT * FROM {}",
+                    tables
+                        .iter()
+                        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
                 MaterializationRecommendation {
                     suggested_query: query,
                     source_tables: tables,

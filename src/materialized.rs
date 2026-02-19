@@ -4420,7 +4420,7 @@ impl QueryRewriter {
 
             // Exact match - substitute the entire query
             if normalized_sql == normalized_view_query {
-                return Some(format!("SELECT * FROM {}", view.name));
+                return Some(format!("SELECT * FROM \"{}\"", view.name.replace('"', "\"\"")));
             }
 
             // Check if query is a subset (same tables with extra WHERE clause)
@@ -4431,8 +4431,9 @@ impl QueryRewriter {
                     // Query has WHERE clause, view doesn't - potentially can use view with filter
                     let where_clause = normalized_sql.split("where").nth(1).unwrap_or("");
                     return Some(format!(
-                        "SELECT * FROM {} WHERE {}",
-                        view.name, where_clause
+                        "SELECT * FROM \"{}\" WHERE {}",
+                        view.name.replace('"', "\"\""),
+                        where_clause
                     ));
                 }
             }
