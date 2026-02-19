@@ -687,11 +687,21 @@ pub struct S3ObjectStore {
 
 /// S3 authentication credentials.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S3Credentials {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub session_token: Option<String>,
+}
+
+impl fmt::Debug for S3Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Credentials")
+            .field("access_key_id", &"[REDACTED]")
+            .field("secret_access_key", &"[REDACTED]")
+            .field("session_token", &self.session_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[allow(dead_code)]
@@ -771,12 +781,22 @@ impl GcsObjectStore {
 
 /// Azure Blob Storage provider.
 #[allow(dead_code)]
-#[derive(Debug)]
 pub struct AzureBlobStore {
     account: String,
     container: String,
     access_key: Option<String>,
     sas_token: Option<String>,
+}
+
+impl fmt::Debug for AzureBlobStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AzureBlobStore")
+            .field("account", &self.account)
+            .field("container", &self.container)
+            .field("access_key", &self.access_key.as_ref().map(|_| "[REDACTED]"))
+            .field("sas_token", &self.sas_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[allow(dead_code)]
@@ -1252,13 +1272,24 @@ pub enum CredentialProvider {
 }
 
 /// A resolved credential ready for use with a cloud API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct ResolvedCredential {
     pub access_key: String,
     pub secret_key: String,
     pub token: Option<String>,
     pub expiry: Option<u64>,
+}
+
+impl fmt::Debug for ResolvedCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedCredential")
+            .field("access_key", &"[REDACTED]")
+            .field("secret_key", &"[REDACTED]")
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("expiry", &self.expiry)
+            .finish()
+    }
 }
 
 /// Builder-style credential chain that tries providers in order.

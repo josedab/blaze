@@ -666,6 +666,22 @@ pub enum AuthType {
     },
 }
 
+impl std::fmt::Debug for AuthType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "AuthType::None"),
+            Self::Token { valid_tokens } => f
+                .debug_struct("AuthType::Token")
+                .field("valid_tokens", &format!("[{} tokens]", valid_tokens.len()))
+                .finish(),
+            Self::Basic { credentials } => f
+                .debug_struct("AuthType::Basic")
+                .field("credentials", &format!("[{} users]", credentials.len()))
+                .finish(),
+        }
+    }
+}
+
 /// An active authentication session.
 pub struct AuthSession {
     pub token: String,
