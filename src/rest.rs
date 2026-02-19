@@ -185,6 +185,13 @@ impl RateLimiter {
             return false;
         }
         entry.timestamps.push(now);
+
+        // Prune empty entries to prevent unbounded HashMap growth (DoS vector)
+        const MAX_ENTRIES: usize = 100_000;
+        if entries.len() > MAX_ENTRIES {
+            entries.retain(|_, e| !e.timestamps.is_empty());
+        }
+
         true
     }
 
@@ -310,14 +317,11 @@ impl ApiServer {
 
         // CORS headers
         if self.config.enable_cors {
-            let origin = self
-                .config
-                .cors_allowed_origin
-                .as_deref()
-                .unwrap_or("*");
-            response
-                .headers
-                .insert("Access-Control-Allow-Origin".into(), origin.into());
+            if let Some(origin) = self.config.cors_allowed_origin.as_deref() {
+                response
+                    .headers
+                    .insert("Access-Control-Allow-Origin".into(), origin.into());
+            }
             response.headers.insert(
                 "Access-Control-Allow-Methods".into(),
                 "GET, POST, PUT, DELETE, OPTIONS".into(),
@@ -327,6 +331,14 @@ impl ApiServer {
                 "Content-Type, X-Api-Key, Authorization".into(),
             );
         }
+
+        // Security headers
+        response.headers.insert("X-Content-Type-Options".into(), "nosniff".into());
+        response.headers.insert("X-Frame-Options".into(), "DENY".into());
+        response.headers.insert(
+            "Content-Security-Policy".into(),
+            "default-src 'none'; frame-ancestors 'none'".into(),
+        );
 
         if response.status < 400 {
             self.stats.write().unwrap_or_else(|e| e.into_inner()).successful_requests += 1;
@@ -377,11 +389,11 @@ impl ApiServer {
                 // Simple JSON parsing: extract "sql" field
                 let sql = extract_json_string(body, "sql");
                 match sql {
-                    Some(sql) => {
+                    Some(_sql) => {
                         let max_rows = server.config.max_result_rows;
                         ApiResponse::ok(format!(
-                            r#"{{"sql": "{}", "max_rows": {}, "status": "accepted"}}"#,
-                            sql, max_rows
+                            r#"{{"max_rows": {}, "status": "accepted"}}"#,
+                            max_rows
                         ))
                     }
                     None => ApiResponse::error(400, "Missing 'sql' field in request body"),
@@ -507,7 +519,7 @@ mod tests {
         };
         let resp = server.handle(req);
         assert_eq!(resp.status, 200);
-        assert!(resp.body.contains("SELECT 1"));
+        assert!(resp.body.contains("accepted"));
     }
 
     #[test]
@@ -533,7 +545,11 @@ mod tests {
 
     #[test]
     fn test_cors_headers() {
-        let server = make_server();
+        let config = ApiConfig {
+            cors_allowed_origin: Some("https://example.com".into()),
+            ..ApiConfig::default()
+        };
+        let server = ApiServer::new(config);
         let req = make_request(HttpMethod::Get, "/api/v1/health");
         let resp = server.handle(req);
         assert!(resp.headers.contains_key("Access-Control-Allow-Origin"));
