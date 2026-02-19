@@ -892,7 +892,7 @@ impl DataFrame {
         let mut output = String::new();
         for batch in &batches {
             output.push_str(
-                &arrow::util::pretty::pretty_format_batches(&[batch.clone()])
+                &arrow::util::pretty::pretty_format_batches(std::slice::from_ref(batch))
                     .map_err(|e| crate::error::BlazeError::execution(e.to_string()))?
                     .to_string(),
             );
@@ -915,6 +915,7 @@ impl DataFrame {
     }
 
     /// Return the generated SQL without executing (alias for to_sql).
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         self.to_sql()
     }

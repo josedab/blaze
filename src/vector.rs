@@ -1652,11 +1652,9 @@ impl IvfPqIndex {
 
     /// Insert a vector into the index.
     pub fn insert(&mut self, id: usize, vector: &[f32]) {
-        if self.centroids.is_empty() {
-            if self.clusters.is_empty() {
-                self.centroids.push(vector.to_vec());
-                self.clusters.push(Vec::new());
-            }
+        if self.centroids.is_empty() && self.clusters.is_empty() {
+            self.centroids.push(vector.to_vec());
+            self.clusters.push(Vec::new());
         }
         let ci = Self::nearest_centroid(vector, &self.centroids, self.metric);
         let residual: Vec<f32> = vector

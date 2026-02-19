@@ -474,7 +474,7 @@ impl HistogramBuilder {
             return Histogram::equiheight(Vec::new());
         }
 
-        let rows_per_bucket = (values.len() + num_buckets - 1) / num_buckets;
+        let rows_per_bucket = values.len().div_ceil(num_buckets);
         let mut buckets = Vec::with_capacity(num_buckets);
 
         for chunk in values.chunks(rows_per_bucket) {

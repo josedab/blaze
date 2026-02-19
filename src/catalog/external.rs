@@ -331,6 +331,7 @@ pub struct UnityCatalogProvider {
 struct UnityTableEntry {
     schema: Schema,
     location: Option<String>,
+    #[allow(dead_code)]
     table_type: String,
 }
 
@@ -444,6 +445,7 @@ pub struct HiveMetastoreProvider {
 struct HiveTableEntry {
     schema: Schema,
     location: Option<String>,
+    #[allow(dead_code)]
     serde: String,
     partitions: Vec<String>,
 }
