@@ -797,6 +797,17 @@ impl Executor {
     ) -> Result<Vec<RecordBatch>> {
         use std::fs::File;
 
+        // Validate the target path to prevent directory traversal attacks
+        let target_path = std::path::Path::new(target);
+        for component in target_path.components() {
+            if let std::path::Component::ParentDir = component {
+                return Err(crate::error::BlazeError::invalid_argument(format!(
+                    "COPY TO path '{}' contains '..' traversal which is not allowed",
+                    target
+                )));
+            }
+        }
+
         if batches.is_empty() {
             return Ok(vec![]);
         }
