@@ -843,7 +843,7 @@ pub fn json_extract_wildcard(json_str: &str, path: &str) -> Result<Vec<String>> 
 
     let segments = parse_wildcard_path(path);
     let mut results = Vec::new();
-    extract_wildcard_recursive(&value, &segments, 0, &mut results);
+    extract_wildcard_recursive(&value, &segments, 0, &mut results, 0)?;
     Ok(results)
 }
 
@@ -881,15 +881,24 @@ fn parse_wildcard_path(path: &str) -> Vec<String> {
     segments
 }
 
+const MAX_JSON_RECURSION_DEPTH: usize = 128;
+
 fn extract_wildcard_recursive(
     value: &Value,
     segments: &[String],
     idx: usize,
     results: &mut Vec<String>,
-) {
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_JSON_RECURSION_DEPTH {
+        return Err(BlazeError::execution(
+            "JSON path extraction exceeded maximum recursion depth",
+        ));
+    }
+
     if idx >= segments.len() {
         results.push(value.to_string());
-        return;
+        return Ok(());
     }
 
     let segment = &segments[idx];
@@ -898,12 +907,12 @@ fn extract_wildcard_recursive(
         match value {
             Value::Object(obj) => {
                 for (_, v) in obj {
-                    extract_wildcard_recursive(v, segments, idx + 1, results);
+                    extract_wildcard_recursive(v, segments, idx + 1, results, depth + 1)?;
                 }
             }
             Value::Array(arr) => {
                 for v in arr {
-                    extract_wildcard_recursive(v, segments, idx + 1, results);
+                    extract_wildcard_recursive(v, segments, idx + 1, results, depth + 1)?;
                 }
             }
             _ => {}
@@ -911,14 +920,15 @@ fn extract_wildcard_recursive(
     } else if let Ok(array_idx) = segment.parse::<usize>() {
         if let Value::Array(arr) = value {
             if let Some(elem) = arr.get(array_idx) {
-                extract_wildcard_recursive(elem, segments, idx + 1, results);
+                extract_wildcard_recursive(elem, segments, idx + 1, results, depth + 1)?;
             }
         }
     } else if let Value::Object(obj) = value {
         if let Some(child) = obj.get(segment.as_str()) {
-            extract_wildcard_recursive(child, segments, idx + 1, results);
+            extract_wildcard_recursive(child, segments, idx + 1, results, depth + 1)?;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
