@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Blaze WASM Quickstart</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; }
+    pre { background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+    button { padding: 0.5rem 1rem; cursor: pointer; }
+    #output { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>🔥 Blaze WASM Quickstart</h1>
+  <p>Open the browser console or click the button below to run sample queries.</p>
+  <button onclick="runDemo()">Run Demo</button>
+  <pre id="output"></pre>
+
+  <script type="module">
+    import { initBlaze, BlazeDB } from '../src/index.ts';
+
+    // Make runDemo available globally
+    window.runDemo = async function () {
+      const out = document.getElementById('output');
+      out.textContent = 'Initializing Blaze …\n';
+
+      await initBlaze();
+      const db = new BlazeDB();
+
+      // Create tables and insert data
+      db.execute(`
+        CREATE TABLE employees (
+          id INT NOT NULL,
+          name VARCHAR NOT NULL,
+          department VARCHAR,
+          salary INT
+        )
+      `);
+      db.execute("INSERT INTO employees VALUES (1, 'Alice', 'Engineering', 120000)");
+      db.execute("INSERT INTO employees VALUES (2, 'Bob', 'Engineering', 110000)");
+      db.execute("INSERT INTO employees VALUES (3, 'Carol', 'Marketing', 95000)");
+      db.execute("INSERT INTO employees VALUES (4, 'Dave', 'Sales', 88000)");
+      db.execute("INSERT INTO employees VALUES (5, 'Eve', 'Engineering', 130000)");
+
+      // Basic query
+      out.textContent += '\n=== All Employees ===\n';
+      const all = db.query('SELECT * FROM employees ORDER BY id');
+      out.textContent += JSON.stringify(all.rows, null, 2) + '\n';
+
+      // Aggregation
+      out.textContent += '\n=== Avg Salary by Department ===\n';
+      const agg = db.query(`
+        SELECT department, COUNT(*) AS headcount, AVG(salary) AS avg_salary
+        FROM employees
+        GROUP BY department
+        ORDER BY avg_salary DESC
+      `);
+      out.textContent += JSON.stringify(agg.rows, null, 2) + '\n';
+
+      // Load JSON data at runtime
+      db.registerJson('products', [
+        { id: 1, name: 'Widget', price: 9.99 },
+        { id: 2, name: 'Gadget', price: 24.99 },
+        { id: 3, name: 'Doohickey', price: 4.99 },
+      ]);
+
+      out.textContent += '\n=== Products (loaded from JSON) ===\n';
+      const products = db.query('SELECT * FROM products ORDER BY price DESC');
+      out.textContent += JSON.stringify(products.rows, null, 2) + '\n';
+
+      // Stats
+      const stats = db.getStats();
+      out.textContent += `\nStats: ${stats.totalQueries} queries, ${stats.tables} tables\n`;
+
+      db.close();
+      out.textContent += '\nDone ✓\n';
+    };
+  </script>
+</body>
+</html>
