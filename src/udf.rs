@@ -15,14 +15,17 @@ use crate::error::{BlazeError, Result};
 use crate::types::DataType;
 
 /// A user-defined scalar function.
+///
+/// Wraps a closure that operates on Arrow arrays, allowing custom functions
+/// to be called from SQL queries. Register via [`UdfRegistry::register_scalar`].
 pub struct ScalarUdf {
-    /// Function name (used in SQL)
+    /// Function name (used in SQL).
     pub name: String,
-    /// Input argument types
+    /// Expected input argument types.
     pub arg_types: Vec<DataType>,
-    /// Return type
+    /// Return type of the function.
     pub return_type: DataType,
-    /// The function implementation
+    /// The function implementation operating on columnar Arrow arrays.
     pub func: Arc<dyn Fn(&[ArrayRef]) -> Result<ArrayRef> + Send + Sync>,
 }
 
@@ -68,6 +71,9 @@ impl fmt::Debug for ScalarUdf {
 }
 
 /// Registry for user-defined functions.
+///
+/// Stores scalar UDFs and aggregate UDAFs, keyed by uppercase name.
+/// Thread-safe via internal `RwLock` on each map.
 #[derive(Default)]
 pub struct UdfRegistry {
     scalar_udfs: RwLock<HashMap<String, Arc<ScalarUdf>>>,
@@ -177,7 +183,10 @@ impl fmt::Debug for UdfRegistry {
     }
 }
 
-/// Physical expression for executing a UDF
+/// Physical expression for executing a UDF.
+///
+/// Bridges the UDF registry with the physical plan by evaluating
+/// argument expressions and passing the results to the UDF closure.
 #[derive(Debug)]
 pub struct UdfExpr {
     udf: Arc<ScalarUdf>,
@@ -185,6 +194,7 @@ pub struct UdfExpr {
 }
 
 impl UdfExpr {
+    /// Create a new UDF expression with the given function and argument expressions.
     pub fn new(udf: Arc<ScalarUdf>, args: Vec<Arc<dyn crate::planner::PhysicalExpr>>) -> Self {
         Self { udf, args }
     }
@@ -232,18 +242,22 @@ pub trait UdafAccumulator: Send + Sync {
 }
 
 /// A user-defined aggregate function.
+///
+/// Defines the signature and accumulator factory for a custom aggregate.
+/// Register via [`UdfRegistry::register_aggregate`].
 pub struct AggregateUdf {
-    /// Function name (used in SQL)
+    /// Function name (used in SQL).
     pub name: String,
-    /// Input argument types
+    /// Expected input argument types.
     pub arg_types: Vec<DataType>,
-    /// Return type
+    /// Return type of the aggregate.
     pub return_type: DataType,
-    /// Factory to create a new accumulator instance
+    /// Factory to create a new accumulator instance for each group.
     pub accumulator_factory: Arc<dyn Fn() -> Box<dyn UdafAccumulator> + Send + Sync>,
 }
 
 impl AggregateUdf {
+    /// Create a new aggregate UDF with the given name, types, and accumulator factory.
     pub fn new(
         name: impl Into<String>,
         arg_types: Vec<DataType>,
@@ -279,16 +293,19 @@ impl fmt::Debug for AggregateUdf {
 // ---------------------------------------------------------------------------
 
 /// A table-valued function that returns a set of rows.
+///
+/// TVFs accept scalar arguments and produce one or more `RecordBatch` results.
+/// Register via [`UdfCatalog::register_table_function`].
 pub struct TableFunction {
-    /// Function name
+    /// Function name.
     pub name: String,
-    /// Description for the UDF catalog
+    /// Human-readable description for the UDF catalog.
     pub description: String,
-    /// Input argument types
+    /// Expected input argument types.
     pub arg_types: Vec<DataType>,
-    /// Output schema (columns produced)
+    /// Output schema (columns produced by this function).
     pub output_schema: crate::types::Schema,
-    /// The function implementation: args → Vec<RecordBatch>
+    /// The function implementation: scalar args → `Vec<RecordBatch>`.
     pub func: Arc<dyn Fn(&[crate::types::ScalarValue]) -> Result<Vec<RecordBatch>> + Send + Sync>,
 }
 
@@ -330,22 +347,33 @@ impl fmt::Debug for TableFunction {
 // UDF Catalog (discovery and documentation)
 // ---------------------------------------------------------------------------
 
-/// Entry in the UDF catalog for documentation purposes.
+/// Entry in the UDF catalog for documentation and discovery purposes.
 #[derive(Debug, Clone)]
 pub struct UdfCatalogEntry {
+    /// Function name.
     pub name: String,
+    /// Kind of UDF (scalar, aggregate, or table).
     pub kind: UdfKind,
+    /// Human-readable description.
     pub description: String,
+    /// Expected input argument types.
     pub arg_types: Vec<DataType>,
+    /// Return type (if applicable; `None` for table functions).
     pub return_type: Option<DataType>,
+    /// Optional usage example.
     pub example: Option<String>,
 }
 
 /// Kind of UDF.
+///
+/// Distinguishes scalar, aggregate, and table-valued functions in the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UdfKind {
+    /// A scalar function (one output row per input row).
     Scalar,
+    /// An aggregate function (many input rows → one output row per group).
     Aggregate,
+    /// A table-valued function (returns a set of rows).
     Table,
 }
 
@@ -360,12 +388,15 @@ impl fmt::Display for UdfKind {
 }
 
 /// Catalog of all registered UDFs for discovery and documentation.
+///
+/// Provides search, listing, and table-function lookup across all UDF kinds.
 pub struct UdfCatalog {
     entries: RwLock<Vec<UdfCatalogEntry>>,
     table_functions: RwLock<HashMap<String, Arc<TableFunction>>>,
 }
 
 impl UdfCatalog {
+    /// Create a new empty UDF catalog.
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(Vec::new()),
@@ -439,7 +470,7 @@ impl UdfCatalog {
             .unwrap_or_default()
     }
 
-    /// Total number of registered functions.
+    /// Total number of registered functions across all kinds.
     pub fn count(&self) -> usize {
         self.entries.read().map(|e| e.len()).unwrap_or(0)
     }
