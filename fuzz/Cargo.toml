@@ -1,0 +1,21 @@
+[package]
+name = "blaze-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.blaze]
+path = ".."
+
+[[bin]]
+name = "fuzz_sql_parser"
+path = "fuzz_targets/fuzz_sql_parser.rs"
+doc = false
+
+[workspace]
