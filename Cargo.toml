@@ -6,8 +6,22 @@ rust-version = "1.92.0"
 description = "Next-generation embedded OLAP query engine with memory safety"
 license = "MIT"
 repository = "https://github.com/blaze-db/blaze"
+readme = "README.md"
+documentation = "https://docs.rs/blaze"
+homepage = "https://github.com/blaze-db/blaze"
+authors = ["Blaze Contributors"]
 keywords = ["database", "olap", "query-engine", "analytics", "arrow"]
 categories = ["database", "data-structures"]
+exclude = [
+    "benches/",
+    "tests/",
+    "data/",
+    "fuzz/",
+    "scripts/",
+    "website/",
+    ".github/",
+    "target/",
+]
 
 [lib]
 name = "blaze"
