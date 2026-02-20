@@ -180,7 +180,14 @@ src/
 │
 ├── executor/               # Query Execution
 │   ├── mod.rs              # ExecutionContext
-│   └── operators.rs        # Physical operator implementations
+│   └── operators/          # Physical operator implementations
+│       ├── mod.rs           # Operator exports
+│       ├── aggregate.rs     # Hash aggregate operator
+│       ├── cross_join.rs    # Cross join operator
+│       ├── hash_join.rs     # Hash join operator
+│       ├── memory.rs        # In-memory operators
+│       ├── sort.rs          # Sort operator
+│       └── window.rs        # Window function operator
 │
 ├── catalog/                # Metadata Management
 │   ├── mod.rs              # CatalogList, Catalog, Schema
@@ -570,7 +577,7 @@ classDiagram
 
 Runs physical plans to produce results.
 
-**Location**: `src/executor/mod.rs`, `src/executor/operators.rs`
+**Location**: `src/executor/mod.rs`, `src/executor/operators/`
 
 ```mermaid
 flowchart TB
@@ -858,6 +865,45 @@ BlazeError::not_implemented("LATERAL JOIN")
 > **Dependency note**: Enabling `--features flight` compiles both `src/flight.rs` and
 > `src/distributed.rs`. The distributed module provides query partitioning and
 > coordination that the Flight server uses for remote execution.
+
+#### Federated Queries (`src/federation.rs`) 🚧 Preview
+- Query external data sources (HTTP/REST, files, custom providers) through a unified SQL interface
+- External tables are registered with the catalog and queried transparently
+- Supports multiple data formats (JSON, CSV, Parquet) from remote endpoints
+- **Feature flag**: `federation`
+
+#### Natural Language Queries (`src/nlq/`) 🚧 Preview
+- Translates plain-English questions into SQL queries
+- Schema-aware query generation using registered table metadata
+- Intended for interactive exploration and ad-hoc analytics
+- **Feature flag**: `nlq`
+
+#### SIMD Optimization (`src/simd/`) ⚠️ Experimental
+- SIMD (Single Instruction Multiple Data) vectorization for batch operations
+- Optional JIT compilation for high-performance expression evaluation
+- Accelerates filter, arithmetic, and comparison operations on columnar data
+- **Feature flag**: `simd`
+
+#### Streaming Execution (`src/streaming.rs`) ⚠️ Experimental
+- Async streaming query execution producing record batches on demand
+- Backpressure support so consumers control the pace of data production
+- Memory-efficient lazy evaluation — only active batches are held in memory
+- Full async/await integration for non-blocking execution
+- **Feature flag**: `streaming`
+
+#### Time-Series Extensions (`src/timeseries.rs`) ⚠️ Experimental
+- Specialized time-series functions: `TIME_BUCKET`, `GAP_FILL`, `MOVING_AVG`, `MOVING_SUM`
+- Timestamp truncation, bucketing, and interval arithmetic
+- Designed for temporal analytics workloads (IoT, observability, financial data)
+- **Feature flag**: `timeseries`
+
+#### Learned Optimizer (`src/learned_optimizer.rs`) 🚧 Preview
+- AI-powered query optimization using lightweight gradient-based learning
+- Workload collector records query plans, execution times, and cardinality errors
+- Learned cardinality model predicts row counts from historical data
+- Adaptive strategy selection for join algorithms and parallelism
+- No external ML library dependency — learns from observed vs estimated cardinalities
+- **Feature flag**: `learned-optimizer`
 
 ### Stable Extensions
 
