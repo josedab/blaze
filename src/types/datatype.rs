@@ -8,6 +8,7 @@ use arrow::datatypes::DataType as ArrowDataType;
 use crate::error::{BlazeError, Result};
 
 /// SQL data types supported by Blaze.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
     /// Null type (unknown type)
@@ -600,6 +601,262 @@ mod tests {
             let arrow_type = dtype.to_arrow();
             let back = DataType::from_arrow(&arrow_type).unwrap();
             assert_eq!(dtype, back);
+        }
+    }
+
+    // --- SQL type parsing tests ---
+
+    #[test]
+    fn test_from_sql_type_boolean() {
+        assert_eq!(DataType::from_sql_type("BOOL"), DataType::Boolean);
+        assert_eq!(DataType::from_sql_type("BOOLEAN"), DataType::Boolean);
+        assert_eq!(DataType::from_sql_type("bool"), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_from_sql_type_integers() {
+        assert_eq!(DataType::from_sql_type("TINYINT"), DataType::Int8);
+        assert_eq!(DataType::from_sql_type("INT1"), DataType::Int8);
+        assert_eq!(DataType::from_sql_type("SMALLINT"), DataType::Int16);
+        assert_eq!(DataType::from_sql_type("INT2"), DataType::Int16);
+        assert_eq!(DataType::from_sql_type("INT"), DataType::Int32);
+        assert_eq!(DataType::from_sql_type("INTEGER"), DataType::Int32);
+        assert_eq!(DataType::from_sql_type("INT4"), DataType::Int32);
+        assert_eq!(DataType::from_sql_type("BIGINT"), DataType::Int64);
+        assert_eq!(DataType::from_sql_type("INT8"), DataType::Int64);
+        assert_eq!(DataType::from_sql_type("LONG"), DataType::Int64);
+    }
+
+    #[test]
+    fn test_from_sql_type_unsigned() {
+        assert_eq!(DataType::from_sql_type("UTINYINT"), DataType::UInt8);
+        assert_eq!(DataType::from_sql_type("USMALLINT"), DataType::UInt16);
+        assert_eq!(DataType::from_sql_type("UINT"), DataType::UInt32);
+        assert_eq!(DataType::from_sql_type("UBIGINT"), DataType::UInt64);
+    }
+
+    #[test]
+    fn test_from_sql_type_floating() {
+        assert_eq!(DataType::from_sql_type("REAL"), DataType::Float32);
+        assert_eq!(DataType::from_sql_type("FLOAT"), DataType::Float32);
+        assert_eq!(DataType::from_sql_type("FLOAT4"), DataType::Float32);
+        assert_eq!(DataType::from_sql_type("DOUBLE"), DataType::Float64);
+        assert_eq!(DataType::from_sql_type("FLOAT8"), DataType::Float64);
+        assert_eq!(DataType::from_sql_type("DOUBLE PRECISION"), DataType::Float64);
+    }
+
+    #[test]
+    fn test_from_sql_type_string_variants() {
+        assert_eq!(DataType::from_sql_type("VARCHAR"), DataType::Utf8);
+        assert_eq!(DataType::from_sql_type("VARCHAR(255)"), DataType::Utf8);
+        assert_eq!(DataType::from_sql_type("CHAR(10)"), DataType::Utf8);
+        assert_eq!(DataType::from_sql_type("TEXT"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_from_sql_type_decimal() {
+        assert_eq!(
+            DataType::from_sql_type("DECIMAL(10,2)"),
+            DataType::Decimal128 { precision: 10, scale: 2 }
+        );
+        assert_eq!(
+            DataType::from_sql_type("DECIMAL(18)"),
+            DataType::Decimal128 { precision: 18, scale: 0 }
+        );
+        assert_eq!(
+            DataType::from_sql_type("NUMERIC(5,3)"),
+            DataType::Decimal128 { precision: 5, scale: 3 }
+        );
+        // Without params
+        assert_eq!(
+            DataType::from_sql_type("DECIMAL"),
+            DataType::Decimal128 { precision: 38, scale: 0 }
+        );
+    }
+
+    #[test]
+    fn test_from_sql_type_timestamp() {
+        let ts = DataType::from_sql_type("TIMESTAMP");
+        assert!(matches!(ts, DataType::Timestamp { timezone: None, .. }));
+
+        let ts_tz = DataType::from_sql_type("TIMESTAMP WITH TIME ZONE");
+        assert!(matches!(ts_tz, DataType::Timestamp { timezone: Some(_), .. }));
+
+        let ts_tz2 = DataType::from_sql_type("TIMESTAMPTZ");
+        assert!(matches!(ts_tz2, DataType::Timestamp { timezone: Some(_), .. }));
+    }
+
+    #[test]
+    fn test_from_sql_type_date_time() {
+        assert_eq!(DataType::from_sql_type("DATE"), DataType::Date32);
+        assert_eq!(DataType::from_sql_type("TIME"), DataType::Time64Microsecond);
+        assert_eq!(DataType::from_sql_type("INTERVAL"), DataType::IntervalDayTime);
+    }
+
+    #[test]
+    fn test_from_sql_type_binary() {
+        assert_eq!(DataType::from_sql_type("BLOB"), DataType::Binary);
+        assert_eq!(DataType::from_sql_type("BYTEA"), DataType::Binary);
+        assert_eq!(DataType::from_sql_type("BINARY"), DataType::Binary);
+        assert_eq!(DataType::from_sql_type("VARBINARY"), DataType::Binary);
+    }
+
+    #[test]
+    fn test_from_sql_type_json() {
+        assert_eq!(DataType::from_sql_type("JSON"), DataType::Json);
+        assert_eq!(DataType::from_sql_type("JSONB"), DataType::Json);
+    }
+
+    #[test]
+    fn test_from_sql_type_vector() {
+        assert_eq!(
+            DataType::from_sql_type("VECTOR(128)"),
+            DataType::Vector { dimension: 128 }
+        );
+        assert_eq!(
+            DataType::from_sql_type("VECTOR(384)"),
+            DataType::Vector { dimension: 384 }
+        );
+        // Without dimension
+        assert_eq!(
+            DataType::from_sql_type("VECTOR"),
+            DataType::Vector { dimension: 128 }
+        );
+    }
+
+    #[test]
+    fn test_from_sql_type_unknown_defaults_to_utf8() {
+        assert_eq!(DataType::from_sql_type("UNKNOWN_TYPE"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_from_sql_type_case_insensitive() {
+        assert_eq!(DataType::from_sql_type("int"), DataType::Int32);
+        assert_eq!(DataType::from_sql_type("bigint"), DataType::Int64);
+        assert_eq!(DataType::from_sql_type("Boolean"), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_from_sql_type_whitespace() {
+        assert_eq!(DataType::from_sql_type("  INT  "), DataType::Int32);
+    }
+
+    // --- Type predicate edge cases ---
+
+    #[test]
+    fn test_is_numeric_decimal() {
+        assert!(DataType::Decimal128 { precision: 10, scale: 2 }.is_numeric());
+    }
+
+    #[test]
+    fn test_is_temporal_all_variants() {
+        assert!(DataType::Date32.is_temporal());
+        assert!(DataType::Date64.is_temporal());
+        assert!(DataType::Time32Second.is_temporal());
+        assert!(DataType::Time32Millisecond.is_temporal());
+        assert!(DataType::Time64Microsecond.is_temporal());
+        assert!(DataType::Time64Nanosecond.is_temporal());
+        assert!(DataType::Timestamp { unit: TimeUnit::Second, timezone: None }.is_temporal());
+        assert!(DataType::Duration { unit: TimeUnit::Millisecond }.is_temporal());
+        assert!(DataType::IntervalYearMonth.is_temporal());
+        assert!(DataType::IntervalDayTime.is_temporal());
+        assert!(DataType::IntervalMonthDayNano.is_temporal());
+    }
+
+    #[test]
+    fn test_is_nested() {
+        assert!(DataType::List(Box::new(DataType::Int32)).is_nested());
+        assert!(DataType::Struct(vec![("a".to_string(), DataType::Int32)]).is_nested());
+        assert!(DataType::Map { key_type: Box::new(DataType::Utf8), value_type: Box::new(DataType::Int32) }.is_nested());
+        assert!(!DataType::Int32.is_nested());
+    }
+
+    #[test]
+    fn test_is_json() {
+        assert!(DataType::Json.is_json());
+        assert!(!DataType::Utf8.is_json());
+    }
+
+    #[test]
+    fn test_is_vector() {
+        assert!(DataType::Vector { dimension: 128 }.is_vector());
+        assert!(!DataType::Float32.is_vector());
+    }
+
+    #[test]
+    fn test_is_binary() {
+        assert!(DataType::Binary.is_binary());
+        assert!(DataType::LargeBinary.is_binary());
+        assert!(!DataType::Utf8.is_binary());
+    }
+
+    #[test]
+    fn test_is_string() {
+        assert!(DataType::Utf8.is_string());
+        assert!(DataType::LargeUtf8.is_string());
+        assert!(!DataType::Int32.is_string());
+    }
+
+    // --- Default value tests ---
+
+    #[test]
+    fn test_default_values() {
+        assert_eq!(DataType::Boolean.default_value(), "false");
+        assert_eq!(DataType::Int32.default_value(), "0");
+        assert_eq!(DataType::Utf8.default_value(), "''");
+        assert_eq!(DataType::Date32.default_value(), "NULL");
+    }
+
+    // --- Display tests ---
+
+    #[test]
+    fn test_datatype_display() {
+        assert_eq!(format!("{}", DataType::Int32), "INTEGER");
+        assert_eq!(format!("{}", DataType::Int64), "BIGINT");
+        assert_eq!(format!("{}", DataType::Float64), "DOUBLE");
+        assert_eq!(format!("{}", DataType::Utf8), "VARCHAR");
+        assert_eq!(format!("{}", DataType::Boolean), "BOOLEAN");
+        assert_eq!(format!("{}", DataType::Json), "JSON");
+        assert_eq!(format!("{}", DataType::Vector { dimension: 128 }), "VECTOR(128)");
+        assert_eq!(
+            format!("{}", DataType::Decimal128 { precision: 10, scale: 2 }),
+            "DECIMAL(10, 2)"
+        );
+    }
+
+    // --- Arrow roundtrip for more types ---
+
+    #[test]
+    fn test_arrow_roundtrip_extended() {
+        let types = vec![
+            DataType::Null,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Binary,
+            DataType::LargeUtf8,
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Decimal128 { precision: 10, scale: 2 },
+        ];
+
+        for dtype in types {
+            let arrow_type = dtype.to_arrow();
+            let back = DataType::from_arrow(&arrow_type).unwrap();
+            assert_eq!(dtype, back, "Roundtrip failed for {:?}", dtype);
+        }
+    }
+
+    #[test]
+    fn test_time_unit_roundtrip() {
+        for unit in [TimeUnit::Second, TimeUnit::Millisecond, TimeUnit::Microsecond, TimeUnit::Nanosecond] {
+            let arrow_unit = unit.to_arrow();
+            let back = TimeUnit::from_arrow(arrow_unit);
+            assert_eq!(unit, back);
         }
     }
 }

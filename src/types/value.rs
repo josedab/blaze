@@ -841,4 +841,297 @@ mod tests {
         let v = ScalarValue::Utf8(Some("hello".into()));
         assert_eq!(v.try_as_string().unwrap(), Some("hello".to_string()));
     }
+
+    // --- NULL propagation tests ---
+
+    #[test]
+    fn test_null_of_type() {
+        let null_int = ScalarValue::null_of_type(&DataType::Int64);
+        assert!(null_int.is_null());
+        assert_eq!(null_int.data_type(), DataType::Int64);
+
+        let null_str = ScalarValue::null_of_type(&DataType::Utf8);
+        assert!(null_str.is_null());
+        assert_eq!(null_str.data_type(), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_null_of_type_all_variants() {
+        let types = vec![
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::Binary,
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Json,
+        ];
+        for dt in types {
+            let null_val = ScalarValue::null_of_type(&dt);
+            assert!(null_val.is_null(), "null_of_type({:?}) should be null", dt);
+        }
+    }
+
+    #[test]
+    fn test_is_null_all_none_variants() {
+        assert!(ScalarValue::Boolean(None).is_null());
+        assert!(ScalarValue::Int8(None).is_null());
+        assert!(ScalarValue::Int16(None).is_null());
+        assert!(ScalarValue::Int32(None).is_null());
+        assert!(ScalarValue::Int64(None).is_null());
+        assert!(ScalarValue::UInt8(None).is_null());
+        assert!(ScalarValue::UInt16(None).is_null());
+        assert!(ScalarValue::UInt32(None).is_null());
+        assert!(ScalarValue::UInt64(None).is_null());
+        assert!(ScalarValue::Float32(None).is_null());
+        assert!(ScalarValue::Float64(None).is_null());
+        assert!(ScalarValue::Utf8(None).is_null());
+        assert!(ScalarValue::Binary(None).is_null());
+        assert!(ScalarValue::Date32(None).is_null());
+        assert!(ScalarValue::Date64(None).is_null());
+        assert!(ScalarValue::Json(None).is_null());
+        assert!(ScalarValue::Vector(None, 128).is_null());
+    }
+
+    // --- Type conversion edge cases ---
+
+    #[test]
+    fn test_try_as_i64_from_various_types() {
+        assert_eq!(ScalarValue::Int8(Some(42)).try_as_i64().unwrap(), Some(42));
+        assert_eq!(ScalarValue::Int16(Some(1000)).try_as_i64().unwrap(), Some(1000));
+        assert_eq!(ScalarValue::Int32(Some(100_000)).try_as_i64().unwrap(), Some(100_000));
+        assert_eq!(ScalarValue::UInt8(Some(255)).try_as_i64().unwrap(), Some(255));
+        assert_eq!(ScalarValue::UInt32(Some(4_000_000_000)).try_as_i64().unwrap(), Some(4_000_000_000));
+    }
+
+    #[test]
+    fn test_try_as_i64_null_values() {
+        assert_eq!(ScalarValue::Int64(None).try_as_i64().unwrap(), None);
+        assert_eq!(ScalarValue::Int32(None).try_as_i64().unwrap(), None);
+    }
+
+    #[test]
+    fn test_try_as_i64_uint64_overflow() {
+        let big_val = ScalarValue::UInt64(Some(u64::MAX));
+        let result = big_val.try_as_i64();
+        assert!(result.is_err(), "UInt64 max should not fit in i64");
+    }
+
+    #[test]
+    fn test_try_as_i64_wrong_type() {
+        let result = ScalarValue::Utf8(Some("hello".into())).try_as_i64();
+        assert!(result.is_err(), "String should not convert to i64");
+    }
+
+    #[test]
+    fn test_try_as_f64_from_integers() {
+        assert_eq!(ScalarValue::Int32(Some(42)).try_as_f64().unwrap(), Some(42.0));
+        assert_eq!(ScalarValue::Int64(Some(100)).try_as_f64().unwrap(), Some(100.0));
+        assert_eq!(ScalarValue::UInt64(Some(999)).try_as_f64().unwrap(), Some(999.0));
+    }
+
+    #[test]
+    fn test_try_as_f64_wrong_type() {
+        let result = ScalarValue::Utf8(Some("not a number".into())).try_as_f64();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_try_as_string_wrong_type() {
+        let result = ScalarValue::Int64(Some(42)).try_as_string();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_try_as_bool() {
+        assert_eq!(ScalarValue::Boolean(Some(true)).try_as_bool().unwrap(), Some(true));
+        assert_eq!(ScalarValue::Boolean(Some(false)).try_as_bool().unwrap(), Some(false));
+        assert_eq!(ScalarValue::Boolean(None).try_as_bool().unwrap(), None);
+        assert!(ScalarValue::Int32(Some(1)).try_as_bool().is_err());
+    }
+
+    // --- NaN handling ---
+
+    #[test]
+    fn test_float_nan_display() {
+        let nan = ScalarValue::Float64(Some(f64::NAN));
+        let display = format!("{}", nan);
+        assert!(display.contains("NaN"), "NaN should display as NaN: {}", display);
+    }
+
+    #[test]
+    fn test_float_infinity() {
+        let inf = ScalarValue::Float64(Some(f64::INFINITY));
+        let display = format!("{}", inf);
+        assert!(display.contains("inf"), "Infinity should display: {}", display);
+    }
+
+    #[test]
+    fn test_float_nan_is_not_null() {
+        let nan = ScalarValue::Float64(Some(f64::NAN));
+        assert!(!nan.is_null(), "NaN should not be considered null");
+    }
+
+    // --- Boundary value tests ---
+
+    #[test]
+    fn test_int64_boundary_values() {
+        let max = ScalarValue::Int64(Some(i64::MAX));
+        assert_eq!(max.try_as_i64().unwrap(), Some(i64::MAX));
+
+        let min = ScalarValue::Int64(Some(i64::MIN));
+        assert_eq!(min.try_as_i64().unwrap(), Some(i64::MIN));
+    }
+
+    #[test]
+    fn test_uint64_boundary_values() {
+        let max = ScalarValue::UInt64(Some(u64::MAX));
+        assert!(!max.is_null());
+        // u64::MAX cannot fit in i64
+        assert!(max.try_as_i64().is_err());
+        // But it can convert to f64 (with precision loss)
+        assert!(max.try_as_f64().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_float64_special_values() {
+        let zero = ScalarValue::Float64(Some(0.0));
+        assert_eq!(zero.try_as_f64().unwrap(), Some(0.0));
+
+        let neg_zero = ScalarValue::Float64(Some(-0.0));
+        assert_eq!(neg_zero.try_as_f64().unwrap(), Some(-0.0));
+    }
+
+    // --- From trait conversions ---
+
+    #[test]
+    fn test_from_bool() {
+        let v: ScalarValue = true.into();
+        assert_eq!(v.try_as_bool().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn test_from_i32() {
+        let v: ScalarValue = 42i32.into();
+        assert_eq!(v.data_type(), DataType::Int32);
+    }
+
+    #[test]
+    fn test_from_i64() {
+        let v: ScalarValue = 42i64.into();
+        assert_eq!(v.data_type(), DataType::Int64);
+    }
+
+    #[test]
+    fn test_from_f64() {
+        let v: ScalarValue = 3.14f64.into();
+        assert_eq!(v.data_type(), DataType::Float64);
+    }
+
+    #[test]
+    fn test_from_str() {
+        let v: ScalarValue = "hello".into();
+        assert_eq!(v.try_as_string().unwrap(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_from_string() {
+        let v: ScalarValue = String::from("world").into();
+        assert_eq!(v.try_as_string().unwrap(), Some("world".to_string()));
+    }
+
+    #[test]
+    fn test_from_option_string() {
+        let v: ScalarValue = Some("val".to_string()).into();
+        assert!(!v.is_null());
+
+        let v2: ScalarValue = (None as Option<String>).into();
+        assert!(v2.is_null());
+    }
+
+    // --- to_array tests ---
+
+    #[test]
+    fn test_to_array_single() {
+        let v = ScalarValue::Int64(Some(42));
+        let arr = v.to_array().unwrap();
+        assert_eq!(arr.len(), 1);
+    }
+
+    #[test]
+    fn test_to_array_of_size() {
+        let v = ScalarValue::Int64(Some(42));
+        let arr = v.to_array_of_size(5).unwrap();
+        assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn test_to_array_null() {
+        let v = ScalarValue::Int64(None);
+        let arr = v.to_array_of_size(3).unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.null_count(), 3);
+    }
+
+    // --- Display edge cases ---
+
+    #[test]
+    fn test_display_null_variants() {
+        assert_eq!(format!("{}", ScalarValue::Int32(None)), "NULL");
+        assert_eq!(format!("{}", ScalarValue::Float64(None)), "NULL");
+        assert_eq!(format!("{}", ScalarValue::Utf8(None)), "NULL");
+        assert_eq!(format!("{}", ScalarValue::Boolean(None)), "NULL");
+        assert_eq!(format!("{}", ScalarValue::Date32(None)), "NULL");
+    }
+
+    #[test]
+    fn test_display_list() {
+        let v = ScalarValue::List(
+            Some(vec![ScalarValue::Int32(Some(1)), ScalarValue::Int32(Some(2))]),
+            Box::new(DataType::Int32),
+        );
+        let display = format!("{}", v);
+        assert!(display.contains("1"));
+        assert!(display.contains("2"));
+    }
+
+    #[test]
+    fn test_display_empty_string() {
+        let v = ScalarValue::Utf8(Some("".to_string()));
+        assert_eq!(format!("{}", v), "''");
+    }
+
+    // --- Data type inference ---
+
+    #[test]
+    fn test_data_type_all_variants() {
+        assert_eq!(ScalarValue::Null.data_type(), DataType::Null);
+        assert_eq!(ScalarValue::Boolean(Some(true)).data_type(), DataType::Boolean);
+        assert_eq!(ScalarValue::Int8(Some(1)).data_type(), DataType::Int8);
+        assert_eq!(ScalarValue::Int16(Some(1)).data_type(), DataType::Int16);
+        assert_eq!(ScalarValue::Int32(Some(1)).data_type(), DataType::Int32);
+        assert_eq!(ScalarValue::Int64(Some(1)).data_type(), DataType::Int64);
+        assert_eq!(ScalarValue::UInt8(Some(1)).data_type(), DataType::UInt8);
+        assert_eq!(ScalarValue::UInt16(Some(1)).data_type(), DataType::UInt16);
+        assert_eq!(ScalarValue::UInt32(Some(1)).data_type(), DataType::UInt32);
+        assert_eq!(ScalarValue::UInt64(Some(1)).data_type(), DataType::UInt64);
+        assert_eq!(ScalarValue::Float32(Some(1.0)).data_type(), DataType::Float32);
+        assert_eq!(ScalarValue::Float64(Some(1.0)).data_type(), DataType::Float64);
+        assert_eq!(ScalarValue::Utf8(Some("a".into())).data_type(), DataType::Utf8);
+        assert_eq!(ScalarValue::LargeUtf8(Some("a".into())).data_type(), DataType::LargeUtf8);
+        assert_eq!(ScalarValue::Binary(Some(vec![1])).data_type(), DataType::Binary);
+        assert_eq!(ScalarValue::Date32(Some(0)).data_type(), DataType::Date32);
+        assert_eq!(ScalarValue::Date64(Some(0)).data_type(), DataType::Date64);
+        assert_eq!(ScalarValue::Json(Some("{}".into())).data_type(), DataType::Json);
+    }
 }
