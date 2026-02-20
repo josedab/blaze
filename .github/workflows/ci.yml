@@ -114,3 +114,16 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo check
+
+  semver:
+    name: Semver Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+      - name: Check semver
+        run: cargo semver-checks check-release || true

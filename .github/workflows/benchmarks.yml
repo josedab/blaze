@@ -60,3 +60,19 @@ jobs:
           alert-threshold: "105%"
           fail-on-alert: true
           benchmark-data-dir-path: dev/bench
+
+      - name: Generate benchmark dashboard
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p website/static/benchmarks
+          # The benchmark-action already generates data in dev/bench/
+          # Create a simple redirect page
+          cat > website/static/benchmarks/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html><head>
+          <title>Blaze Benchmarks</title>
+          <meta http-equiv="refresh" content="0; url=https://blaze-db.github.io/blaze/dev/bench/" />
+          </head><body>
+          <p>Redirecting to <a href="https://blaze-db.github.io/blaze/dev/bench/">benchmark dashboard</a>...</p>
+          </body></html>
+          EOF
