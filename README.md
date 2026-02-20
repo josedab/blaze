@@ -64,11 +64,26 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 
 ## Quick Start
 
+### As a Library
+
+Add Blaze to your project:
+
+```bash
+cargo add blaze
+```
+
+Or add it manually to your `Cargo.toml`:
+
+```toml
+[dependencies]
+blaze = "0.1"
+```
+
 ### Prerequisites
 
 - **Rust 1.92.0+** — Install via [rustup](https://rustup.rs/)
 - First build takes ~4-5 minutes (debug), ~10s incremental rebuilds; ~4-6min (release)
-- Tests run in ~0.3s (900+ tests)
+- Tests run in ~0.2s (900+ tests)
 
 #### Minimum Supported Rust Version (MSRV)
 
@@ -115,6 +130,11 @@ fn main() -> Result<()> {
 }
 ```
 
+Expected output (varies with data):
+```text
+Got 5 rows
+```
+
 ### Registering Arrow Data
 
 You can also register Arrow RecordBatches directly:
@@ -153,6 +173,16 @@ fn main() -> Result<()> {
 }
 ```
 
+Expected output: The `results` vector contains one `RecordBatch` with rows where `id > 1`:
+```text
++----+---------+
+| id | name    |
++----+---------+
+|  2 | Bob     |
+|  3 | Charlie |
++----+---------+
+```
+
 ### In-Memory Tables with DDL
 
 For dynamic table creation and modification, use in-memory tables:
@@ -175,6 +205,15 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+```
+
+Expected output:
+```text
++----+-------+--------+
+| id | name  | active |
++----+-------+--------+
+|  1 | Alice | true   |
++----+-------+--------+
 ```
 
 > **Note**: `INSERT`, `UPDATE`, and `DELETE` statements only work with in-memory tables created via `CREATE TABLE`. For CSV/Parquet files, data is read-only.
@@ -204,6 +243,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+Expected output: `results1` contains the row where `id = 1`, `results2` contains the row where `id = 2` (if they exist). Prepared statements re-use the same compiled plan across invocations.
 
 ## CLI Usage
 
@@ -473,7 +514,7 @@ Decimal types are not yet supported as join keys.
 
 ### Performance Notes
 
-- Filter pushdown is implemented for in-memory tables; CSV/Parquet apply filters post-scan
+- Filter pushdown is implemented for in-memory tables, CSV files, and Parquet files
 - Table statistics include row counts, byte sizes, and null counts per column
 - Memory limits are enforced when configured via `ConnectionConfig::with_memory_limit()`
 
