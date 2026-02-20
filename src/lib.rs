@@ -297,6 +297,7 @@ impl Connection {
     ///
     /// let conn = Connection::in_memory().unwrap();
     /// ```
+    #[must_use = "connection creation may fail; handle the Result"]
     pub fn in_memory() -> Result<Self> {
         let catalog_list = Arc::new(CatalogList::default());
         Ok(Self {
@@ -312,6 +313,7 @@ impl Connection {
     }
 
     /// Create a connection with custom configuration.
+    #[must_use = "connection creation may fail; handle the Result"]
     pub fn with_config(config: ConnectionConfig) -> Result<Self> {
         let catalog_list = Arc::new(CatalogList::default());
         let mut ctx = ExecutionContext::new()
@@ -342,6 +344,7 @@ impl Connection {
     /// let conn = Connection::in_memory().unwrap();
     /// let results = conn.query("SELECT 1 + 1").unwrap();
     /// ```
+    #[must_use = "query results should not be silently discarded"]
     pub fn query(&self, sql: &str) -> Result<Vec<RecordBatch>> {
         // Parse SQL
         let statements = Parser::parse(sql)?;
@@ -378,6 +381,7 @@ impl Connection {
     /// let conn = Connection::in_memory().unwrap();
     /// conn.execute("CREATE TABLE users (id INT, name VARCHAR)").unwrap();
     /// ```
+    #[must_use = "execute may fail; handle the Result to detect errors"]
     pub fn execute(&self, sql: &str) -> Result<usize> {
         // Parse SQL
         let statements = Parser::parse(sql)?;
@@ -1084,6 +1088,7 @@ impl Connection {
     /// let conn = Connection::in_memory().unwrap();
     /// conn.register_csv("sales", "data/sales.csv").unwrap();
     /// ```
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_csv(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
         let safe_path = validate_path(path.as_ref())?;
         let table = CsvTable::open(safe_path)?;
@@ -1091,6 +1096,7 @@ impl Connection {
     }
 
     /// Register a CSV file with custom options.
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_csv_with_options(
         &self,
         name: &str,
@@ -1112,6 +1118,7 @@ impl Connection {
     /// let conn = Connection::in_memory().unwrap();
     /// conn.register_parquet("customers", "data/customers.parquet").unwrap();
     /// ```
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_parquet(&self, name: &str, path: impl AsRef<Path>) -> Result<()> {
         let safe_path = validate_path(path.as_ref())?;
         let table = ParquetTable::open(safe_path)?;
@@ -1119,6 +1126,7 @@ impl Connection {
     }
 
     /// Register a Parquet file with custom options.
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_parquet_with_options(
         &self,
         name: &str,
@@ -1142,6 +1150,7 @@ impl Connection {
     /// // Assuming `batches` is a Vec<RecordBatch>
     /// // conn.register_batches("my_table", batches).unwrap();
     /// ```
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_batches(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
         if batches.is_empty() {
             return Err(BlazeError::invalid_argument(
@@ -1155,6 +1164,7 @@ impl Connection {
     }
 
     /// Register a custom table provider in the default schema.
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_table(&self, name: &str, table: Arc<dyn TableProvider>) -> Result<()> {
         // Validate table name
         if name.is_empty() {
@@ -1179,6 +1189,7 @@ impl Connection {
     }
 
     /// Deregister a table from the default schema.
+    #[must_use = "deregistration may fail; handle the Result"]
     pub fn deregister_table(&self, name: &str) -> Result<()> {
         let catalog = self
             .catalog_list
@@ -1240,6 +1251,7 @@ impl Connection {
     /// let results1 = stmt.execute(&[ScalarValue::Int64(Some(1))]).unwrap();
     /// let results2 = stmt.execute(&[ScalarValue::Int64(Some(2))]).unwrap();
     /// ```
+    #[must_use = "prepare may fail; handle the Result"]
     pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
         // Parse SQL
         let statements = Parser::parse(sql)?;
@@ -1285,6 +1297,7 @@ impl Connection {
     /// // Second call reuses the cached plan
     /// let stmt2 = conn.prepare_cached("SELECT $1 + $2", &cache).unwrap();
     /// ```
+    #[must_use = "prepare may fail; handle the Result"]
     pub fn prepare_cached(
         &self,
         sql: &str,
@@ -1348,6 +1361,7 @@ impl Connection {
     /// );
     /// conn.register_udf(double_fn).unwrap();
     /// ```
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_udf(&self, udf: udf::ScalarUdf) -> Result<()> {
         self.udf_registry.register_scalar(udf)
     }
@@ -1372,6 +1386,7 @@ impl Connection {
     /// let conn = Connection::open("/tmp/my_blaze_db").unwrap();
     /// conn.execute("CREATE TABLE users (id INT, name VARCHAR)").unwrap();
     /// ```
+    #[must_use = "opening a database may fail; handle the Result"]
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
@@ -1429,6 +1444,7 @@ impl Connection {
     ///
     /// This collects row count, null counts, and byte sizes for each column
     /// in the table. The statistics are computed by scanning the table data.
+    #[must_use = "analyze may fail; handle the Result"]
     pub fn analyze_table(&self, table_name: &str) -> Result<optimizer::TableStatistics> {
         let catalog = self
             .catalog_list
@@ -1500,6 +1516,7 @@ impl Connection {
     /// Register an external file as a federated table.
     ///
     /// Supported formats: CSV, Parquet, JSON (auto-detected from extension).
+    #[must_use = "registration may fail; handle the Result"]
     pub fn register_external_file(&self, name: &str, path: &str) -> Result<()> {
         let ext = std::path::Path::new(path)
             .extension()
@@ -1523,6 +1540,7 @@ impl Connection {
     ///
     /// The callback is invoked once for each batch in the result set,
     /// avoiding materializing all results in memory at once.
+    #[must_use = "query may fail; handle the Result"]
     pub fn query_foreach<F>(&self, sql: &str, mut callback: F) -> Result<usize>
     where
         F: FnMut(&RecordBatch) -> Result<()>,
@@ -1537,6 +1555,7 @@ impl Connection {
     }
 
     /// Execute a query and return at most `limit` rows.
+    #[must_use = "query may fail; handle the Result"]
     pub fn query_with_limit(&self, sql: &str, limit: usize) -> Result<Vec<RecordBatch>> {
         let results = self.query(sql)?;
         let mut limited = Vec::new();
@@ -1565,16 +1584,19 @@ impl Connection {
     ///
     /// Returns a transaction ID that can be used with `commit_transaction`
     /// or `rollback_transaction`.
+    #[must_use = "transaction may fail; handle the Result"]
     pub fn begin_transaction(&self) -> Result<transaction::TxnId> {
         self.transaction_manager.begin()
     }
 
     /// Commit a transaction, making its writes visible to subsequent transactions.
+    #[must_use = "commit may fail; handle the Result"]
     pub fn commit_transaction(&self, txn_id: transaction::TxnId) -> Result<()> {
         self.transaction_manager.commit(txn_id)
     }
 
     /// Roll back a transaction, discarding all its writes.
+    #[must_use = "rollback may fail; handle the Result"]
     pub fn rollback_transaction(&self, txn_id: transaction::TxnId) -> Result<()> {
         self.transaction_manager.abort(txn_id)
     }
