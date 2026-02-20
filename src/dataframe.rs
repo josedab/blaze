@@ -34,6 +34,7 @@ use crate::types::Schema;
 use crate::Connection;
 
 /// Join type for DataFrame operations.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub enum JoinType {
     Inner,

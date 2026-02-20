@@ -9,6 +9,7 @@ use strsim::jaro_winkler;
 use thiserror::Error;
 
 /// The primary error type for Blaze operations.
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum BlazeError {
     /// SQL parsing error
