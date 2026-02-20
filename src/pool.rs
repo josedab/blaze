@@ -43,31 +43,41 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
+    /// Create a new `PoolConfig` with default settings.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the maximum number of connections in the pool.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `size` is 0.
     pub fn with_max_size(mut self, size: usize) -> Self {
         assert!(size > 0, "Pool size must be at least 1");
         self.max_size = size;
         self
     }
 
+    /// Set the minimum number of idle connections to maintain.
     pub fn with_min_idle(mut self, min: usize) -> Self {
         self.min_idle = min;
         self
     }
 
+    /// Set the maximum idle time before a connection is closed.
     pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = timeout;
         self
     }
 
+    /// Set the maximum time to wait when acquiring a connection.
     pub fn with_acquire_timeout(mut self, timeout: Duration) -> Self {
         self.acquire_timeout = timeout;
         self
     }
 
+    /// Set the connection configuration used when creating new connections.
     pub fn with_connection_config(mut self, config: ConnectionConfig) -> Self {
         self.connection_config = config;
         self
@@ -133,6 +143,8 @@ pub struct ConnectionPool {
 }
 
 /// Statistics about the connection pool.
+///
+/// Tracks connection creation, acquisition, release, and timeout counts.
 #[derive(Debug, Clone, Default)]
 pub struct PoolStats {
     /// Total connections created
@@ -432,15 +444,27 @@ impl<'a> std::ops::Deref for PoolGuard<'a> {
 
 /// Async-first connection pool wrapper for Tokio workloads.
 ///
-/// Wraps `ConnectionPool` for use in async contexts with proper
+/// Wraps [`ConnectionPool`] for use in async contexts with proper
 /// Tokio semaphore-based concurrency control.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use blaze::pool::{AsyncConnectionPool, PoolConfig};
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let pool = AsyncConnectionPool::new(PoolConfig::default()).unwrap();
+///     let result = pool.query("SELECT 1 + 1").await.unwrap();
+/// }
+/// ```
 pub struct AsyncConnectionPool {
     inner: Arc<ConnectionPool>,
     semaphore: Arc<Semaphore>,
 }
 
 impl AsyncConnectionPool {
-    /// Create a new async pool.
+    /// Create a new async pool with the given configuration.
     pub fn new(config: PoolConfig) -> Result<Self> {
         let max_size = config.max_size;
         let pool = ConnectionPool::new(config)?;
@@ -483,13 +507,15 @@ impl AsyncConnectionPool {
         self.inner.stats()
     }
 
-    /// Get available permits (connections that can be acquired).
+    /// Get the number of available semaphore permits (connections that can be acquired).
     pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
     }
 }
 
 /// RAII guard for async pool connections with semaphore permit tracking.
+///
+/// Automatically releases the connection and semaphore permit on drop.
 pub struct AsyncPoolGuard {
     pool: Arc<ConnectionPool>,
     connection: Option<Connection>,
@@ -497,6 +523,7 @@ pub struct AsyncPoolGuard {
 }
 
 impl AsyncPoolGuard {
+    /// Get a reference to the underlying connection.
     pub fn connection(&self) -> &Connection {
         self.connection
             .as_ref()
