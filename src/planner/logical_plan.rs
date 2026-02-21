@@ -23,6 +23,7 @@ pub enum TimeTravelSpec {
 static EMPTY_SCHEMA: LazyLock<Schema> = LazyLock::new(Schema::empty);
 
 /// Join type for logical plans.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
     Inner,
@@ -61,6 +62,7 @@ pub enum SetOperation {
 }
 
 /// A logical query plan.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     /// Table scan
@@ -869,6 +871,28 @@ mod tests {
     use super::*;
     use crate::types::{DataType, Field};
 
+    fn test_schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("age", DataType::Int64, true),
+        ])
+    }
+
+    fn test_table_ref() -> ResolvedTableRef {
+        ResolvedTableRef::new("default", "main", "users")
+    }
+
+    fn test_scan() -> LogicalPlan {
+        LogicalPlan::TableScan {
+            table_ref: test_table_ref(),
+            projection: None,
+            filters: vec![],
+            schema: test_schema(),
+            time_travel: None,
+        }
+    }
+
     #[test]
     fn test_logical_plan_builder() {
         let schema = Schema::new(vec![
@@ -888,6 +912,294 @@ mod tests {
         let display = format!("{}", plan);
         assert!(display.contains("Limit"));
         assert!(display.contains("Projection"));
+        assert!(display.contains("Filter"));
+        assert!(display.contains("TableScan"));
+    }
+
+    // --- Schema derivation tests ---
+
+    #[test]
+    fn test_table_scan_schema() {
+        let scan = test_scan();
+        let schema = scan.schema();
+        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.fields()[0].name(), "id");
+        assert_eq!(schema.fields()[1].name(), "name");
+        assert_eq!(schema.fields()[2].name(), "age");
+    }
+
+    #[test]
+    fn test_filter_preserves_schema() {
+        let scan = test_scan();
+        let filter = LogicalPlan::Filter {
+            predicate: LogicalExpr::column("age").gt(LogicalExpr::literal(18i32)),
+            input: Arc::new(scan),
+        };
+        // Filter should preserve the input schema
+        let schema = filter.schema();
+        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.fields()[0].name(), "id");
+    }
+
+    #[test]
+    fn test_projection_schema() {
+        let plan = LogicalPlanBuilder::scan(test_table_ref(), test_schema())
+            .project(vec![
+                LogicalExpr::column("name"),
+                LogicalExpr::column("age"),
+            ])
+            .unwrap()
+            .build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.fields()[0].name(), "name");
+        assert_eq!(schema.fields()[1].name(), "age");
+    }
+
+    #[test]
+    fn test_aggregate_schema() {
+        let plan = LogicalPlanBuilder::scan(test_table_ref(), test_schema())
+            .aggregate(
+                vec![LogicalExpr::column("name")],
+                vec![AggregateExpr::count_star()],
+            )
+            .unwrap()
+            .build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.fields()[0].name(), "name");
+        assert_eq!(schema.fields()[1].name(), "COUNT(*)");
+    }
+
+    #[test]
+    fn test_sort_preserves_schema() {
+        let plan = LogicalPlanBuilder::scan(test_table_ref(), test_schema())
+            .sort(vec![SortExpr {
+                expr: LogicalExpr::column("age"),
+                asc: true,
+                nulls_first: false,
+            }])
+            .build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 3);
+    }
+
+    #[test]
+    fn test_limit_preserves_schema() {
+        let plan = LogicalPlanBuilder::scan(test_table_ref(), test_schema())
+            .limit(5, Some(10))
+            .build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 3);
+    }
+
+    #[test]
+    fn test_join_schema_merges_fields() {
+        let left_schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let right_schema = Schema::new(vec![
+            Field::new("order_id", DataType::Int64, false),
+            Field::new("user_id", DataType::Int64, true),
+        ]);
+        let plan = LogicalPlanBuilder::scan(
+            ResolvedTableRef::new("default", "main", "users"),
+            left_schema,
+        )
+        .join(
+            LogicalPlan::TableScan {
+                table_ref: ResolvedTableRef::new("default", "main", "orders"),
+                projection: None,
+                filters: vec![],
+                schema: right_schema,
+                time_travel: None,
+            },
+            JoinType::Inner,
+            vec![(
+                LogicalExpr::column("id"),
+                LogicalExpr::column("user_id"),
+            )],
+        )
+        .unwrap()
+        .build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 4, "Join should merge fields from both sides");
+    }
+
+    #[test]
+    fn test_cross_join_schema() {
+        let left = LogicalPlanBuilder::scan(
+            test_table_ref(),
+            Schema::new(vec![Field::new("a", DataType::Int64, false)]),
+        );
+        let right = LogicalPlan::TableScan {
+            table_ref: ResolvedTableRef::new("default", "main", "t2"),
+            projection: None,
+            filters: vec![],
+            schema: Schema::new(vec![Field::new("b", DataType::Utf8, false)]),
+            time_travel: None,
+        };
+        let plan = left.cross_join(right).unwrap().build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.fields()[0].name(), "a");
+        assert_eq!(schema.fields()[1].name(), "b");
+    }
+
+    #[test]
+    fn test_set_operation_schema() {
+        let left_schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let right_schema = left_schema.clone();
+        let plan = LogicalPlan::SetOperation {
+            left: Arc::new(LogicalPlan::TableScan {
+                table_ref: test_table_ref(),
+                projection: None,
+                filters: vec![],
+                schema: left_schema.clone(),
+                time_travel: None,
+            }),
+            right: Arc::new(LogicalPlan::TableScan {
+                table_ref: test_table_ref(),
+                projection: None,
+                filters: vec![],
+                schema: right_schema,
+                time_travel: None,
+            }),
+            op: SetOperation::Union,
+            all: true,
+            schema: left_schema,
+        };
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 2);
+    }
+
+    #[test]
+    fn test_subquery_alias_preserves_schema() {
+        let plan = LogicalPlanBuilder::scan(test_table_ref(), test_schema())
+            .alias("sub")
+            .build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 3);
+    }
+
+    #[test]
+    fn test_distinct_preserves_schema() {
+        let plan = LogicalPlanBuilder::scan(test_table_ref(), test_schema())
+            .distinct()
+            .build();
+        let schema = plan.schema();
+        assert_eq!(schema.fields().len(), 3);
+    }
+
+    #[test]
+    fn test_empty_relation_schema() {
+        let plan = LogicalPlan::EmptyRelation {
+            produce_one_row: false,
+            schema: Schema::empty(),
+        };
+        assert_eq!(plan.schema().fields().len(), 0);
+    }
+
+    #[test]
+    fn test_values_schema() {
+        let schema = Schema::new(vec![
+            Field::new("x", DataType::Int64, false),
+        ]);
+        let plan = LogicalPlan::Values {
+            schema: schema.clone(),
+            values: vec![vec![LogicalExpr::literal(1i32)]],
+        };
+        assert_eq!(plan.schema().fields().len(), 1);
+        assert_eq!(plan.schema().fields()[0].name(), "x");
+    }
+
+    #[test]
+    fn test_ddl_returns_empty_schema() {
+        let create = LogicalPlan::CreateTable {
+            name: test_table_ref(),
+            schema: test_schema(),
+            if_not_exists: false,
+        };
+        assert_eq!(create.schema().fields().len(), 0);
+
+        let drop = LogicalPlan::DropTable {
+            name: test_table_ref(),
+            if_exists: false,
+        };
+        assert_eq!(drop.schema().fields().len(), 0);
+    }
+
+    #[test]
+    fn test_explain_returns_empty_schema() {
+        let plan = LogicalPlan::Explain {
+            plan: Arc::new(test_scan()),
+            verbose: false,
+        };
+        assert_eq!(plan.schema().fields().len(), 0);
+    }
+
+    // --- Children tests ---
+
+    #[test]
+    fn test_table_scan_has_no_children() {
+        let scan = test_scan();
+        assert!(scan.children().is_empty());
+    }
+
+    #[test]
+    fn test_filter_has_one_child() {
+        let filter = LogicalPlan::Filter {
+            predicate: LogicalExpr::column("id").gt(LogicalExpr::literal(0i32)),
+            input: Arc::new(test_scan()),
+        };
+        assert_eq!(filter.children().len(), 1);
+    }
+
+    #[test]
+    fn test_join_has_two_children() {
+        let join = LogicalPlan::Join {
+            left: Arc::new(test_scan()),
+            right: Arc::new(test_scan()),
+            join_type: JoinType::Inner,
+            on: vec![],
+            filter: None,
+            schema: test_schema(),
+        };
+        assert_eq!(join.children().len(), 2);
+    }
+
+    // --- Display tests ---
+
+    #[test]
+    fn test_join_type_display() {
+        assert_eq!(format!("{}", JoinType::Inner), "Inner");
+        assert_eq!(format!("{}", JoinType::Left), "Left");
+        assert_eq!(format!("{}", JoinType::Right), "Right");
+        assert_eq!(format!("{}", JoinType::Full), "Full");
+        assert_eq!(format!("{}", JoinType::Cross), "Cross");
+        assert_eq!(format!("{}", JoinType::LeftSemi), "LeftSemi");
+        assert_eq!(format!("{}", JoinType::LeftAnti), "LeftAnti");
+    }
+
+    #[test]
+    fn test_copy_format_parsing() {
+        assert_eq!(CopyFormat::from_str("parquet"), Some(CopyFormat::Parquet));
+        assert_eq!(CopyFormat::from_str("csv"), Some(CopyFormat::Csv));
+        assert_eq!(CopyFormat::from_str("json"), Some(CopyFormat::Json));
+        assert_eq!(CopyFormat::from_str("ndjson"), Some(CopyFormat::Json));
+        assert_eq!(CopyFormat::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_plan_display_indent() {
+        let plan = LogicalPlanBuilder::scan(test_table_ref(), test_schema())
+            .filter(LogicalExpr::column("age").gt(LogicalExpr::literal(18i32)))
+            .build();
+        let display = plan.display_indent(0);
         assert!(display.contains("Filter"));
         assert!(display.contains("TableScan"));
     }

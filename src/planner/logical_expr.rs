@@ -895,6 +895,15 @@ impl fmt::Display for WindowExpr {
 mod tests {
     use super::*;
 
+    fn test_schema() -> Schema {
+        Schema::new(vec![
+            crate::types::Field::new("id", DataType::Int64, false),
+            crate::types::Field::new("name", DataType::Utf8, true),
+            crate::types::Field::new("age", DataType::Int64, true),
+            crate::types::Field::new("active", DataType::Boolean, true),
+        ])
+    }
+
     #[test]
     fn test_column_expr() {
         let col = LogicalExpr::column("id");
@@ -922,5 +931,337 @@ mod tests {
 
         let sum = AggregateExpr::sum(LogicalExpr::column("amount")).distinct();
         assert_eq!(format!("{}", sum), "SUM(DISTINCT amount)");
+    }
+
+    // --- BETWEEN expression tests ---
+
+    #[test]
+    fn test_between_expr() {
+        let expr = LogicalExpr::Between {
+            expr: Box::new(LogicalExpr::column("age")),
+            negated: false,
+            low: Box::new(LogicalExpr::literal(18i32)),
+            high: Box::new(LogicalExpr::literal(65i32)),
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "age");
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_between_negated() {
+        let expr = LogicalExpr::Between {
+            expr: Box::new(LogicalExpr::column("age")),
+            negated: true,
+            low: Box::new(LogicalExpr::literal(0i32)),
+            high: Box::new(LogicalExpr::literal(10i32)),
+        };
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+        let display = format!("{}", expr);
+        assert!(display.contains("BETWEEN") || display.contains("NOT BETWEEN") || display.contains("expr"));
+    }
+
+    // --- LIKE expression tests ---
+
+    #[test]
+    fn test_like_expr() {
+        let expr = LogicalExpr::Like {
+            negated: false,
+            expr: Box::new(LogicalExpr::column("name")),
+            pattern: Box::new(LogicalExpr::literal("A%")),
+            escape: None,
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "name");
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_like_with_escape() {
+        let expr = LogicalExpr::Like {
+            negated: false,
+            expr: Box::new(LogicalExpr::column("name")),
+            pattern: Box::new(LogicalExpr::literal("100\\%")),
+            escape: Some(Box::new(LogicalExpr::literal("\\"))),
+        };
+        let cols = expr.columns();
+        // Column from expr + column-less literal pattern + escape
+        assert_eq!(cols.len(), 1);
+    }
+
+    // --- CASE expression tests ---
+
+    #[test]
+    fn test_case_expr_simple() {
+        let expr = LogicalExpr::Case {
+            expr: None,
+            when_then_exprs: vec![
+                (
+                    LogicalExpr::column("active").eq(LogicalExpr::literal(true)),
+                    LogicalExpr::literal("yes"),
+                ),
+            ],
+            else_expr: Some(Box::new(LogicalExpr::literal("no"))),
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1, "CASE should collect columns from when/then");
+        assert_eq!(expr.data_type(&test_schema()), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_case_expr_with_base() {
+        let expr = LogicalExpr::Case {
+            expr: Some(Box::new(LogicalExpr::column("id"))),
+            when_then_exprs: vec![
+                (LogicalExpr::literal(1i32), LogicalExpr::literal("one")),
+                (LogicalExpr::literal(2i32), LogicalExpr::literal("two")),
+            ],
+            else_expr: Some(Box::new(LogicalExpr::literal("other"))),
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "id");
+    }
+
+    #[test]
+    fn test_case_expr_no_else() {
+        let expr = LogicalExpr::Case {
+            expr: None,
+            when_then_exprs: vec![
+                (
+                    LogicalExpr::column("age").gt(LogicalExpr::literal(30i32)),
+                    LogicalExpr::literal("senior"),
+                ),
+            ],
+            else_expr: None,
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        // Return type should come from THEN expression
+        assert_eq!(expr.data_type(&test_schema()), DataType::Utf8);
+    }
+
+    // --- IN list tests ---
+
+    #[test]
+    fn test_in_list_expr() {
+        let expr = LogicalExpr::InList {
+            expr: Box::new(LogicalExpr::column("id")),
+            list: vec![
+                LogicalExpr::literal(1i32),
+                LogicalExpr::literal(2i32),
+                LogicalExpr::literal(3i32),
+            ],
+            negated: false,
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_in_list_with_columns() {
+        let expr = LogicalExpr::InList {
+            expr: Box::new(LogicalExpr::column("id")),
+            list: vec![LogicalExpr::column("age")],
+            negated: true,
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 2);
+    }
+
+    // --- Type resolution tests ---
+
+    #[test]
+    fn test_data_type_column() {
+        let expr = LogicalExpr::column("id");
+        assert_eq!(expr.data_type(&test_schema()), DataType::Int64);
+    }
+
+    #[test]
+    fn test_data_type_literal() {
+        let expr = LogicalExpr::literal(42i32);
+        assert_eq!(expr.data_type(&test_schema()), DataType::Int32);
+    }
+
+    #[test]
+    fn test_data_type_comparison() {
+        let expr = LogicalExpr::column("id").eq(LogicalExpr::literal(1i32));
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_data_type_arithmetic() {
+        let expr = LogicalExpr::BinaryExpr {
+            left: Box::new(LogicalExpr::column("age")),
+            op: BinaryOp::Plus,
+            right: Box::new(LogicalExpr::literal(1i32)),
+        };
+        assert_eq!(expr.data_type(&test_schema()), DataType::Int64);
+    }
+
+    #[test]
+    fn test_data_type_is_null() {
+        let expr = LogicalExpr::IsNull(Box::new(LogicalExpr::column("name")));
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_data_type_is_not_null() {
+        let expr = LogicalExpr::IsNotNull(Box::new(LogicalExpr::column("name")));
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_data_type_cast() {
+        let expr = LogicalExpr::Cast {
+            expr: Box::new(LogicalExpr::column("id")),
+            data_type: DataType::Utf8,
+        };
+        assert_eq!(expr.data_type(&test_schema()), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_data_type_alias() {
+        let expr = LogicalExpr::column("id").alias("user_id");
+        assert_eq!(expr.data_type(&test_schema()), DataType::Int64);
+    }
+
+    #[test]
+    fn test_data_type_aggregate_count() {
+        let agg = AggregateExpr::count_star();
+        let expr = LogicalExpr::Aggregate(agg);
+        assert_eq!(expr.data_type(&test_schema()), DataType::Int64);
+    }
+
+    #[test]
+    fn test_data_type_aggregate_sum() {
+        let agg = AggregateExpr::sum(LogicalExpr::column("age"));
+        let expr = LogicalExpr::Aggregate(agg);
+        assert_eq!(expr.data_type(&test_schema()), DataType::Float64);
+    }
+
+    #[test]
+    fn test_data_type_concat() {
+        let expr = LogicalExpr::BinaryExpr {
+            left: Box::new(LogicalExpr::literal("hello")),
+            op: BinaryOp::Concat,
+            right: Box::new(LogicalExpr::literal(" world")),
+        };
+        assert_eq!(expr.data_type(&test_schema()), DataType::Utf8);
+    }
+
+    // --- Column qualified name tests ---
+
+    #[test]
+    fn test_column_unqualified() {
+        let col = Column::unqualified("id");
+        assert_eq!(col.qualified_name(), "id");
+        assert!(col.relation.is_none());
+    }
+
+    #[test]
+    fn test_column_qualified() {
+        let col = Column::qualified("users", "id");
+        assert_eq!(col.qualified_name(), "users.id");
+        assert_eq!(col.relation.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn test_column_from_str() {
+        let col: Column = "users.id".into();
+        assert_eq!(col.relation.as_deref(), Some("users"));
+        assert_eq!(col.name, "id");
+
+        let col2: Column = "name".into();
+        assert!(col2.relation.is_none());
+        assert_eq!(col2.name, "name");
+    }
+
+    // --- Expression name tests ---
+
+    #[test]
+    fn test_wildcard_name() {
+        let expr = LogicalExpr::Wildcard;
+        assert_eq!(expr.name(), "*");
+    }
+
+    #[test]
+    fn test_qualified_wildcard_name() {
+        let expr = LogicalExpr::QualifiedWildcard {
+            qualifier: "users".to_string(),
+        };
+        assert_eq!(expr.name(), "users.*");
+    }
+
+    #[test]
+    fn test_scalar_function_name() {
+        let expr = LogicalExpr::ScalarFunction {
+            name: "UPPER".to_string(),
+            args: vec![LogicalExpr::column("name")],
+        };
+        assert_eq!(expr.name(), "UPPER");
+    }
+
+    // --- NOT and Negative tests ---
+
+    #[test]
+    fn test_not_expr_columns() {
+        let expr = LogicalExpr::Not(Box::new(LogicalExpr::column("active")));
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "active");
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
+    }
+
+    #[test]
+    fn test_negative_expr() {
+        let expr = LogicalExpr::Negative(Box::new(LogicalExpr::column("age")));
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(expr.data_type(&test_schema()), DataType::Int64);
+    }
+
+    // --- Window expression tests ---
+
+    #[test]
+    fn test_window_expr_display() {
+        let win = WindowExpr::new(
+            LogicalExpr::Aggregate(AggregateExpr::count_star()),
+            vec![LogicalExpr::column("name")],
+            vec![SortExpr {
+                expr: LogicalExpr::column("age"),
+                asc: true,
+                nulls_first: false,
+            }],
+        );
+        let display = format!("{}", win);
+        assert!(display.contains("OVER"));
+        assert!(display.contains("PARTITION BY"));
+        assert!(display.contains("ORDER BY"));
+    }
+
+    #[test]
+    fn test_window_frame_default() {
+        let frame = WindowFrame::default();
+        assert_eq!(frame.units, WindowFrameUnits::Range);
+        assert_eq!(frame.start, WindowFrameBound::Preceding(None));
+        assert_eq!(frame.end, WindowFrameBound::CurrentRow);
+    }
+
+    // --- Helper method tests ---
+
+    #[test]
+    fn test_is_literal() {
+        assert!(LogicalExpr::literal(42i32).is_literal());
+        assert!(!LogicalExpr::column("id").is_literal());
+    }
+
+    #[test]
+    fn test_is_column() {
+        assert!(LogicalExpr::column("id").is_column());
+        assert!(!LogicalExpr::literal(42i32).is_column());
     }
 }
