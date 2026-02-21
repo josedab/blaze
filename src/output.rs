@@ -287,4 +287,134 @@ mod tests {
         assert!(output.contains("\"id\":1"));
         assert!(output.contains("\"name\":\"Alice\""));
     }
+
+    // --- Arrow IPC tests ---
+
+    #[test]
+    fn test_format_arrow_ipc_cannot_be_string() {
+        let batch = create_test_batch();
+        let result = format_batches(&[batch], OutputFormat::Arrow);
+        assert!(result.is_err(), "Arrow IPC should not convert to string");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("cannot be converted"), "Error: {}", msg);
+    }
+
+    #[test]
+    fn test_arrow_ipc_write_to_file() {
+        let batch = create_test_batch();
+        let path = std::env::temp_dir().join("blaze_test_ipc.arrow");
+        {
+            let mut writer = OutputWriter::file(OutputFormat::Arrow, &path).unwrap();
+            writer.write_batches(&[batch.clone()]).unwrap();
+        }
+        // Read back and verify
+        let file = File::open(&path).unwrap();
+        let reader = arrow::ipc::reader::FileReader::try_new(file, None).unwrap();
+        let schema = reader.schema();
+        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.field(0).name(), "id");
+        assert_eq!(schema.field(1).name(), "name");
+
+        let mut total_rows = 0;
+        for batch_result in reader {
+            let read_batch = batch_result.unwrap();
+            total_rows += read_batch.num_rows();
+        }
+        assert_eq!(total_rows, 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Table format tests ---
+
+    #[test]
+    fn test_format_table() {
+        let batch = create_test_batch();
+        let output = format_batches(&[batch], OutputFormat::Table).unwrap();
+        // Table format should contain column headers and data
+        assert!(output.contains("id"), "Table should contain 'id' header");
+        assert!(output.contains("name"), "Table should contain 'name' header");
+        assert!(output.contains("Alice"), "Table should contain data");
+        assert!(output.contains("Bob"), "Table should contain data");
+        // Table format uses borders
+        assert!(output.contains("+") || output.contains("|"),
+            "Table should have borders or separators");
+    }
+
+    #[test]
+    fn test_format_table_write_to_file() {
+        let batch = create_test_batch();
+        let path = std::env::temp_dir().join("blaze_test_table.txt");
+        {
+            let mut writer = OutputWriter::file(OutputFormat::Table, &path).unwrap();
+            writer.write_batches(&[batch]).unwrap();
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Alice"));
+        assert!(content.contains("id"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Empty batch tests ---
+
+    #[test]
+    fn test_format_empty_batches() {
+        let result = format_batches(&[], OutputFormat::Csv).unwrap();
+        assert!(result.is_empty(), "Empty batch list should produce empty output");
+
+        let result = format_batches(&[], OutputFormat::Json).unwrap();
+        assert!(result.is_empty());
+
+        let result = format_batches(&[], OutputFormat::Table).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_write_empty_batches() {
+        let mut writer = OutputWriter::stdout(OutputFormat::Csv);
+        let result = writer.write_batches(&[]);
+        assert!(result.is_ok(), "Writing empty batches should succeed");
+    }
+
+    // --- Format parsing edge cases ---
+
+    #[test]
+    fn test_format_parsing_aliases() {
+        assert_eq!(OutputFormat::from_str("jsonl").unwrap(), OutputFormat::Json);
+        assert_eq!(OutputFormat::from_str("ndjson").unwrap(), OutputFormat::Json);
+        assert_eq!(OutputFormat::from_str("ipc").unwrap(), OutputFormat::Arrow);
+    }
+
+    #[test]
+    fn test_format_parsing_case_insensitive() {
+        assert_eq!(OutputFormat::from_str("TABLE").unwrap(), OutputFormat::Table);
+        assert_eq!(OutputFormat::from_str("Csv").unwrap(), OutputFormat::Csv);
+        assert_eq!(OutputFormat::from_str("JSON").unwrap(), OutputFormat::Json);
+        assert_eq!(OutputFormat::from_str("ARROW").unwrap(), OutputFormat::Arrow);
+    }
+
+    #[test]
+    fn test_format_display() {
+        assert_eq!(format!("{}", OutputFormat::Table), "table");
+        assert_eq!(format!("{}", OutputFormat::Csv), "csv");
+        assert_eq!(format!("{}", OutputFormat::Json), "json");
+        assert_eq!(format!("{}", OutputFormat::Arrow), "arrow");
+    }
+
+    #[test]
+    fn test_format_default() {
+        let fmt: OutputFormat = Default::default();
+        assert_eq!(fmt, OutputFormat::Table);
+    }
+
+    // --- Multiple batch tests ---
+
+    #[test]
+    fn test_format_csv_multiple_batches() {
+        let batch1 = create_test_batch();
+        let batch2 = create_test_batch();
+        let output = format_batches(&[batch1, batch2], OutputFormat::Csv).unwrap();
+        // Should contain header only once + 6 data rows
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines.len() >= 7, "Should have header + 6 data rows, got {}", lines.len());
+    }
 }
