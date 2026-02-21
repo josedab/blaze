@@ -872,3 +872,373 @@ impl HashAggregateOperator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn int64_array(values: &[Option<i64>]) -> ArrayRef {
+        Arc::new(Int64Array::from(values.to_vec()))
+    }
+
+    fn float64_array(values: &[Option<f64>]) -> ArrayRef {
+        Arc::new(Float64Array::from(values.to_vec()))
+    }
+
+    // --- CountAccumulator ---
+
+    #[test]
+    fn test_count_basic() {
+        let mut acc = CountAccumulator::new();
+        acc.update(&int64_array(&[Some(1), Some(2), Some(3)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 3);
+    }
+
+    #[test]
+    fn test_count_with_nulls() {
+        let mut acc = CountAccumulator::new();
+        acc.update(&int64_array(&[Some(1), None, Some(3), None])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 2, "COUNT should skip NULL values");
+    }
+
+    #[test]
+    fn test_count_all_nulls() {
+        let mut acc = CountAccumulator::new();
+        acc.update(&int64_array(&[None, None, None])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 0, "COUNT of all NULLs should be 0");
+    }
+
+    #[test]
+    fn test_count_empty() {
+        let mut acc = CountAccumulator::new();
+        acc.update(&int64_array(&[])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 0);
+    }
+
+    #[test]
+    fn test_count_merge() {
+        let mut acc1 = CountAccumulator::new();
+        acc1.update(&int64_array(&[Some(1), Some(2)])).unwrap();
+        let mut acc2 = CountAccumulator::new();
+        acc2.update(&int64_array(&[Some(3)])).unwrap();
+        acc1.merge(&acc2).unwrap();
+        let result = acc1.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 3);
+    }
+
+    #[test]
+    fn test_count_reset() {
+        let mut acc = CountAccumulator::new();
+        acc.update(&int64_array(&[Some(1), Some(2)])).unwrap();
+        acc.reset();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 0);
+    }
+
+    // --- SumAccumulator ---
+
+    #[test]
+    fn test_sum_int64() {
+        let mut acc = SumAccumulator::new();
+        acc.update(&int64_array(&[Some(10), Some(20), Some(30)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 60.0);
+    }
+
+    #[test]
+    fn test_sum_float64() {
+        let mut acc = SumAccumulator::new();
+        acc.update(&float64_array(&[Some(1.5), Some(2.5), Some(3.0)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((arr.value(0) - 7.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_sum_with_nulls() {
+        let mut acc = SumAccumulator::new();
+        acc.update(&int64_array(&[Some(10), None, Some(30)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 40.0);
+    }
+
+    #[test]
+    fn test_sum_all_nulls_returns_none() {
+        let mut acc = SumAccumulator::new();
+        acc.update(&int64_array(&[None, None])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(arr.is_null(0), "SUM of all NULLs should be NULL");
+    }
+
+    #[test]
+    fn test_sum_empty_returns_none() {
+        let acc = SumAccumulator::new();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(arr.is_null(0), "SUM of empty set should be NULL");
+    }
+
+    #[test]
+    fn test_sum_merge() {
+        let mut acc1 = SumAccumulator::new();
+        acc1.update(&int64_array(&[Some(10)])).unwrap();
+        let mut acc2 = SumAccumulator::new();
+        acc2.update(&int64_array(&[Some(20)])).unwrap();
+        acc1.merge(&acc2).unwrap();
+        let result = acc1.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 30.0);
+    }
+
+    // --- AvgAccumulator ---
+
+    #[test]
+    fn test_avg_basic() {
+        let mut acc = AvgAccumulator::new();
+        acc.update(&int64_array(&[Some(10), Some(20), Some(30)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((arr.value(0) - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_avg_with_nulls() {
+        let mut acc = AvgAccumulator::new();
+        acc.update(&int64_array(&[Some(10), None, Some(30)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((arr.value(0) - 20.0).abs() < f64::EPSILON, "AVG should skip NULLs");
+    }
+
+    #[test]
+    fn test_avg_empty_returns_null() {
+        let acc = AvgAccumulator::new();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(arr.is_null(0), "AVG of empty set should be NULL");
+    }
+
+    #[test]
+    fn test_avg_merge() {
+        let mut acc1 = AvgAccumulator::new();
+        acc1.update(&int64_array(&[Some(10), Some(20)])).unwrap();
+        let mut acc2 = AvgAccumulator::new();
+        acc2.update(&int64_array(&[Some(30)])).unwrap();
+        acc1.merge(&acc2).unwrap();
+        let result = acc1.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!((arr.value(0) - 20.0).abs() < f64::EPSILON);
+    }
+
+    // --- MinAccumulator ---
+
+    #[test]
+    fn test_min_basic() {
+        let mut acc = MinAccumulator::new();
+        acc.update(&int64_array(&[Some(30), Some(10), Some(20)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 10.0);
+    }
+
+    #[test]
+    fn test_min_with_nulls() {
+        let mut acc = MinAccumulator::new();
+        acc.update(&int64_array(&[None, Some(30), None, Some(10)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 10.0, "MIN should skip NULLs");
+    }
+
+    #[test]
+    fn test_min_all_nulls() {
+        let mut acc = MinAccumulator::new();
+        acc.update(&int64_array(&[None, None])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(arr.is_null(0), "MIN of all NULLs should be NULL");
+    }
+
+    // --- MaxAccumulator ---
+
+    #[test]
+    fn test_max_basic() {
+        let mut acc = MaxAccumulator::new();
+        acc.update(&int64_array(&[Some(10), Some(30), Some(20)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 30.0);
+    }
+
+    #[test]
+    fn test_max_with_nulls() {
+        let mut acc = MaxAccumulator::new();
+        acc.update(&int64_array(&[None, Some(10), Some(30), None])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 30.0, "MAX should skip NULLs");
+    }
+
+    #[test]
+    fn test_max_merge() {
+        let mut acc1 = MaxAccumulator::new();
+        acc1.update(&int64_array(&[Some(10)])).unwrap();
+        let mut acc2 = MaxAccumulator::new();
+        acc2.update(&int64_array(&[Some(50)])).unwrap();
+        acc1.merge(&acc2).unwrap();
+        let result = acc1.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(arr.value(0), 50.0);
+    }
+
+    // --- ApproxCountDistinctAccumulator (HyperLogLog) ---
+
+    #[test]
+    fn test_approx_count_distinct_basic() {
+        let mut acc = ApproxCountDistinctAccumulator::new();
+        acc.update(&int64_array(&[Some(1), Some(2), Some(3), Some(1), Some(2)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        let estimate = arr.value(0);
+        assert!(estimate >= 2 && estimate <= 5,
+            "Approx count distinct of [1,2,3,1,2] should be ~3, got {}", estimate);
+    }
+
+    #[test]
+    fn test_approx_count_distinct_with_nulls() {
+        let mut acc = ApproxCountDistinctAccumulator::new();
+        acc.update(&int64_array(&[Some(1), None, Some(2), None, Some(1)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        let estimate = arr.value(0);
+        assert!(estimate >= 1 && estimate <= 4,
+            "Approx count distinct should be ~2, got {}", estimate);
+    }
+
+    #[test]
+    fn test_approx_count_distinct_strings() {
+        let mut acc = ApproxCountDistinctAccumulator::new();
+        let arr: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("a"), Some("b"), Some("a"), Some("c"), Some("b"),
+        ]));
+        acc.update(&arr).unwrap();
+        let result = acc.finalize().unwrap();
+        let result_arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        let estimate = result_arr.value(0);
+        assert!(estimate >= 2 && estimate <= 5,
+            "Approx count distinct of strings should be ~3, got {}", estimate);
+    }
+
+    #[test]
+    fn test_approx_count_distinct_merge() {
+        let mut acc1 = ApproxCountDistinctAccumulator::new();
+        acc1.update(&int64_array(&[Some(1), Some(2)])).unwrap();
+        let mut acc2 = ApproxCountDistinctAccumulator::new();
+        acc2.update(&int64_array(&[Some(3), Some(4)])).unwrap();
+        acc1.merge(&acc2).unwrap();
+        let result = acc1.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        let estimate = arr.value(0);
+        assert!(estimate >= 3 && estimate <= 6,
+            "Merged approx count distinct should be ~4, got {}", estimate);
+    }
+
+    #[test]
+    fn test_approx_count_distinct_reset() {
+        let mut acc = ApproxCountDistinctAccumulator::new();
+        acc.update(&int64_array(&[Some(1), Some(2), Some(3)])).unwrap();
+        acc.reset();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 0, "After reset, estimate should be 0");
+    }
+
+    // --- ApproxPercentileAccumulator (T-Digest) ---
+
+    #[test]
+    fn test_approx_percentile_median() {
+        let mut acc = ApproxPercentileAccumulator::median();
+        acc.update(&float64_array(&[Some(10.0), Some(20.0), Some(30.0), Some(40.0), Some(50.0)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        let median = arr.value(0);
+        assert!((median - 30.0).abs() < 10.0,
+            "Median of [10,20,30,40,50] should be ~30, got {}", median);
+    }
+
+    #[test]
+    fn test_approx_percentile_p90() {
+        let mut acc = ApproxPercentileAccumulator::new(0.9);
+        let values: Vec<Option<f64>> = (1..=100).map(|i| Some(i as f64)).collect();
+        acc.update(&float64_array(&values)).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        let p90 = arr.value(0);
+        assert!(p90 >= 50.0 && p90 <= 100.0,
+            "P90 of 1..100 should be high, got {}", p90);
+    }
+
+    #[test]
+    fn test_approx_percentile_with_nulls() {
+        let mut acc = ApproxPercentileAccumulator::median();
+        acc.update(&float64_array(&[Some(10.0), None, Some(30.0), None, Some(50.0)])).unwrap();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        let median = arr.value(0);
+        assert!((median - 30.0).abs() < 15.0,
+            "Median of [10,30,50] (nulls skipped) should be ~30, got {}", median);
+    }
+
+    #[test]
+    fn test_approx_percentile_unsupported_type() {
+        let mut acc = ApproxPercentileAccumulator::median();
+        let arr: ArrayRef = Arc::new(StringArray::from(vec![Some("a"), Some("b")]));
+        let result = acc.update(&arr);
+        assert!(result.is_err(), "T-Digest should not support string type");
+    }
+
+    #[test]
+    fn test_approx_percentile_merge() {
+        let mut acc1 = ApproxPercentileAccumulator::median();
+        acc1.update(&float64_array(&[Some(10.0), Some(20.0)])).unwrap();
+        let mut acc2 = ApproxPercentileAccumulator::median();
+        acc2.update(&float64_array(&[Some(30.0), Some(40.0)])).unwrap();
+        acc1.merge(&acc2).unwrap();
+        let result = acc1.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        let median = arr.value(0);
+        assert!((median - 25.0).abs() < 15.0,
+            "Merged median of [10,20,30,40] should be ~25, got {}", median);
+    }
+
+    #[test]
+    fn test_approx_percentile_reset() {
+        let mut acc = ApproxPercentileAccumulator::median();
+        acc.update(&float64_array(&[Some(100.0)])).unwrap();
+        acc.reset();
+        let result = acc.finalize().unwrap();
+        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(arr.len() == 1);
+    }
+
+    #[test]
+    fn test_approx_percentile_clamped() {
+        let acc = ApproxPercentileAccumulator::new(1.5);
+        assert!((acc.percentile - 1.0).abs() < f64::EPSILON, "Percentile should be clamped to 1.0");
+        let acc2 = ApproxPercentileAccumulator::new(-0.5);
+        assert!((acc2.percentile - 0.0).abs() < f64::EPSILON, "Percentile should be clamped to 0.0");
+    }
+}
+
