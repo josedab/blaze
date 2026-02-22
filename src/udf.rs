@@ -774,4 +774,194 @@ mod tests {
         assert_eq!(format!("{}", UdfKind::Aggregate), "AGGREGATE");
         assert_eq!(format!("{}", UdfKind::Table), "TABLE");
     }
+
+    // --- Error case tests ---
+
+    #[test]
+    fn test_scalar_udf_wrong_arg_count() {
+        let udf = ScalarUdf::new(
+            "add",
+            vec![DataType::Int64, DataType::Int64],
+            DataType::Int64,
+            |args: &[ArrayRef]| {
+                let a = args[0].as_any().downcast_ref::<Int64Array>().unwrap();
+                let b = args[1].as_any().downcast_ref::<Int64Array>().unwrap();
+                let result: Int64Array = a.iter().zip(b.iter())
+                    .map(|(a, b)| match (a, b) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(result) as ArrayRef)
+            },
+        );
+
+        // Call with wrong number of args
+        let input = Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef;
+        let result = udf.execute(&[input]);
+        assert!(result.is_err(), "Should error with wrong argument count");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("expects 2 arguments, got 1"), "Error: {}", msg);
+    }
+
+    #[test]
+    fn test_scalar_udf_wrong_arg_type() {
+        let udf = ScalarUdf::new(
+            "double",
+            vec![DataType::Int64],
+            DataType::Int64,
+            |args: &[ArrayRef]| {
+                let input = args[0]
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int64Array"))?;
+                let result: Int64Array = input.iter().map(|v| v.map(|x| x * 2)).collect();
+                Ok(Arc::new(result) as ArrayRef)
+            },
+        );
+
+        // Pass a Float64 instead of Int64
+        let input = Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef;
+        let result = udf.execute(&[input]);
+        assert!(result.is_err(), "Should error with wrong type");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Int64"), "Error should mention expected type: {}", msg);
+    }
+
+    #[test]
+    fn test_scalar_udf_null_inputs() {
+        let udf = ScalarUdf::new(
+            "double",
+            vec![DataType::Int64],
+            DataType::Int64,
+            |args: &[ArrayRef]| {
+                let input = args[0]
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int64Array"))?;
+                let result: Int64Array = input.iter().map(|v| v.map(|x| x * 2)).collect();
+                Ok(Arc::new(result) as ArrayRef)
+            },
+        );
+
+        // Input with NULL values
+        let input = Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])) as ArrayRef;
+        let result = udf.execute(&[input]).unwrap();
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 2);
+        assert!(arr.is_null(1), "NULL input should produce NULL output");
+        assert_eq!(arr.value(2), 6);
+    }
+
+    #[test]
+    fn test_scalar_udf_empty_args_with_defined_types() {
+        let udf = ScalarUdf::new(
+            "needs_one",
+            vec![DataType::Int64],
+            DataType::Int64,
+            |_args: &[ArrayRef]| {
+                Ok(Arc::new(Int64Array::from(vec![0])) as ArrayRef)
+            },
+        );
+
+        let result = udf.execute(&[]);
+        assert!(result.is_err(), "Should error with zero args when one expected");
+    }
+
+    #[test]
+    fn test_scalar_udf_variadic_empty_args() {
+        // UDF with no declared arg types (variadic)
+        let udf = ScalarUdf::new(
+            "noop",
+            vec![],
+            DataType::Int64,
+            |_args: &[ArrayRef]| {
+                Ok(Arc::new(Int64Array::from(vec![42])) as ArrayRef)
+            },
+        );
+
+        // Should succeed with any number of args when arg_types is empty
+        let result = udf.execute(&[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_udaf_accumulator_wrong_type_merge() {
+        let udaf1 = AggregateUdf::new(
+            "geo_mean",
+            vec![DataType::Float64],
+            DataType::Float64,
+            GeometricMeanAccumulator::boxed,
+        );
+        let udaf2 = AggregateUdf::new(
+            "geo_mean2",
+            vec![DataType::Float64],
+            DataType::Float64,
+            GeometricMeanAccumulator::boxed,
+        );
+
+        let mut acc1 = udaf1.create_accumulator();
+        let acc2 = udaf2.create_accumulator();
+
+        // Merge should succeed since both are GeometricMeanAccumulator
+        let result = acc1.merge(acc2.as_ref());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_udf_deregister_nonexistent() {
+        let registry = UdfRegistry::new();
+        let removed = registry.deregister_scalar("nonexistent").unwrap();
+        assert!(!removed, "Deregistering nonexistent UDF should return false");
+    }
+
+    #[test]
+    fn test_udaf_deregister_nonexistent() {
+        let registry = UdfRegistry::new();
+        let removed = registry.deregister_aggregate("nonexistent").unwrap();
+        assert!(!removed, "Deregistering nonexistent UDAF should return false");
+    }
+
+    #[test]
+    fn test_udf_get_nonexistent() {
+        let registry = UdfRegistry::new();
+        assert!(registry.get_scalar("nonexistent").is_none());
+        assert!(registry.get_aggregate("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_scalar_udf_debug() {
+        let udf = ScalarUdf::new(
+            "test_fn",
+            vec![DataType::Int64],
+            DataType::Int64,
+            |_| Ok(Arc::new(Int64Array::from(vec![0])) as ArrayRef),
+        );
+        let debug = format!("{:?}", udf);
+        assert!(debug.contains("test_fn"));
+        assert!(debug.contains("ScalarUdf"));
+    }
+
+    #[test]
+    fn test_udf_catalog_search_no_match() {
+        let catalog = UdfCatalog::new();
+        catalog.register(UdfCatalogEntry {
+            name: "MY_FUNC".into(),
+            kind: UdfKind::Scalar,
+            description: "A test function".into(),
+            arg_types: vec![],
+            return_type: Some(DataType::Int64),
+            example: None,
+        });
+        let results = catalog.search("NONEXISTENT");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_udf_catalog_empty() {
+        let catalog = UdfCatalog::new();
+        assert_eq!(catalog.count(), 0);
+        assert!(catalog.list().is_empty());
+        assert!(catalog.get_table_function("anything").is_none());
+    }
 }
