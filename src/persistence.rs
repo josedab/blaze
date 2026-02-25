@@ -38,6 +38,7 @@ use crate::types::Schema;
 // ---------------------------------------------------------------------------
 
 /// Represents a single mutation recorded in the write-ahead log.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum WalEntry {
     /// A new table was created with the given schema.
@@ -58,6 +59,26 @@ pub enum WalEntry {
         table: String,
         /// Arrow IPC-encoded batch data
         batch_data: Vec<u8>,
+    },
+    /// Rows were updated in a table.
+    UpdateRows {
+        /// Target table name
+        table: String,
+        /// Serialized predicate (SQL string for replay)
+        predicate: Option<String>,
+        /// Column assignments as (column_name, value_sql) pairs
+        assignments: Vec<(String, String)>,
+        /// Number of rows affected
+        rows_affected: usize,
+    },
+    /// Rows were deleted from a table.
+    DeleteRows {
+        /// Target table name
+        table: String,
+        /// Serialized predicate (SQL string for replay)
+        predicate: Option<String>,
+        /// Number of rows affected
+        rows_affected: usize,
     },
     /// A checkpoint marker indicating snapshots are consistent up to this point.
     Checkpoint {
@@ -267,6 +288,48 @@ impl WriteAheadLog {
                     })?
                 ))
             }
+            WalEntry::UpdateRows {
+                table,
+                predicate,
+                assignments,
+                rows_affected,
+            } => {
+                let data = serde_json::json!({
+                    "table": table,
+                    "predicate": predicate,
+                    "assignments": assignments,
+                    "rows_affected": rows_affected,
+                });
+                Ok(format!(
+                    "UPDATE_ROWS|{}",
+                    serde_json::to_string(&data).map_err(|e| {
+                        BlazeError::execution(format!(
+                            "Failed to serialize UPDATE_ROWS entry: {}",
+                            e
+                        ))
+                    })?
+                ))
+            }
+            WalEntry::DeleteRows {
+                table,
+                predicate,
+                rows_affected,
+            } => {
+                let data = serde_json::json!({
+                    "table": table,
+                    "predicate": predicate,
+                    "rows_affected": rows_affected,
+                });
+                Ok(format!(
+                    "DELETE_ROWS|{}",
+                    serde_json::to_string(&data).map_err(|e| {
+                        BlazeError::execution(format!(
+                            "Failed to serialize DELETE_ROWS entry: {}",
+                            e
+                        ))
+                    })?
+                ))
+            }
             WalEntry::Checkpoint { timestamp } => {
                 let data = serde_json::json!({ "timestamp": timestamp });
                 Ok(format!(
@@ -358,6 +421,67 @@ impl WriteAheadLog {
                 })?;
 
                 WalEntry::InsertBatch { table, batch_data }
+            }
+            "UPDATE_ROWS" => {
+                let data: serde_json::Value = serde_json::from_str(data_str).map_err(|e| {
+                    BlazeError::execution(format!("Failed to parse UPDATE_ROWS data: {}", e))
+                })?;
+
+                let table = data["table"]
+                    .as_str()
+                    .ok_or_else(|| BlazeError::execution("Missing 'table' in UPDATE_ROWS"))?
+                    .to_string();
+
+                let predicate = data["predicate"].as_str().map(|s| s.to_string());
+
+                let assignments = data["assignments"]
+                    .as_array()
+                    .ok_or_else(|| {
+                        BlazeError::execution("Missing 'assignments' in UPDATE_ROWS")
+                    })?
+                    .iter()
+                    .filter_map(|v| {
+                        let arr = v.as_array()?;
+                        Some((arr.first()?.as_str()?.to_string(), arr.get(1)?.as_str()?.to_string()))
+                    })
+                    .collect();
+
+                let rows_affected = data["rows_affected"]
+                    .as_u64()
+                    .ok_or_else(|| {
+                        BlazeError::execution("Missing 'rows_affected' in UPDATE_ROWS")
+                    })? as usize;
+
+                WalEntry::UpdateRows {
+                    table,
+                    predicate,
+                    assignments,
+                    rows_affected,
+                }
+            }
+            "DELETE_ROWS" => {
+                let data: serde_json::Value = serde_json::from_str(data_str).map_err(|e| {
+                    BlazeError::execution(format!("Failed to parse DELETE_ROWS data: {}", e))
+                })?;
+
+                let table = data["table"]
+                    .as_str()
+                    .ok_or_else(|| BlazeError::execution("Missing 'table' in DELETE_ROWS"))?
+                    .to_string();
+
+                let predicate = data["predicate"].as_str().map(|s| s.to_string());
+
+                let rows_affected = data["rows_affected"]
+                    .as_u64()
+                    .ok_or_else(|| {
+                        BlazeError::execution("Missing 'rows_affected' in DELETE_ROWS")
+                    })? as usize;
+
+                WalEntry::DeleteRows {
+                    table,
+                    predicate,
+                    rows_affected,
+                }
             }
             "CHECKPOINT" => {
                 let data: serde_json::Value = serde_json::from_str(data_str).map_err(|e| {
@@ -679,6 +803,7 @@ const BLAZE_FORMAT_MAGIC: &[u8; 4] = b"BLZC";
 const BLAZE_FORMAT_VERSION: u32 = 1;
 
 /// Compression codecs available for column chunks.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionCodec {
     None,
@@ -2800,6 +2925,165 @@ impl Default for IndexAdvisor {
 }
 
 // ---------------------------------------------------------------------------
+// MVCC (Multi-Version Concurrency Control)
+// ---------------------------------------------------------------------------
+
+/// Transaction ID for MVCC
+pub type TxnId = u64;
+
+/// MVCC transaction state
+#[derive(Debug, Clone, PartialEq)]
+pub enum TxnState {
+    Active,
+    Committed,
+    Aborted,
+}
+
+/// MVCC transaction manager for snapshot isolation
+pub struct MvccManager {
+    next_txn_id: std::sync::atomic::AtomicU64,
+    active_txns: parking_lot::RwLock<std::collections::HashMap<TxnId, TxnState>>,
+    /// Low watermark: oldest active transaction ID
+    low_watermark: std::sync::atomic::AtomicU64,
+}
+
+impl MvccManager {
+    pub fn new() -> Self {
+        Self {
+            next_txn_id: std::sync::atomic::AtomicU64::new(1),
+            active_txns: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            low_watermark: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Begin a new transaction, returns the transaction ID
+    pub fn begin_txn(&self) -> TxnId {
+        let txn_id = self
+            .next_txn_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.active_txns.write().insert(txn_id, TxnState::Active);
+        txn_id
+    }
+
+    /// Commit a transaction
+    pub fn commit_txn(&self, txn_id: TxnId) -> Result<()> {
+        let mut txns = self.active_txns.write();
+        match txns.get(&txn_id) {
+            Some(TxnState::Active) => {
+                txns.insert(txn_id, TxnState::Committed);
+                self.update_low_watermark(&txns);
+                Ok(())
+            }
+            Some(TxnState::Committed) => {
+                Err(BlazeError::execution("Transaction already committed"))
+            }
+            Some(TxnState::Aborted) => Err(BlazeError::execution("Transaction already aborted")),
+            None => Err(BlazeError::execution(format!(
+                "Unknown transaction: {}",
+                txn_id
+            ))),
+        }
+    }
+
+    /// Abort a transaction
+    pub fn abort_txn(&self, txn_id: TxnId) -> Result<()> {
+        let mut txns = self.active_txns.write();
+        match txns.get(&txn_id) {
+            Some(TxnState::Active) => {
+                txns.insert(txn_id, TxnState::Aborted);
+                self.update_low_watermark(&txns);
+                Ok(())
+            }
+            _ => Err(BlazeError::execution(format!(
+                "Cannot abort transaction: {}",
+                txn_id
+            ))),
+        }
+    }
+
+    /// Check if a transaction is visible to a given snapshot
+    pub fn is_visible(&self, data_txn_id: TxnId, snapshot_txn_id: TxnId) -> bool {
+        if data_txn_id >= snapshot_txn_id {
+            return false; // Data written after snapshot
+        }
+        let txns = self.active_txns.read();
+        matches!(txns.get(&data_txn_id), Some(TxnState::Committed) | None)
+    }
+
+    /// Get the current low watermark
+    pub fn low_watermark(&self) -> TxnId {
+        self.low_watermark
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get active transaction count
+    pub fn active_count(&self) -> usize {
+        self.active_txns
+            .read()
+            .values()
+            .filter(|s| **s == TxnState::Active)
+            .count()
+    }
+
+    fn update_low_watermark(&self, txns: &std::collections::HashMap<TxnId, TxnState>) {
+        let min_active = txns
+            .iter()
+            .filter(|(_, s)| **s == TxnState::Active)
+            .map(|(id, _)| *id)
+            .min()
+            .unwrap_or(
+                self.next_txn_id
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            );
+        self.low_watermark
+            .store(min_active, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Default for MvccManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compact multiple record batches into fewer, larger batches.
+/// Reduces fragmentation from many small INSERT/DELETE operations.
+pub fn compact_batches(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
+    if batches.is_empty() {
+        return Ok(batches);
+    }
+    if batches.len() == 1 {
+        return Ok(batches);
+    }
+
+    let schema = batches[0].schema();
+    let num_cols = schema.fields().len();
+
+    // Concatenate all columns
+    let mut columns: Vec<arrow::array::ArrayRef> = Vec::with_capacity(num_cols);
+    for col_idx in 0..num_cols {
+        let arrays: Vec<&dyn arrow::array::Array> =
+            batches.iter().map(|b| b.column(col_idx).as_ref()).collect();
+        let concatenated = arrow::compute::concat(&arrays)
+            .map_err(|e| BlazeError::execution(format!("Compaction concat failed: {}", e)))?;
+        columns.push(concatenated);
+    }
+
+    let compacted = RecordBatch::try_new(schema, columns)
+        .map_err(|e| BlazeError::execution(format!("Compaction batch creation failed: {}", e)))?;
+
+    Ok(vec![compacted])
+}
+
+/// Compaction statistics
+#[derive(Debug, Clone)]
+pub struct CompactionStats {
+    pub batches_before: usize,
+    pub batches_after: usize,
+    pub rows: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4027,5 +4311,203 @@ mod tests {
 
         let recs = advisor.recommend(10); // min 10 accesses
         assert!(recs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // MVCC Manager tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mvcc_begin_commit() {
+        let mgr = MvccManager::new();
+        let txn1 = mgr.begin_txn();
+        let txn2 = mgr.begin_txn();
+        assert_eq!(txn1, 1);
+        assert_eq!(txn2, 2);
+        assert_eq!(mgr.active_count(), 2);
+
+        mgr.commit_txn(txn1).unwrap();
+        assert_eq!(mgr.active_count(), 1);
+
+        mgr.commit_txn(txn2).unwrap();
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_mvcc_abort() {
+        let mgr = MvccManager::new();
+        let txn = mgr.begin_txn();
+        assert_eq!(mgr.active_count(), 1);
+
+        mgr.abort_txn(txn).unwrap();
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_mvcc_double_commit_fails() {
+        let mgr = MvccManager::new();
+        let txn = mgr.begin_txn();
+        mgr.commit_txn(txn).unwrap();
+        assert!(mgr.commit_txn(txn).is_err());
+    }
+
+    #[test]
+    fn test_mvcc_abort_committed_fails() {
+        let mgr = MvccManager::new();
+        let txn = mgr.begin_txn();
+        mgr.commit_txn(txn).unwrap();
+        assert!(mgr.abort_txn(txn).is_err());
+    }
+
+    #[test]
+    fn test_mvcc_visibility() {
+        let mgr = MvccManager::new();
+        let txn1 = mgr.begin_txn(); // writer
+        let txn2 = mgr.begin_txn(); // reader snapshot
+
+        // txn1 not yet committed, not visible to txn2
+        assert!(!mgr.is_visible(txn1, txn2));
+
+        // Commit txn1
+        mgr.commit_txn(txn1).unwrap();
+
+        // txn1 < txn2 and committed => visible
+        assert!(mgr.is_visible(txn1, txn2));
+
+        // txn2 is not visible to txn2 (same txn, not strictly less)
+        assert!(!mgr.is_visible(txn2, txn2));
+
+        // Future txn not visible to earlier snapshot
+        let txn3 = mgr.begin_txn();
+        mgr.commit_txn(txn3).unwrap();
+        assert!(!mgr.is_visible(txn3, txn2));
+    }
+
+    #[test]
+    fn test_mvcc_low_watermark() {
+        let mgr = MvccManager::new();
+        let txn1 = mgr.begin_txn();
+        let _txn2 = mgr.begin_txn();
+
+        // Watermark should be at txn1 (oldest active)
+        mgr.commit_txn(txn1).unwrap();
+        // After committing txn1, watermark moves to txn2
+        assert_eq!(mgr.low_watermark(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // WAL UpdateRows / DeleteRows serialization tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wal_update_rows_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let wal_path = tmp.path().join("test.wal");
+
+        let entry = WalEntry::UpdateRows {
+            table: "users".to_string(),
+            predicate: Some("id = 1".to_string()),
+            assignments: vec![
+                ("name".to_string(), "'Alice'".to_string()),
+                ("age".to_string(), "30".to_string()),
+            ],
+            rows_affected: 1,
+        };
+
+        {
+            let mut wal = WriteAheadLog::new(&wal_path).unwrap();
+            wal.append(&entry).unwrap();
+            wal.flush().unwrap();
+        }
+
+        let wal = WriteAheadLog::open(&wal_path).unwrap();
+        let entries = wal.replay().unwrap();
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].1 {
+            WalEntry::UpdateRows {
+                table,
+                predicate,
+                assignments,
+                rows_affected,
+            } => {
+                assert_eq!(table, "users");
+                assert_eq!(predicate.as_deref(), Some("id = 1"));
+                assert_eq!(assignments.len(), 2);
+                assert_eq!(assignments[0], ("name".to_string(), "'Alice'".to_string()));
+                assert_eq!(assignments[1], ("age".to_string(), "30".to_string()));
+                assert_eq!(*rows_affected, 1);
+            }
+            other => panic!("Expected UpdateRows, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_wal_delete_rows_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let wal_path = tmp.path().join("test.wal");
+
+        let entry = WalEntry::DeleteRows {
+            table: "orders".to_string(),
+            predicate: Some("status = 'cancelled'".to_string()),
+            rows_affected: 5,
+        };
+
+        {
+            let mut wal = WriteAheadLog::new(&wal_path).unwrap();
+            wal.append(&entry).unwrap();
+            wal.flush().unwrap();
+        }
+
+        let wal = WriteAheadLog::open(&wal_path).unwrap();
+        let entries = wal.replay().unwrap();
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].1 {
+            WalEntry::DeleteRows {
+                table,
+                predicate,
+                rows_affected,
+            } => {
+                assert_eq!(table, "orders");
+                assert_eq!(predicate.as_deref(), Some("status = 'cancelled'"));
+                assert_eq!(*rows_affected, 5);
+            }
+            other => panic!("Expected DeleteRows, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_wal_delete_rows_no_predicate() {
+        let tmp = TempDir::new().unwrap();
+        let wal_path = tmp.path().join("test.wal");
+
+        let entry = WalEntry::DeleteRows {
+            table: "temp".to_string(),
+            predicate: None,
+            rows_affected: 100,
+        };
+
+        {
+            let mut wal = WriteAheadLog::new(&wal_path).unwrap();
+            wal.append(&entry).unwrap();
+            wal.flush().unwrap();
+        }
+
+        let wal = WriteAheadLog::open(&wal_path).unwrap();
+        let entries = wal.replay().unwrap();
+        assert_eq!(entries.len(), 1);
+
+        match &entries[0].1 {
+            WalEntry::DeleteRows {
+                predicate,
+                rows_affected,
+                ..
+            } => {
+                assert!(predicate.is_none());
+                assert_eq!(*rows_affected, 100);
+            }
+            other => panic!("Expected DeleteRows, got {:?}", other),
+        }
     }
 }
