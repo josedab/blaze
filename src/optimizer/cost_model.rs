@@ -399,6 +399,57 @@ impl CostModel {
             }
         }
     }
+
+    /// Estimate the total cost of a logical plan using cardinality estimates from statistics.
+    pub fn estimate_with_stats(
+        &self,
+        plan: &LogicalPlan,
+        estimator: &super::CardinalityEstimator,
+        stats_manager: &super::StatisticsManager,
+    ) -> Result<Cost> {
+        let card = estimator.estimate_plan(plan, stats_manager).unwrap_or(1000);
+        match plan {
+            LogicalPlan::TableScan {
+                projection, schema, ..
+            } => {
+                let num_cols = projection
+                    .as_ref()
+                    .map(|p| p.len())
+                    .unwrap_or(schema.fields().len());
+                Ok(self.scan_cost(card, num_cols * 8))
+            }
+            LogicalPlan::Filter { input, .. } => {
+                let input_cost = self.estimate_with_stats(input, estimator, stats_manager)?;
+                let input_card = estimator.estimate_plan(input, stats_manager).unwrap_or(1000);
+                let selectivity = if input_card > 0 { card as f64 / input_card as f64 } else { 0.5 };
+                Ok(input_cost + self.filter_cost(input_card, selectivity))
+            }
+            LogicalPlan::Projection { input, exprs, .. } => {
+                let input_cost = self.estimate_with_stats(input, estimator, stats_manager)?;
+                Ok(input_cost + self.projection_cost(card, exprs.len()))
+            }
+            LogicalPlan::Aggregate {
+                input, group_by, aggr_exprs, ..
+            } => {
+                let input_cost = self.estimate_with_stats(input, estimator, stats_manager)?;
+                let input_card = estimator.estimate_plan(input, stats_manager).unwrap_or(1000);
+                Ok(input_cost + self.hash_aggregate_cost(input_card, card, aggr_exprs.len()))
+            }
+            LogicalPlan::Sort { input, .. } => {
+                let input_cost = self.estimate_with_stats(input, estimator, stats_manager)?;
+                Ok(input_cost + self.sort_cost(card, card.min(100)))
+            }
+            LogicalPlan::Join { left, right, .. } => {
+                let left_cost = self.estimate_with_stats(left, estimator, stats_manager)?;
+                let right_cost = self.estimate_with_stats(right, estimator, stats_manager)?;
+                let left_card = estimator.estimate_plan(left, stats_manager).unwrap_or(1000);
+                let right_card = estimator.estimate_plan(right, stats_manager).unwrap_or(1000);
+                Ok(left_cost + right_cost + self.hash_join_cost(left_card, right_card, card))
+            }
+            // Fall back to basic estimate for all other plan types
+            _ => self.estimate(plan),
+        }
+    }
 }
 
 impl Default for CostModel {

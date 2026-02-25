@@ -27,7 +27,7 @@ pub mod statistics;
 pub use cardinality::CardinalityEstimator;
 pub use cost_model::{Cost, CostModel, DEFAULT_CPU_COST, DEFAULT_IO_COST};
 pub use join_ordering::JoinOrderOptimizer;
-pub use statistics::{ColumnStatistics, Histogram, StatisticsManager, TableStatistics};
+pub use statistics::{ColumnStatistics, Histogram, HistogramBucket, StatisticsManager, TableStatistics};
 
 use crate::error::Result;
 use crate::planner::LogicalPlan;
@@ -67,22 +67,24 @@ impl CostBasedOptimizer {
         // First, estimate cardinalities for all nodes
         let plan_with_stats = self.cardinality_estimator.estimate(plan, stats_manager)?;
 
-        // Optimize join ordering if there are multiple joins
-        let plan_with_optimized_joins = self
-            .join_optimizer
-            .optimize(&plan_with_stats, &self.cost_model)?;
+        // Optimize join ordering using cardinality estimates from statistics
+        let plan_with_optimized_joins = self.join_optimizer.optimize_with_stats(
+            &plan_with_stats,
+            &self.cost_model,
+            &self.cardinality_estimator,
+            stats_manager,
+        )?;
 
         Ok(plan_with_optimized_joins)
     }
 
-    /// Estimate the cost of a logical plan.
+    /// Estimate the cost of a logical plan using statistics-aware cardinality.
     pub fn estimate_cost(
         &self,
         plan: &LogicalPlan,
         stats_manager: &StatisticsManager,
     ) -> Result<Cost> {
-        let plan_with_stats = self.cardinality_estimator.estimate(plan, stats_manager)?;
-        self.cost_model.estimate(&plan_with_stats)
+        self.cost_model.estimate_with_stats(plan, &self.cardinality_estimator, stats_manager)
     }
 
     /// Get the cost model.

@@ -214,6 +214,11 @@ impl CardinalityEstimator {
                         for table_name in stats_manager.list_tables() {
                             if let Some(table_stats) = stats_manager.get(&table_name) {
                                 if let Some(col_stats) = table_stats.column(&col_name) {
+                                    if let Some(ndv) = col_stats.distinct_count {
+                                        if ndv > 0 {
+                                            return 1.0 / ndv as f64;
+                                        }
+                                    }
                                     return col_stats.selectivity_eq("");
                                 }
                             }
@@ -222,8 +227,27 @@ impl CardinalityEstimator {
                 }
                 DEFAULT_EQ_SELECTIVITY
             }
-            BinaryOp::NotEq => 1.0 - DEFAULT_EQ_SELECTIVITY,
+            BinaryOp::NotEq => {
+                // Use statistics-aware estimate for the complement
+                let eq_sel = self.estimate_binary_selectivity(left, &BinaryOp::Eq, right, stats_manager);
+                1.0 - eq_sel
+            }
             BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => {
+                // Try to use column statistics for range predicates
+                if self.is_column_to_literal(left, right) {
+                    if let Some(col_name) = self
+                        .get_column_name(left)
+                        .or_else(|| self.get_column_name(right))
+                    {
+                        for table_name in stats_manager.list_tables() {
+                            if let Some(table_stats) = stats_manager.get(&table_name) {
+                                if let Some(col_stats) = table_stats.column(&col_name) {
+                                    return col_stats.selectivity_range(None, None);
+                                }
+                            }
+                        }
+                    }
+                }
                 DEFAULT_RANGE_SELECTIVITY
             }
             _ => 1.0,
