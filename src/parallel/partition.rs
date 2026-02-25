@@ -13,6 +13,7 @@ use arrow::record_batch::RecordBatch;
 use crate::error::{BlazeError, Result};
 
 /// Partitioning scheme for data distribution.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Partitioning {
     /// Hash partitioning on specified columns

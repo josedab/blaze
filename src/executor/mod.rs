@@ -88,6 +88,16 @@ impl ExecutionContext {
         );
         executor.execute(plan)
     }
+
+    /// Execute a physical plan with parallel processing when beneficial.
+    pub fn parallel_execute(
+        &self,
+        plan: &PhysicalPlan,
+        config: &crate::parallel::ExecutionConfig,
+    ) -> Result<Vec<RecordBatch>> {
+        let parallel_executor = crate::parallel::ParallelExecutor::new(config.clone());
+        parallel_executor.execute(plan)
+    }
 }
 
 impl Default for ExecutionContext {
@@ -280,6 +290,16 @@ impl Executor {
             } => {
                 let input_batches = self.execute_plan(input)?;
                 self.execute_copy(&input_batches, target, format, options)
+            }
+            PhysicalPlan::Exchange {
+                input,
+                exchange_type,
+                key_columns,
+                num_partitions,
+                ..
+            } => {
+                let input_batches = self.execute_plan(input)?;
+                self.execute_exchange(input_batches, *exchange_type, key_columns, *num_partitions)
             }
         }
     }
@@ -480,6 +500,20 @@ impl Executor {
                 stats.add_metric("format", &format!("{:?}", format));
                 self.execute_copy(&input_batches, target, format, options)?
             }
+            PhysicalPlan::Exchange {
+                input,
+                exchange_type,
+                key_columns,
+                num_partitions,
+                ..
+            } => {
+                let (input_batches, child_stats) = self.execute_with_stats(input)?;
+                stats.children.push(child_stats);
+                stats.rows_processed = input_batches.iter().map(|b| b.num_rows()).sum();
+                stats.add_metric("exchange_type", &format!("{:?}", exchange_type));
+                stats.add_metric("num_partitions", &format!("{}", num_partitions));
+                self.execute_exchange(input_batches, *exchange_type, key_columns, *num_partitions)?
+            }
         };
 
         let elapsed = start.elapsed();
@@ -513,6 +547,9 @@ impl Executor {
             PhysicalPlan::Window { .. } => "Window".to_string(),
             PhysicalPlan::ExplainAnalyze { .. } => "ExplainAnalyze".to_string(),
             PhysicalPlan::Copy { target, .. } => format!("Copy({})", target),
+            PhysicalPlan::Exchange { exchange_type, num_partitions, .. } => {
+                format!("Exchange({:?}, {})", exchange_type, num_partitions)
+            }
         }
     }
 
@@ -861,6 +898,45 @@ impl Executor {
 
         // Return empty result - COPY TO doesn't return data
         Ok(vec![])
+    }
+
+    /// Execute an exchange operation on input batches.
+    fn execute_exchange(
+        &self,
+        input_batches: Vec<RecordBatch>,
+        exchange_type: crate::parallel::ExchangeType,
+        key_columns: &[usize],
+        num_partitions: usize,
+    ) -> Result<Vec<RecordBatch>> {
+        use crate::parallel::exchange::{
+            BroadcastExchange, Exchange, GatherExchange, RoundRobinExchange, ShuffleExchange,
+        };
+
+        if input_batches.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let inputs = vec![input_batches];
+
+        let exchange: Box<dyn Exchange> = match exchange_type {
+            crate::parallel::ExchangeType::Shuffle => Box::new(ShuffleExchange::new(
+                1,
+                num_partitions,
+                key_columns.to_vec(),
+            )),
+            crate::parallel::ExchangeType::Broadcast => {
+                Box::new(BroadcastExchange::new(1, num_partitions))
+            }
+            crate::parallel::ExchangeType::Gather => Box::new(GatherExchange::new(1)),
+            crate::parallel::ExchangeType::RoundRobin
+            | crate::parallel::ExchangeType::Repartition => {
+                Box::new(RoundRobinExchange::new(1, num_partitions))
+            }
+        };
+
+        let partitioned = exchange.execute(inputs)?;
+        // Flatten all partitions into a single result vector
+        Ok(partitioned.into_iter().flatten().collect())
     }
 }
 
@@ -1472,5 +1548,96 @@ mod tests {
             .unwrap();
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2); // Two categories: A and B
+    }
+
+    #[test]
+    fn test_execute_exchange_round_robin() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5, 6]))],
+        )
+        .unwrap();
+
+        let plan = PhysicalPlan::Exchange {
+            input: Box::new(PhysicalPlan::Values {
+                schema: schema.clone(),
+                data: vec![batch],
+            }),
+            exchange_type: crate::parallel::ExchangeType::RoundRobin,
+            key_columns: vec![],
+            num_partitions: 3,
+            schema: schema.clone(),
+        };
+
+        let ctx = ExecutionContext::new();
+        let results = ctx.execute(&plan).unwrap();
+
+        let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 6);
+    }
+
+    #[test]
+    fn test_execute_exchange_gather() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+
+        let plan = PhysicalPlan::Exchange {
+            input: Box::new(PhysicalPlan::Values {
+                schema: schema.clone(),
+                data: vec![batch],
+            }),
+            exchange_type: crate::parallel::ExchangeType::Gather,
+            key_columns: vec![],
+            num_partitions: 1,
+            schema: schema.clone(),
+        };
+
+        let ctx = ExecutionContext::new();
+        let results = ctx.execute(&plan).unwrap();
+
+        let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 3);
+    }
+
+    #[test]
+    fn test_parallel_execute_method() {
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+
+        let plan = PhysicalPlan::Values {
+            schema: schema.clone(),
+            data: vec![batch],
+        };
+
+        let ctx = ExecutionContext::new();
+        let config = crate::parallel::ExecutionConfig::new().with_parallelism(2);
+        let results = ctx.parallel_execute(&plan, &config).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].num_rows(), 3);
     }
 }

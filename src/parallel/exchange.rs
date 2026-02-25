@@ -11,6 +11,7 @@ use super::partition::{HashPartitioner, RoundRobinPartitioner};
 use crate::error::{BlazeError, Result};
 
 /// Type of exchange operation.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExchangeType {
     /// Hash-based shuffle to redistribute data
