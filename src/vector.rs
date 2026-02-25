@@ -757,6 +757,49 @@ impl HnswIndex {
             max_layer,
         })
     }
+
+    /// Insert multiple vectors efficiently.
+    pub fn batch_insert(&mut self, vectors: Vec<Vec<f32>>) -> Result<Vec<usize>> {
+        let mut ids = Vec::with_capacity(vectors.len());
+        for vector in vectors {
+            ids.push(self.insert(vector)?);
+        }
+        Ok(ids)
+    }
+
+    /// Estimate recall@k by comparing HNSW results against brute-force for a sample.
+    pub fn estimate_recall(&self, sample_queries: &[Vec<f32>], k: usize) -> Result<f64> {
+        if sample_queries.is_empty() || self.nodes.is_empty() {
+            return Ok(1.0);
+        }
+
+        let mut total_recall = 0.0;
+        for query in sample_queries {
+            // HNSW result
+            let hnsw_results = self.search_knn(query, k)?;
+            let hnsw_ids: HashSet<usize> = hnsw_results.iter().map(|(id, _)| *id).collect();
+
+            // Brute-force ground truth
+            let mut all_dists: Vec<(usize, f32)> = self
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, node)| {
+                    let d = compute_distance_metric(query, &node.vector, self.metric)
+                        .unwrap_or(f32::MAX);
+                    (i, d)
+                })
+                .collect();
+            all_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let true_ids: HashSet<usize> =
+                all_dists.iter().take(k).map(|(id, _)| *id).collect();
+
+            let overlap = hnsw_ids.intersection(&true_ids).count();
+            total_recall += overlap as f64 / k as f64;
+        }
+
+        Ok(total_recall / sample_queries.len() as f64)
+    }
 }
 
 impl VectorIndex for HnswIndex {
@@ -867,8 +910,29 @@ impl IvfIndex {
             return;
         }
         let k = self.num_clusters.min(vectors.len());
-        // Initialize centroids with first k vectors
-        let mut centroids: Vec<Vec<f32>> = vectors.iter().take(k).cloned().collect();
+        // k-means++ initialization for better convergence
+        let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(k);
+        centroids.push(vectors[0].clone());
+
+        for _ in 1..k {
+            let distances: Vec<f32> = vectors
+                .iter()
+                .map(|v| {
+                    centroids
+                        .iter()
+                        .map(|c| compute_distance_metric(v, c, self.metric).unwrap_or(f32::MAX))
+                        .fold(f32::MAX, f32::min)
+                })
+                .collect();
+            // Pick the vector with max min-distance to existing centroids
+            let max_idx = distances
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            centroids.push(vectors[max_idx].clone());
+        }
         let dim = centroids[0].len();
 
         // Run k-means for a fixed number of iterations
@@ -1558,6 +1622,18 @@ impl VectorIndexManager {
     pub fn index_count(&self) -> usize {
         self.indexes.len()
     }
+
+    /// Get statistics for all managed vector indexes.
+    pub fn index_stats(&self) -> Vec<(String, usize, String)> {
+        self.indexes
+            .iter()
+            .map(|(name, entry)| {
+                let size = entry.meta.num_vectors as usize;
+                let metric = format!("{:?}", entry.meta.metric);
+                (name.clone(), size, metric)
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1915,6 +1991,80 @@ fn parse_hnsw_config(json: &str) -> Result<HnswConfig> {
 }
 
 use base64;
+
+// ---------------------------------------------------------------------------
+// VECTOR_SEARCH SQL UDF
+// ---------------------------------------------------------------------------
+
+/// Create a VECTOR_SEARCH scalar function for SQL usage.
+/// Usage: VECTOR_SEARCH(column, query_vector_json, k, metric)
+/// Example: SELECT * FROM items ORDER BY VECTOR_SEARCH(embedding, '[1.0, 2.0, 3.0]', 10, 'l2')
+pub fn create_vector_search_udf() -> VectorSearchUdf {
+    VectorSearchUdf
+}
+
+/// UDF wrapper for vector search in SQL.
+pub struct VectorSearchUdf;
+
+impl VectorSearchUdf {
+    /// Parse a JSON array string into a vector.
+    pub fn parse_query_vector(json: &str) -> Result<Vec<f32>> {
+        let trimmed = json.trim();
+        if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+            return Err(BlazeError::invalid_argument(
+                "Query vector must be a JSON array like '[1.0, 2.0]'",
+            ));
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+        inner
+            .split(',')
+            .map(|s| {
+                s.trim().parse::<f32>().map_err(|e| {
+                    BlazeError::invalid_argument(format!("Invalid vector component: {}", e))
+                })
+            })
+            .collect()
+    }
+
+    /// Parse a distance metric from string.
+    pub fn parse_metric(s: &str) -> DistanceMetric {
+        match s.to_lowercase().as_str() {
+            "cosine" => DistanceMetric::Cosine,
+            "dot" | "dot_product" => DistanceMetric::DotProduct,
+            "ip" | "inner_product" => DistanceMetric::InnerProduct,
+            _ => DistanceMetric::L2,
+        }
+    }
+
+    /// Execute a vector search and return distances as a Float32Array.
+    pub fn compute_distances(
+        vectors: &ArrayRef,
+        query: &[f32],
+        metric: DistanceMetric,
+    ) -> Result<ArrayRef> {
+        let distances = VectorOps::compute_distances(vectors, query, metric)?;
+        Ok(Arc::new(distances) as ArrayRef)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File-based HNSW persistence
+// ---------------------------------------------------------------------------
+
+/// Save an HNSW index to a file.
+pub fn save_hnsw_to_file(index: &HnswIndex, path: &std::path::Path) -> Result<()> {
+    let bytes = index.serialize()?;
+    std::fs::write(path, bytes)
+        .map_err(|e| BlazeError::execution(format!("Failed to write HNSW index: {}", e)))?;
+    Ok(())
+}
+
+/// Load an HNSW index from a file.
+pub fn load_hnsw_from_file(path: &std::path::Path, config: HnswConfig) -> Result<HnswIndex> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| BlazeError::execution(format!("Failed to read HNSW index: {}", e)))?;
+    HnswIndex::deserialize(&bytes, config)
+}
 
 #[cfg(test)]
 mod tests {
@@ -2708,5 +2858,172 @@ mod tests {
         let meta = std::collections::HashMap::new();
         let result = hnsw_from_parquet_metadata(&meta).unwrap();
         assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // HNSW batch insert tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hnsw_batch_insert() {
+        let mut index = HnswIndex::with_defaults(DistanceMetric::L2);
+        let vectors = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+            vec![1.0, 1.0, 0.0],
+        ];
+        let ids = index.batch_insert(vectors).unwrap();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(ids, vec![0, 1, 2, 3]);
+        assert_eq!(index.len(), 4);
+    }
+
+    #[test]
+    fn test_hnsw_batch_insert_empty() {
+        let mut index = HnswIndex::with_defaults(DistanceMetric::L2);
+        let ids = index.batch_insert(Vec::new()).unwrap();
+        assert!(ids.is_empty());
+        assert!(index.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // File persistence tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hnsw_file_persistence() {
+        let mut index = HnswIndex::with_defaults(DistanceMetric::L2);
+        index.insert(vec![1.0, 2.0, 3.0]).unwrap();
+        index.insert(vec![4.0, 5.0, 6.0]).unwrap();
+        index.insert(vec![7.0, 8.0, 9.0]).unwrap();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("blaze_test_hnsw.idx");
+
+        save_hnsw_to_file(&index, &path).unwrap();
+        assert!(path.exists());
+
+        let loaded = load_hnsw_from_file(&path, HnswConfig::default()).unwrap();
+        assert_eq!(loaded.len(), 3);
+
+        // Verify search still works on loaded index
+        let results = loaded.search_knn(&[1.0, 2.0, 3.0], 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1 < 0.001); // nearest should be almost 0 distance
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_hnsw_file_persistence_missing_file() {
+        let result = load_hnsw_from_file(
+            std::path::Path::new("/nonexistent/path/index.bin"),
+            HnswConfig::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // VectorSearchUdf tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_udf_parse_query_vector() {
+        let v = VectorSearchUdf::parse_query_vector("[1.0, 2.5, 3.0]").unwrap();
+        assert_eq!(v, vec![1.0, 2.5, 3.0]);
+    }
+
+    #[test]
+    fn test_udf_parse_query_vector_whitespace() {
+        let v = VectorSearchUdf::parse_query_vector("  [ 1.0 , 2.0 ]  ").unwrap();
+        assert_eq!(v, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_udf_parse_query_vector_invalid() {
+        assert!(VectorSearchUdf::parse_query_vector("not an array").is_err());
+        assert!(VectorSearchUdf::parse_query_vector("[1.0, abc]").is_err());
+    }
+
+    #[test]
+    fn test_udf_parse_metric() {
+        assert_eq!(VectorSearchUdf::parse_metric("l2"), DistanceMetric::L2);
+        assert_eq!(VectorSearchUdf::parse_metric("cosine"), DistanceMetric::Cosine);
+        assert_eq!(VectorSearchUdf::parse_metric("dot"), DistanceMetric::DotProduct);
+        assert_eq!(VectorSearchUdf::parse_metric("dot_product"), DistanceMetric::DotProduct);
+        assert_eq!(VectorSearchUdf::parse_metric("ip"), DistanceMetric::InnerProduct);
+        assert_eq!(VectorSearchUdf::parse_metric("inner_product"), DistanceMetric::InnerProduct);
+        assert_eq!(VectorSearchUdf::parse_metric("unknown"), DistanceMetric::L2);
+    }
+
+    #[test]
+    fn test_create_vector_search_udf() {
+        let _udf = create_vector_search_udf();
+        // Smoke test: just ensure it creates without panic
+    }
+
+    // -----------------------------------------------------------------------
+    // IVF k-means++ training test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ivf_kmeans_plus_plus_init() {
+        let mut ivf = IvfIndex::new(3, DistanceMetric::L2);
+        // Three well-separated clusters
+        let vectors = vec![
+            vec![0.0, 0.0],
+            vec![0.1, 0.1],
+            vec![10.0, 0.0],
+            vec![10.1, 0.1],
+            vec![0.0, 10.0],
+            vec![0.1, 10.1],
+        ];
+        ivf.train(&vectors);
+        // After training, should have 3 centroids
+        assert_eq!(ivf.centroids.len(), 3);
+        // Each centroid should be roughly near one of the three clusters
+        // Insert and search to verify the index works
+        for (i, v) in vectors.iter().enumerate() {
+            ivf.insert(i, v);
+        }
+        let results = ivf.search_knn(&[0.0, 0.0], 2, 3);
+        assert!(!results.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Recall estimation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_recall_estimation_empty() {
+        let index = HnswIndex::with_defaults(DistanceMetric::L2);
+        let recall = index.estimate_recall(&[], 5).unwrap();
+        assert!((recall - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_recall_estimation_with_data() {
+        let mut index = HnswIndex::new(
+            DistanceMetric::L2,
+            HnswConfig {
+                ef_search: 100,
+                ..HnswConfig::default()
+            },
+        );
+        // Insert enough vectors to test recall
+        for i in 0..50 {
+            let v = vec![i as f32, (i * 2) as f32, (i * 3) as f32];
+            index.insert(v).unwrap();
+        }
+
+        let queries = vec![
+            vec![0.0, 0.0, 0.0],
+            vec![25.0, 50.0, 75.0],
+            vec![49.0, 98.0, 147.0],
+        ];
+        let recall = index.estimate_recall(&queries, 5).unwrap();
+        // With high ef_search and small dataset, recall should be very high
+        assert!(recall > 0.5, "Recall too low: {}", recall);
     }
 }
