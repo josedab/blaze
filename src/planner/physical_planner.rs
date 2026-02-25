@@ -819,6 +819,7 @@ impl PhysicalPlanner {
             PhysicalPlan::Window { schema, .. } => schema.clone(),
             PhysicalPlan::ExplainAnalyze { schema, .. } => schema.clone(),
             PhysicalPlan::Copy { schema, .. } => schema.clone(),
+            PhysicalPlan::Exchange { schema, .. } => schema.clone(),
         }
     }
 

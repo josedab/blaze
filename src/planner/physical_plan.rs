@@ -10,6 +10,7 @@ use super::logical_plan::{JoinType, TimeTravelSpec};
 use super::physical_expr::PhysicalExpr;
 
 /// A physical plan node that can be executed.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum PhysicalPlan {
     /// Table scan
@@ -183,6 +184,20 @@ pub enum PhysicalPlan {
         /// Output schema
         schema: Arc<ArrowSchema>,
     },
+
+    /// Exchange operator for parallel data redistribution
+    Exchange {
+        /// Input plan
+        input: Box<PhysicalPlan>,
+        /// Type of exchange operation
+        exchange_type: crate::parallel::ExchangeType,
+        /// Key columns for hash-based exchanges
+        key_columns: Vec<usize>,
+        /// Number of output partitions
+        num_partitions: usize,
+        /// Output schema
+        schema: Arc<ArrowSchema>,
+    },
 }
 
 /// Output format for COPY TO.
@@ -216,6 +231,7 @@ impl PhysicalPlan {
             PhysicalPlan::Window { schema, .. } => schema.clone(),
             PhysicalPlan::ExplainAnalyze { schema, .. } => schema.clone(),
             PhysicalPlan::Copy { schema, .. } => schema.clone(),
+            PhysicalPlan::Exchange { schema, .. } => schema.clone(),
         }
     }
 
@@ -238,6 +254,7 @@ impl PhysicalPlan {
             PhysicalPlan::Window { input, .. } => vec![input.as_ref()],
             PhysicalPlan::ExplainAnalyze { input, .. } => vec![input.as_ref()],
             PhysicalPlan::Copy { input, .. } => vec![input.as_ref()],
+            PhysicalPlan::Exchange { input, .. } => vec![input.as_ref()],
         }
     }
 
@@ -379,6 +396,18 @@ impl PhysicalPlan {
                 f.push_str(&format!(
                     "{}Copy: target='{}' format={:?}\n",
                     prefix, target, format
+                ));
+                input.format_indent(f, indent + 1);
+            }
+            PhysicalPlan::Exchange {
+                input,
+                exchange_type,
+                num_partitions,
+                ..
+            } => {
+                f.push_str(&format!(
+                    "{}Exchange: type={:?} partitions={}\n",
+                    prefix, exchange_type, num_partitions
                 ));
                 input.format_indent(f, indent + 1);
             }
