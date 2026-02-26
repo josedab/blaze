@@ -567,6 +567,19 @@ impl MaterializedViewManager {
             cb(name, data);
         }
     }
+
+    /// Get staleness information for all materialized views.
+    pub fn staleness_info(&self) -> Vec<(String, bool)> {
+        let views = self.views.read();
+        let trackers = self.trackers.read();
+        views
+            .iter()
+            .map(|(name, view)| {
+                let stale = view.needs_refresh(&trackers);
+                (name.clone(), stale)
+            })
+            .collect()
+    }
 }
 
 /// Refresh policy for materialized views.
@@ -4253,6 +4266,25 @@ mod tests {
 
         let needing = enforcer.views_needing_refresh();
         assert!(needing.contains(&"v1".to_string()));
+    }
+
+    #[test]
+    fn test_staleness_info() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE t1 (id BIGINT)").unwrap();
+        conn.execute("INSERT INTO t1 VALUES (1)").unwrap();
+
+        let mgr = MaterializedViewManager::new(
+            conn.catalog_list().clone(),
+            ExecutionContext::new().with_catalog_list(conn.catalog_list().clone()),
+        );
+
+        mgr.create_view("v1", "SELECT * FROM t1", vec!["t1".to_string()])
+            .unwrap();
+
+        let info = mgr.staleness_info();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].0, "v1");
     }
 }
 
