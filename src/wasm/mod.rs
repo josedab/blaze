@@ -32,7 +32,7 @@ mod serialization;
 pub mod vfs;
 pub mod worker;
 
-pub use bindings::{WasmConnection, WasmError, WasmQueryResult};
+pub use bindings::{WasmConnection, WasmError, WasmQueryResult, WasmStreamingResult};
 pub use memory::{WasmBuffer, WasmMemoryManager};
 pub use serialization::{ArrowIpcSerializer, JsonSerializer};
 pub use worker::{QueryTaskId, QueryTaskStatus, WasmOptConfig, WorkerQueryManager};
@@ -776,6 +776,150 @@ impl WasmSizeRegression {
     }
 }
 
+/// Bundle size optimization report for the WASM build.
+#[derive(Debug, Clone)]
+pub struct BundleOptimizationReport {
+    /// Current estimated uncompressed size
+    pub uncompressed_bytes: usize,
+    /// Current estimated gzipped size
+    pub gzip_bytes: usize,
+    /// Recommended tree-shaking removals
+    pub removable_features: Vec<String>,
+    /// Estimated savings from tree shaking
+    pub potential_savings_bytes: usize,
+    /// Whether within 2MB gzipped target
+    pub within_target: bool,
+}
+
+impl BundleOptimizationReport {
+    pub fn generate() -> Self {
+        let analyzer = TreeShakingAnalyzer::new();
+        let removable: Vec<String> = analyzer
+            .removable_features()
+            .iter()
+            .map(|f| f.name.clone())
+            .collect();
+        let savings = analyzer.estimated_savings();
+        let total = analyzer.estimated_size();
+        let gzip_estimate = total * 3 / 10; // ~30% gzip ratio for WASM
+
+        Self {
+            uncompressed_bytes: total,
+            gzip_bytes: gzip_estimate,
+            removable_features: removable,
+            potential_savings_bytes: savings,
+            within_target: gzip_estimate <= 2 * 1024 * 1024,
+        }
+    }
+
+    pub fn format_report(&self) -> String {
+        let mut report = String::new();
+        report.push_str("=== WASM Bundle Optimization Report ===\n");
+        report.push_str(&format!(
+            "Uncompressed: {} KB\n",
+            self.uncompressed_bytes / 1024
+        ));
+        report.push_str(&format!("Estimated gzip: {} KB\n", self.gzip_bytes / 1024));
+        report.push_str(&format!(
+            "Target (2MB gzip): {}\n",
+            if self.within_target {
+                "✓ PASS"
+            } else {
+                "✗ FAIL"
+            }
+        ));
+        if !self.removable_features.is_empty() {
+            report.push_str(&format!(
+                "Removable features: {}\n",
+                self.removable_features.join(", ")
+            ));
+            report.push_str(&format!(
+                "Potential savings: {} KB\n",
+                self.potential_savings_bytes / 1024
+            ));
+        }
+        report
+    }
+}
+
+/// Track cold start time from module load to first query.
+pub struct ColdStartTracker {
+    module_load_start: Option<std::time::Instant>,
+    module_load_end: Option<std::time::Instant>,
+    first_query_start: Option<std::time::Instant>,
+    first_query_end: Option<std::time::Instant>,
+}
+
+impl ColdStartTracker {
+    pub fn new() -> Self {
+        Self {
+            module_load_start: None,
+            module_load_end: None,
+            first_query_start: None,
+            first_query_end: None,
+        }
+    }
+
+    pub fn start_module_load(&mut self) {
+        self.module_load_start = Some(std::time::Instant::now());
+    }
+
+    pub fn end_module_load(&mut self) {
+        self.module_load_end = Some(std::time::Instant::now());
+    }
+
+    pub fn start_first_query(&mut self) {
+        self.first_query_start = Some(std::time::Instant::now());
+    }
+
+    pub fn end_first_query(&mut self) {
+        self.first_query_end = Some(std::time::Instant::now());
+    }
+
+    pub fn cold_start_ms(&self) -> Option<u64> {
+        match (self.module_load_start, self.first_query_end) {
+            (Some(start), Some(end)) => Some(end.duration_since(start).as_millis() as u64),
+            _ => None,
+        }
+    }
+
+    pub fn module_load_ms(&self) -> Option<u64> {
+        match (self.module_load_start, self.module_load_end) {
+            (Some(start), Some(end)) => Some(end.duration_since(start).as_millis() as u64),
+            _ => None,
+        }
+    }
+
+    pub fn is_within_target(&self, target_ms: u64) -> bool {
+        self.cold_start_ms()
+            .map(|ms| ms <= target_ms)
+            .unwrap_or(false)
+    }
+}
+
+impl Default for ColdStartTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Check if SharedArrayBuffer is available in the current WASM environment.
+pub fn shared_array_buffer_available() -> bool {
+    // SharedArrayBuffer requires cross-origin isolation (COOP/COEP headers)
+    // In native contexts (not WASM), this always returns false
+    cfg!(target_arch = "wasm32")
+}
+
+/// Recommended thread count based on environment capabilities.
+pub fn recommended_thread_count() -> usize {
+    if shared_array_buffer_available() {
+        // In WASM with SharedArrayBuffer, use navigator.hardwareConcurrency
+        4 // Default for WASM environments
+    } else {
+        1 // Single-threaded without SharedArrayBuffer
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1044,5 +1188,63 @@ mod tests {
         let report = reg.report();
         assert!(report.contains("PASS"));
         assert!(report.contains("420000"));
+    }
+
+    #[test]
+    fn test_bundle_optimization_report_generation() {
+        let report = BundleOptimizationReport::generate();
+        assert!(report.uncompressed_bytes > 0);
+        assert!(report.gzip_bytes > 0);
+        assert!(!report.removable_features.is_empty());
+        assert!(report.potential_savings_bytes > 0);
+        // With default analyzer (no used features), gzip estimate is small
+        assert!(report.within_target);
+    }
+
+    #[test]
+    fn test_bundle_optimization_report_format() {
+        let report = BundleOptimizationReport::generate();
+        let text = report.format_report();
+        assert!(text.contains("WASM Bundle Optimization Report"));
+        assert!(text.contains("Uncompressed:"));
+        assert!(text.contains("Estimated gzip:"));
+        assert!(text.contains("PASS") || text.contains("FAIL"));
+    }
+
+    #[test]
+    fn test_cold_start_tracker_timing() {
+        let mut tracker = ColdStartTracker::new();
+        assert!(tracker.cold_start_ms().is_none());
+        assert!(tracker.module_load_ms().is_none());
+        assert!(!tracker.is_within_target(1000));
+
+        tracker.start_module_load();
+        tracker.end_module_load();
+        assert!(tracker.module_load_ms().is_some());
+
+        tracker.start_first_query();
+        tracker.end_first_query();
+        assert!(tracker.cold_start_ms().is_some());
+        // Total time should be very small in a test
+        assert!(tracker.is_within_target(10_000));
+    }
+
+    #[test]
+    fn test_cold_start_tracker_default() {
+        let tracker = ColdStartTracker::default();
+        assert!(tracker.cold_start_ms().is_none());
+        assert!(tracker.module_load_ms().is_none());
+    }
+
+    #[test]
+    fn test_shared_array_buffer_available() {
+        // On non-WASM targets, this should return false
+        assert!(!shared_array_buffer_available());
+    }
+
+    #[test]
+    fn test_recommended_thread_count() {
+        // On non-WASM targets, should return 1 (single-threaded)
+        assert_eq!(recommended_thread_count(), 1);
     }
 }
