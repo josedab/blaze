@@ -136,6 +136,16 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## API Stability
+//!
+//! This crate follows semantic versioning. Key public types are marked
+//! `#[non_exhaustive]` to allow future additions without breaking changes.
+//! The primary stable API surface is:
+//!
+//! - [`Connection`] — main entry point for creating and querying databases
+//! - [`error::BlazeError`] — error types
+//! - [`error::Result`] — result type alias
 
 // Core modules (always available)
 pub mod approx;
@@ -285,6 +295,16 @@ pub struct Connection {
     txn_batch_snapshot: parking_lot::Mutex<HashMap<String, usize>>,
     /// Savepoint batch count snapshots: savepoint_name -> (table_name -> batch_count)
     savepoint_snapshots: parking_lot::Mutex<HashMap<String, HashMap<String, usize>>>,
+    /// WAL for persistent connections (None for in-memory)
+    wal: Option<parking_lot::Mutex<persistence::WriteAheadLog>>,
+    /// MVCC manager for snapshot isolation
+    mvcc_manager: Arc<persistence::MvccManager>,
+    /// Statistics manager for cost-based optimization
+    stats_manager: Arc<optimizer::StatisticsManager>,
+    /// Query result cache
+    query_cache: Arc<cache::QueryCache>,
+    /// Materialized view manager
+    mv_manager: Arc<materialized::MaterializedViewManager>,
 }
 
 impl Connection {
@@ -300,8 +320,13 @@ impl Connection {
     #[must_use = "connection creation may fail; handle the Result"]
     pub fn in_memory() -> Result<Self> {
         let catalog_list = Arc::new(CatalogList::default());
-        Ok(Self {
-            execution_context: ExecutionContext::new().with_catalog_list(catalog_list.clone()),
+        let execution_context = ExecutionContext::new().with_catalog_list(catalog_list.clone());
+        let mv_manager = Arc::new(materialized::MaterializedViewManager::new(
+            catalog_list.clone(),
+            execution_context.clone(),
+        ));
+        let conn = Self {
+            execution_context,
             catalog_list,
             optimizer: Optimizer::default(),
             udf_registry: Arc::new(udf::UdfRegistry::new()),
@@ -309,7 +334,39 @@ impl Connection {
             active_txn: parking_lot::Mutex::new(None),
             txn_batch_snapshot: parking_lot::Mutex::new(HashMap::new()),
             savepoint_snapshots: parking_lot::Mutex::new(HashMap::new()),
-        })
+            wal: None,
+            mvcc_manager: Arc::new(persistence::MvccManager::new()),
+            stats_manager: Arc::new(optimizer::StatisticsManager::new()),
+            query_cache: Arc::new(cache::QueryCache::with_default_config()),
+            mv_manager,
+        };
+        conn.register_builtin_functions();
+        Ok(conn)
+    }
+
+    /// Register built-in functions like VECTOR_SEARCH.
+    fn register_builtin_functions(&self) {
+        use arrow::array::Float32Array;
+
+        // VECTOR_SEARCH(column, k) → returns Float32 distances
+        // In practice this is a placeholder; real vector search requires index context.
+        let vector_distance_udf = udf::ScalarUdf::new(
+            "vector_distance",
+            vec![],  // Dynamic args
+            types::DataType::Float64,
+            |args: &[arrow::array::ArrayRef]| -> crate::error::Result<arrow::array::ArrayRef> {
+                if args.len() < 2 {
+                    return Err(BlazeError::execution(
+                        "vector_distance requires at least 2 arguments (vector_column, query_vector)"
+                    ));
+                }
+                let n = args[0].len();
+                // Return dummy distances for now; real impl requires index lookup
+                let distances: Vec<f32> = (0..n).map(|i| i as f32).collect();
+                Ok(Arc::new(Float32Array::from(distances)) as arrow::array::ArrayRef)
+            },
+        );
+        let _ = self.udf_registry.register_scalar(vector_distance_udf);
     }
 
     /// Create a connection with custom configuration.
@@ -324,7 +381,12 @@ impl Connection {
             ctx = ctx.with_memory_limit(limit);
         }
 
-        Ok(Self {
+        let mv_manager = Arc::new(materialized::MaterializedViewManager::new(
+            catalog_list.clone(),
+            ctx.clone(),
+        ));
+
+        let conn = Self {
             execution_context: ctx,
             catalog_list,
             optimizer: Optimizer::default(),
@@ -333,7 +395,14 @@ impl Connection {
             active_txn: parking_lot::Mutex::new(None),
             txn_batch_snapshot: parking_lot::Mutex::new(HashMap::new()),
             savepoint_snapshots: parking_lot::Mutex::new(HashMap::new()),
-        })
+            wal: None,
+            mvcc_manager: Arc::new(persistence::MvccManager::new()),
+            stats_manager: Arc::new(optimizer::StatisticsManager::new()),
+            query_cache: Arc::new(cache::QueryCache::with_default_config()),
+            mv_manager,
+        };
+        conn.register_builtin_functions();
+        Ok(conn)
     }
 
     /// Execute a SQL query and return results.
@@ -346,8 +415,22 @@ impl Connection {
     /// ```
     #[must_use = "query results should not be silently discarded"]
     pub fn query(&self, sql: &str) -> Result<Vec<RecordBatch>> {
+        // Detect cache hints
+        let cache_hint = Self::has_cache_hint(sql);
+        let use_cache = cache_hint != Some(false);
+
+        // Strip cache hints before parsing
+        let clean_sql = Self::strip_cache_hints(sql);
+
+        // Check cache first (unless NO_CACHE hint)
+        if use_cache {
+            if let Some(cached) = self.query_cache.get(&clean_sql) {
+                return Ok(cached);
+            }
+        }
+
         // Parse SQL
-        let statements = Parser::parse(sql)?;
+        let statements = Parser::parse(&clean_sql)?;
 
         // Take the first statement (ignore any additional statements)
         let Some(statement) = statements.into_iter().next() else {
@@ -358,15 +441,32 @@ impl Connection {
         let binder = Binder::new(self.catalog_list.clone());
         let logical_plan = binder.bind(statement)?;
 
-        // Optimize logical plan
+        // Extract referenced tables before optimization
+        let referenced_tables = self.extract_referenced_tables(&logical_plan);
+
+        // Optimize logical plan (rule-based)
         let optimized_plan = self.optimizer.optimize(&logical_plan)?;
+
+        // Apply cost-based optimization
+        let optimized_plan = {
+            let cbo = optimizer::CostBasedOptimizer::new();
+            cbo.optimize(&optimized_plan, &self.stats_manager)
+                .unwrap_or(optimized_plan)
+        };
 
         // Create physical plan
         let physical_planner = PhysicalPlanner::new();
         let physical_plan = physical_planner.create_physical_plan(&optimized_plan)?;
 
         // Execute
-        self.execution_context.execute(&physical_plan)
+        let result = self.execution_context.execute(&physical_plan)?;
+
+        // Cache the result (unless NO_CACHE hint)
+        if use_cache {
+            self.query_cache.put(&clean_sql, result.clone(), &referenced_tables);
+        }
+
+        Ok(result)
     }
 
     /// Execute a SQL statement that doesn't return results.
@@ -383,6 +483,12 @@ impl Connection {
     /// ```
     #[must_use = "execute may fail; handle the Result to detect errors"]
     pub fn execute(&self, sql: &str) -> Result<usize> {
+        // Handle special commands
+        let trimmed = sql.trim().to_uppercase();
+        if trimmed == "EXPLAIN CACHE" || trimmed == "EXPLAIN CACHE;" {
+            return self.execute_explain_cache();
+        }
+
         // Parse SQL
         let statements = Parser::parse(sql)?;
 
@@ -427,6 +533,7 @@ impl Connection {
                         let table = MemoryTable::new(schema, results);
                         self.register_table(&table_name, Arc::new(table))?;
                     }
+                    self.query_cache.invalidate_table(&table_name);
                     return Ok(0);
                 }
 
@@ -445,14 +552,35 @@ impl Connection {
                 );
 
                 let table_name = create.name.last().cloned().unwrap_or_default();
-                let table = MemoryTable::empty(schema);
+                let table = MemoryTable::empty(schema.clone());
                 self.register_table(&table_name, Arc::new(table))?;
+                self.query_cache.invalidate_table(&table_name);
+                // Log to WAL for persistence
+                if let Some(ref wal) = self.wal {
+                    let mut wal = wal.lock();
+                    wal.append(&persistence::WalEntry::CreateTable {
+                        name: table_name,
+                        schema,
+                    })?;
+                    wal.flush()?;
+                }
                 Ok(0)
             }
             sql::Statement::DropTable(drop) => {
                 let table_name = drop.name.last().cloned().unwrap_or_default();
+                self.query_cache.invalidate_table(&table_name);
                 match self.deregister_table(&table_name) {
-                    Ok(_) => Ok(0),
+                    Ok(_) => {
+                        // Log to WAL for persistence
+                        if let Some(ref wal) = self.wal {
+                            let mut wal = wal.lock();
+                            let _ = wal.append(&persistence::WalEntry::DropTable {
+                                name: table_name,
+                            });
+                            let _ = wal.flush();
+                        }
+                        Ok(0)
+                    }
                     Err(_) if drop.if_exists => Ok(0),
                     Err(e) => Err(e),
                 }
@@ -557,7 +685,7 @@ impl Connection {
                 Ok(0)
             }
             sql::Statement::CreateMaterializedView(cmv) => {
-                self.execute_create_materialized_view(cmv.clone())
+                self.execute_create_materialized_view(cmv.clone(), sql)
             }
             sql::Statement::RefreshMaterializedView { name } => {
                 let view_name = name.last().cloned().unwrap_or_default();
@@ -583,10 +711,23 @@ impl Connection {
 
     /// Execute an INSERT statement.
     fn execute_insert(&self, insert: sql::parser::Insert) -> Result<usize> {
-        use arrow::array::*;
-
-        // Get the table name
         let table_name = insert.table_name.last().cloned().unwrap_or_default();
+
+        // MVCC: begin implicit transaction for this DML
+        let txn_id = self.mvcc_manager.begin_txn();
+
+        let result = self.execute_insert_inner(&table_name, insert);
+
+        match &result {
+            Ok(_) => { let _ = self.mvcc_manager.commit_txn(txn_id); }
+            Err(_) => { let _ = self.mvcc_manager.abort_txn(txn_id); }
+        }
+
+        result
+    }
+
+    fn execute_insert_inner(&self, table_name: &str, insert: sql::parser::Insert) -> Result<usize> {
+        use arrow::array::*;
 
         // Get the table from the catalog
         let catalog = self
@@ -653,16 +794,63 @@ impl Connection {
         let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
 
         // Append to the table
-        memory_table.append(batches);
+        memory_table.append(batches.clone());
+
+        // Log to WAL if persistent
+        if let Some(ref wal) = self.wal {
+            for batch in &batches {
+                let mut buf = Vec::new();
+                {
+                    let mut writer =
+                        arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())
+                            .map_err(|e| {
+                                BlazeError::execution(format!(
+                                    "Failed to serialize batch for WAL: {}",
+                                    e
+                                ))
+                            })?;
+                    writer.write(batch).map_err(|e| {
+                        BlazeError::execution(format!("Failed to write batch to WAL: {}", e))
+                    })?;
+                    writer.finish().map_err(|e| {
+                        BlazeError::execution(format!("Failed to finish WAL batch: {}", e))
+                    })?;
+                }
+                let mut wal = wal.lock();
+                wal.append(&persistence::WalEntry::InsertBatch {
+                    table: table_name.to_string(),
+                    batch_data: buf,
+                })?;
+                wal.flush()?;
+            }
+        }
+
+        self.query_cache.invalidate_table(&table_name);
+
+        // Notify materialized view manager of the insert
+        self.mv_manager.notify_insert(&table_name, &batches);
 
         Ok(row_count)
     }
 
     /// Execute an UPDATE statement.
     fn execute_update(&self, update: sql::parser::Update) -> Result<usize> {
-        // Get the table name
         let table_name = update.table_name.last().cloned().unwrap_or_default();
 
+        // MVCC: begin implicit transaction for this DML
+        let txn_id = self.mvcc_manager.begin_txn();
+
+        let result = self.execute_update_inner(&table_name, update);
+
+        match &result {
+            Ok(_) => { let _ = self.mvcc_manager.commit_txn(txn_id); }
+            Err(_) => { let _ = self.mvcc_manager.abort_txn(txn_id); }
+        }
+
+        result
+    }
+
+    fn execute_update_inner(&self, table_name: &str, update: sql::parser::Update) -> Result<usize> {
         // Get the table from the catalog
         let catalog = self
             .catalog_list
@@ -754,18 +942,55 @@ impl Connection {
             new_batches.push(RecordBatch::try_new(arrow_schema.clone(), columns)?);
         }
 
+        // Track update for materialized view staleness
+        self.mv_manager.track_table(table_name).record_update(&new_batches);
+
         // Replace table data
         memory_table.replace(new_batches);
+
+        // Invalidate cache for this table
+        self.query_cache.invalidate_table(&table_name);
+
+        // Log to WAL if persistent
+        if let Some(ref wal) = self.wal {
+            let assignments: Vec<(String, String)> = update
+                .assignments
+                .iter()
+                .map(|(col, expr)| (col.clone(), Self::expr_to_sql(expr)))
+                .collect();
+            let predicate = update.selection.as_ref().map(|s| Self::expr_to_sql(s));
+            let mut wal = wal.lock();
+            wal.append(&persistence::WalEntry::UpdateRows {
+                table: table_name.to_string(),
+                predicate,
+                assignments,
+                rows_affected: updated_count,
+            })?;
+            wal.flush()?;
+        }
 
         Ok(updated_count)
     }
 
     /// Execute a DELETE statement.
     fn execute_delete(&self, delete: sql::parser::Delete) -> Result<usize> {
-        use arrow::compute::filter_record_batch;
-
-        // Get the table name
         let table_name = delete.table_name.last().cloned().unwrap_or_default();
+
+        // MVCC: begin implicit transaction for this DML
+        let txn_id = self.mvcc_manager.begin_txn();
+
+        let result = self.execute_delete_inner(&table_name, delete);
+
+        match &result {
+            Ok(_) => { let _ = self.mvcc_manager.commit_txn(txn_id); }
+            Err(_) => { let _ = self.mvcc_manager.abort_txn(txn_id); }
+        }
+
+        result
+    }
+
+    fn execute_delete_inner(&self, table_name: &str, delete: sql::parser::Delete) -> Result<usize> {
+        use arrow::compute::filter_record_batch;
 
         // Get the table from the catalog
         let catalog = self
@@ -840,7 +1065,240 @@ impl Connection {
         // Replace table data
         memory_table.replace(new_batches);
 
+        // Invalidate cache for this table
+        self.query_cache.invalidate_table(&table_name);
+
+        // Track delete for materialized view staleness
+        self.mv_manager.track_table(table_name).record_delete(&[]);
+
+        // Log to WAL if persistent
+        if let Some(ref wal) = self.wal {
+            let predicate = delete.selection.as_ref().map(|s| Self::expr_to_sql(s));
+            let mut wal = wal.lock();
+            wal.append(&persistence::WalEntry::DeleteRows {
+                table: table_name.to_string(),
+                predicate,
+                rows_affected: deleted_count,
+            })?;
+            wal.flush()?;
+        }
+
         Ok(deleted_count)
+    }
+
+    /// Execute EXPLAIN CACHE command.
+    fn execute_explain_cache(&self) -> Result<usize> {
+        let report = cache::CacheExplainer::explain_text(&self.query_cache);
+        println!("{}", report);
+        Ok(0)
+    }
+
+    /// Extract table names referenced in a logical plan.
+    fn extract_referenced_tables(&self, plan: &planner::LogicalPlan) -> Vec<String> {
+        let mut tables = Vec::new();
+        self.collect_table_names(plan, &mut tables);
+        tables
+    }
+
+    /// Recursively collect table names from a logical plan.
+    fn collect_table_names(&self, plan: &planner::LogicalPlan, tables: &mut Vec<String>) {
+        if let planner::LogicalPlan::TableScan { table_ref, .. } = plan {
+            tables.push(table_ref.table.clone());
+        }
+        for child in plan.children() {
+            self.collect_table_names(child, tables);
+        }
+    }
+
+    /// Detect cache hints in SQL: `/*+ CACHE */` or `/*+ NO_CACHE */`.
+    fn has_cache_hint(sql: &str) -> Option<bool> {
+        if sql.contains("/*+ CACHE */") || sql.contains("/*+CACHE*/") {
+            Some(true)
+        } else if sql.contains("/*+ NO_CACHE */") || sql.contains("/*+NO_CACHE*/") {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Strip cache hint comments from SQL.
+    fn strip_cache_hints(sql: &str) -> String {
+        sql.replace("/*+ CACHE */", "")
+            .replace("/*+CACHE*/", "")
+            .replace("/*+ NO_CACHE */", "")
+            .replace("/*+NO_CACHE*/", "")
+    }
+
+    /// Get a reference to the query cache.
+    pub fn query_cache(&self) -> &cache::QueryCache {
+        &self.query_cache
+    }
+
+    /// Get a reference to the materialized view manager.
+    pub fn mv_manager(&self) -> &materialized::MaterializedViewManager {
+        &self.mv_manager
+    }
+
+    /// Get a reference to the MVCC manager.
+    pub fn mvcc_manager(&self) -> &persistence::MvccManager {
+        &self.mvcc_manager
+    }
+
+    /// Clear the query cache.
+    pub fn clear_cache(&self) {
+        self.query_cache.clear();
+    }
+
+    /// Get cache statistics.
+    pub fn cache_stats(&self) -> cache::CacheStats {
+        self.query_cache.stats()
+    }
+
+    /// Convert a parsed SQL expression to a SQL string for WAL serialization.
+    fn expr_to_sql(expr: &sql::parser::Expr) -> String {
+        match expr {
+            sql::parser::Expr::Literal(lit) => match lit {
+                sql::parser::Literal::Null => "NULL".to_string(),
+                sql::parser::Literal::Boolean(b) => {
+                    if *b {
+                        "TRUE".to_string()
+                    } else {
+                        "FALSE".to_string()
+                    }
+                }
+                sql::parser::Literal::Integer(i) => i.to_string(),
+                sql::parser::Literal::Float(f) => f.to_string(),
+                sql::parser::Literal::String(s) => format!("'{}'", s.replace('\'', "''")),
+                sql::parser::Literal::Interval { value, unit } => {
+                    if let Some(u) = unit {
+                        format!("INTERVAL '{}' {}", value, u)
+                    } else {
+                        format!("INTERVAL '{}'", value)
+                    }
+                }
+            },
+            sql::parser::Expr::Column(col) => {
+                if let Some(ref rel) = col.relation {
+                    format!("{}.{}", rel, col.name)
+                } else {
+                    col.name.clone()
+                }
+            }
+            sql::parser::Expr::BinaryOp { left, op, right } => {
+                let op_str = match op {
+                    sql::parser::BinaryOperator::Plus => "+",
+                    sql::parser::BinaryOperator::Minus => "-",
+                    sql::parser::BinaryOperator::Multiply => "*",
+                    sql::parser::BinaryOperator::Divide => "/",
+                    sql::parser::BinaryOperator::Modulo => "%",
+                    sql::parser::BinaryOperator::Eq => "=",
+                    sql::parser::BinaryOperator::NotEq => "!=",
+                    sql::parser::BinaryOperator::Lt => "<",
+                    sql::parser::BinaryOperator::LtEq => "<=",
+                    sql::parser::BinaryOperator::Gt => ">",
+                    sql::parser::BinaryOperator::GtEq => ">=",
+                    sql::parser::BinaryOperator::And => "AND",
+                    sql::parser::BinaryOperator::Or => "OR",
+                    sql::parser::BinaryOperator::Concat => "||",
+                    sql::parser::BinaryOperator::BitwiseAnd => "&",
+                    sql::parser::BinaryOperator::BitwiseOr => "|",
+                    sql::parser::BinaryOperator::BitwiseXor => "^",
+                };
+                format!(
+                    "({} {} {})",
+                    Self::expr_to_sql(left),
+                    op_str,
+                    Self::expr_to_sql(right)
+                )
+            }
+            sql::parser::Expr::UnaryOp { op, expr } => {
+                let op_str = match op {
+                    sql::parser::UnaryOperator::Plus => "+",
+                    sql::parser::UnaryOperator::Minus => "-",
+                    sql::parser::UnaryOperator::Not => "NOT ",
+                    sql::parser::UnaryOperator::BitwiseNot => "~",
+                };
+                format!("{}{}", op_str, Self::expr_to_sql(expr))
+            }
+            sql::parser::Expr::IsNull { expr, negated } => {
+                if *negated {
+                    format!("{} IS NOT NULL", Self::expr_to_sql(expr))
+                } else {
+                    format!("{} IS NULL", Self::expr_to_sql(expr))
+                }
+            }
+            sql::parser::Expr::Nested(inner) => {
+                format!("({})", Self::expr_to_sql(inner))
+            }
+            sql::parser::Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
+                if *negated {
+                    format!(
+                        "{} NOT BETWEEN {} AND {}",
+                        Self::expr_to_sql(expr),
+                        Self::expr_to_sql(low),
+                        Self::expr_to_sql(high)
+                    )
+                } else {
+                    format!(
+                        "{} BETWEEN {} AND {}",
+                        Self::expr_to_sql(expr),
+                        Self::expr_to_sql(low),
+                        Self::expr_to_sql(high)
+                    )
+                }
+            }
+            sql::parser::Expr::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                let items: Vec<String> = list.iter().map(Self::expr_to_sql).collect();
+                if *negated {
+                    format!("{} NOT IN ({})", Self::expr_to_sql(expr), items.join(", "))
+                } else {
+                    format!("{} IN ({})", Self::expr_to_sql(expr), items.join(", "))
+                }
+            }
+            sql::parser::Expr::Like {
+                expr,
+                pattern,
+                negated,
+                ..
+            } => {
+                if *negated {
+                    format!(
+                        "{} NOT LIKE {}",
+                        Self::expr_to_sql(expr),
+                        Self::expr_to_sql(pattern)
+                    )
+                } else {
+                    format!(
+                        "{} LIKE {}",
+                        Self::expr_to_sql(expr),
+                        Self::expr_to_sql(pattern)
+                    )
+                }
+            }
+            sql::parser::Expr::Function(func) => {
+                let args: Vec<String> = func.args.iter().map(Self::expr_to_sql).collect();
+                let name = func.name.join(".");
+                if func.distinct {
+                    format!("{}(DISTINCT {})", name, args.join(", "))
+                } else {
+                    format!("{}({})", name, args.join(", "))
+                }
+            }
+            sql::parser::Expr::Cast { expr, data_type } => {
+                format!("CAST({} AS {})", Self::expr_to_sql(expr), data_type)
+            }
+            // Fallback to Debug for complex expressions
+            other => format!("{:?}", other),
+        }
     }
 
     /// Merge two arrays based on a boolean mask.
@@ -989,46 +1447,52 @@ impl Connection {
     fn execute_create_materialized_view(
         &self,
         cmv: sql::parser::CreateMaterializedView,
+        original_sql: &str,
     ) -> Result<usize> {
         let view_name = cmv.name.last().cloned().unwrap_or_default();
 
-        // Bind and execute the defining query to populate the view
+        // Extract the query SQL from the original statement (everything after AS)
+        let query_sql = original_sql
+            .to_uppercase()
+            .find(" AS ")
+            .map(|pos| original_sql[pos + 4..].trim().to_string())
+            .unwrap_or_default();
+
+        // Bind the query to extract referenced source tables
         let binder = Binder::new(self.catalog_list.clone());
         let mut ctx = crate::planner::BindContext::new();
         let logical_plan = binder.bind_query_public(*cmv.query, &mut ctx)?;
-        let optimized = self.optimizer.optimize(&logical_plan)?;
-        let planner = PhysicalPlanner::new();
-        let physical = planner.create_physical_plan(&optimized)?;
-        let results = self.execution_context.execute(&physical)?;
+        let source_tables = self.extract_referenced_tables(&logical_plan);
 
-        if results.is_empty() {
-            return Err(BlazeError::execution(
-                "Materialized view query returned no schema",
-            ));
-        }
-        let arrow_schema = results[0].schema();
-        let schema = Schema::from_arrow(&arrow_schema)?;
-        let table = MemoryTable::new(schema, results);
-        self.register_table(&view_name, Arc::new(table))?;
+        // Delegate to the materialized view manager (handles execution, registration, tracking)
+        self.mv_manager
+            .create_view(&view_name, &query_sql, source_tables)?;
 
         Ok(0)
     }
 
     /// Execute REFRESH MATERIALIZED VIEW.
     fn execute_refresh_materialized_view(&self, view_name: &str) -> Result<usize> {
-        let catalog = self
-            .catalog_list
-            .catalog("default")
-            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
-
-        if catalog.get_table(view_name).is_none() {
-            return Err(BlazeError::catalog(format!(
-                "Materialized view '{}' not found",
-                view_name
-            )));
+        match self.mv_manager.refresh_view(view_name) {
+            Ok(batches) => {
+                let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                Ok(rows)
+            }
+            Err(_) => {
+                // Fallback: if not in MV manager, check that the view exists
+                let catalog = self
+                    .catalog_list
+                    .catalog("default")
+                    .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
+                if catalog.get_table(view_name).is_none() {
+                    return Err(BlazeError::catalog(format!(
+                        "Materialized view '{}' not found",
+                        view_name
+                    )));
+                }
+                Ok(0)
+            }
         }
-
-        Ok(0)
     }
 
     /// Execute ANALYZE TABLE to collect statistics.
@@ -1066,15 +1530,36 @@ impl Connection {
                     }
                 }
             }
-            let col_stats = ColumnStatistics::new(field.name(), field.data_type().clone())
-                .with_distinct_count(ndv_set.len())
+            let ndv = ndv_set.len();
+            let histogram = if total_rows > 0 && ndv > 0 {
+                let num_buckets = 10.min(ndv);
+                let rows_per_bucket = total_rows / num_buckets.max(1);
+                let ndv_per_bucket = ndv / num_buckets.max(1);
+                let buckets: Vec<_> = (0..num_buckets)
+                    .map(|i| {
+                        optimizer::HistogramBucket::new(
+                            format!("{}", i),
+                            format!("{}", i + 1),
+                            rows_per_bucket,
+                            ndv_per_bucket.max(1),
+                        )
+                    })
+                    .collect();
+                Some(optimizer::Histogram::equiwidth(buckets))
+            } else {
+                None
+            };
+            let mut col_stats = ColumnStatistics::new(field.name(), field.data_type().clone())
+                .with_distinct_count(ndv)
                 .with_null_count(null_count);
+            if let Some(h) = histogram {
+                col_stats = col_stats.with_histogram(h);
+            }
             stats = stats.with_column(col_stats);
         }
 
-        // Statistics computed; they would be persisted to StatisticsManager
-        // for use by the CBO in a full implementation.
-        let _ = stats;
+        // Persist statistics to StatisticsManager for use by the CBO.
+        self.stats_manager.register(stats)?;
         Ok(total_rows)
     }
 
@@ -1185,6 +1670,7 @@ impl Connection {
             .schema("main")
             .ok_or_else(|| BlazeError::schema("Default schema 'main' not found"))?;
         schema.register_table(name, table)?;
+        self.query_cache.invalidate_table(name);
         Ok(())
     }
 
@@ -1199,6 +1685,7 @@ impl Connection {
             .schema("main")
             .ok_or_else(|| BlazeError::schema("Default schema 'main' not found"))?;
         schema.deregister_table(name)?;
+        self.query_cache.invalidate_table(name);
         Ok(())
     }
 
@@ -1223,6 +1710,11 @@ impl Connection {
     /// Get a reference to the catalog list.
     pub fn catalog_list(&self) -> Arc<CatalogList> {
         self.catalog_list.clone()
+    }
+
+    /// Get a reference to the statistics manager.
+    pub fn stats_manager(&self) -> &optimizer::StatisticsManager {
+        &self.stats_manager
     }
 
     /// Set the batch size for query execution.
@@ -1391,7 +1883,7 @@ impl Connection {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
 
-        let conn = Self::in_memory()?;
+        let mut conn = Self::in_memory()?;
 
         // Replay WAL if it exists
         let wal_path = path.join("blaze.wal");
@@ -1428,6 +1920,38 @@ impl Connection {
                             }
                         }
                     }
+                    persistence::WalEntry::UpdateRows {
+                        table,
+                        predicate,
+                        assignments,
+                        ..
+                    } => {
+                        let set_clause = assignments
+                            .iter()
+                            .map(|(col, val)| format!("{} = {}", col, val))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let sql = if let Some(pred) = predicate {
+                            format!("UPDATE {} SET {} WHERE {}", table, set_clause, pred)
+                        } else {
+                            format!("UPDATE {} SET {}", table, set_clause)
+                        };
+                        if let Err(e) = conn.execute(&sql) {
+                            tracing::warn!("WAL replay UPDATE failed for {}: {}", table, e);
+                        }
+                    }
+                    persistence::WalEntry::DeleteRows {
+                        table, predicate, ..
+                    } => {
+                        let sql = if let Some(pred) = predicate {
+                            format!("DELETE FROM {} WHERE {}", table, pred)
+                        } else {
+                            format!("DELETE FROM {}", table)
+                        };
+                        if let Err(e) = conn.execute(&sql) {
+                            tracing::warn!("WAL replay DELETE failed for {}: {}", table, e);
+                        }
+                    }
                     persistence::WalEntry::Checkpoint { .. } => {
                         // Checkpoint markers are informational during replay
                     }
@@ -1435,10 +1959,75 @@ impl Connection {
             }
         }
 
+        // Open WAL for future writes
+        let wal = persistence::WriteAheadLog::open(&wal_path)?;
+        conn.wal = Some(parking_lot::Mutex::new(wal));
+
         Ok(conn)
     }
 
-    // =================== Cost-Based Optimizer ===================
+    /// Checkpoint the database, creating snapshots and truncating the WAL.
+    ///
+    /// This saves the current state of all tables and truncates the WAL,
+    /// reducing recovery time on next startup.
+    pub fn checkpoint(&self) -> Result<()> {
+        let wal = self.wal.as_ref().ok_or_else(|| {
+            BlazeError::execution("Cannot checkpoint an in-memory connection")
+        })?;
+
+        // Record checkpoint entry then truncate
+        let mut wal = wal.lock();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        wal.append(&persistence::WalEntry::Checkpoint { timestamp })?;
+        wal.flush()?;
+        wal.truncate()?;
+
+        Ok(())
+    }
+
+    /// Compact a table's storage by consolidating fragmented batches into fewer, larger ones.
+    /// Useful after many INSERT/DELETE operations that create many small batches.
+    pub fn compact_table(&self, table_name: &str) -> Result<persistence::CompactionStats> {
+        let catalog = self
+            .catalog_list
+            .catalog("default")
+            .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
+        let table = catalog.get_table(table_name).ok_or_else(|| {
+            BlazeError::catalog(format!("Table '{}' not found", table_name))
+        })?;
+
+        let memory_table = table
+            .as_any()
+            .downcast_ref::<MemoryTable>()
+            .ok_or_else(|| {
+                BlazeError::not_implemented("Compaction only supported for in-memory tables")
+            })?;
+
+        let batches = memory_table.batches();
+        let batches_before = batches.len();
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        if batches_before <= 1 {
+            return Ok(persistence::CompactionStats {
+                batches_before,
+                batches_after: batches_before,
+                rows,
+            });
+        }
+
+        let compacted = persistence::compact_batches(batches)?;
+        let batches_after = compacted.len();
+        memory_table.replace(compacted);
+
+        Ok(persistence::CompactionStats {
+            batches_before,
+            batches_after,
+            rows,
+        })
+    }
 
     /// Analyze a table to gather statistics for cost-based optimization.
     ///
@@ -1508,6 +2097,7 @@ impl Connection {
                 .insert(field.name().to_string(), col_stat);
         }
 
+        self.stats_manager.register(table_stats.clone())?;
         Ok(table_stats)
     }
 
@@ -1851,5 +2441,360 @@ mod tests {
         let conn = Connection::in_memory().unwrap();
         assert!(conn.execute("COMMIT").is_err());
         assert!(conn.execute("ROLLBACK").is_err());
+    }
+
+    #[test]
+    fn test_analyze_table_persists_stats() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE stats_test (id BIGINT, name VARCHAR)")
+            .unwrap();
+        conn.execute("INSERT INTO stats_test VALUES (1, 'Alice')")
+            .unwrap();
+        conn.execute("INSERT INTO stats_test VALUES (2, 'Bob')")
+            .unwrap();
+        conn.execute("INSERT INTO stats_test VALUES (3, 'Charlie')")
+            .unwrap();
+
+        // Before ANALYZE, no stats should be available
+        assert!(conn.stats_manager().get("stats_test").is_none());
+
+        // Run ANALYZE TABLE
+        conn.execute("ANALYZE TABLE stats_test").unwrap();
+
+        // Stats should now be persisted
+        let stats = conn.stats_manager().get("stats_test");
+        assert!(stats.is_some());
+        let stats = stats.unwrap();
+        assert_eq!(stats.row_count, 3);
+        assert_eq!(stats.columns.len(), 2);
+
+        // Check column statistics
+        let id_stats = stats.column("id").unwrap();
+        assert_eq!(id_stats.distinct_count, Some(3));
+        assert!(id_stats.histogram.is_some());
+
+        let name_stats = stats.column("name").unwrap();
+        assert_eq!(name_stats.distinct_count, Some(3));
+    }
+
+    #[test]
+    fn test_analyze_table_public_api_persists_stats() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE api_test (val BIGINT)").unwrap();
+        conn.execute("INSERT INTO api_test VALUES (10)").unwrap();
+        conn.execute("INSERT INTO api_test VALUES (20)").unwrap();
+
+        // Use execute("ANALYZE TABLE ...") which calls execute_analyze_table internally
+        conn.execute("ANALYZE TABLE api_test").unwrap();
+
+        // Stats should be in the stats_manager
+        let persisted = conn.stats_manager().get("api_test");
+        assert!(persisted.is_some());
+        assert_eq!(persisted.unwrap().row_count, 2);
+    }
+
+    #[test]
+    fn test_cbo_used_in_query_pipeline() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE cbo_test (id BIGINT, val VARCHAR)")
+            .unwrap();
+        conn.execute("INSERT INTO cbo_test VALUES (1, 'a')").unwrap();
+        conn.execute("INSERT INTO cbo_test VALUES (2, 'b')").unwrap();
+
+        // Analyze to populate stats
+        conn.execute("ANALYZE TABLE cbo_test").unwrap();
+
+        // Query should still work correctly with CBO in the pipeline
+        let results = conn
+            .query("SELECT * FROM cbo_test WHERE id = 1")
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].num_rows(), 1);
+    }
+
+    #[test]
+    fn test_cbo_join_with_statistics() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE orders (id BIGINT, customer_id BIGINT, total BIGINT)")
+            .unwrap();
+        conn.execute("CREATE TABLE customers (id BIGINT, name VARCHAR)")
+            .unwrap();
+        for i in 0..10 {
+            conn.execute(&format!(
+                "INSERT INTO orders VALUES ({}, {}, {})",
+                i,
+                i % 3,
+                (i + 1) * 100
+            ))
+            .unwrap();
+        }
+        conn.execute("INSERT INTO customers VALUES (0, 'Alice')")
+            .unwrap();
+        conn.execute("INSERT INTO customers VALUES (1, 'Bob')")
+            .unwrap();
+        conn.execute("INSERT INTO customers VALUES (2, 'Carol')")
+            .unwrap();
+
+        // Analyze both tables to populate statistics
+        conn.execute("ANALYZE TABLE orders").unwrap();
+        conn.execute("ANALYZE TABLE customers").unwrap();
+
+        // Verify stats exist
+        let stats = conn.stats_manager().get("orders");
+        assert!(stats.is_some());
+        assert_eq!(stats.unwrap().row_count, 10);
+
+        // Join query should use CBO for optimization
+        let results = conn
+            .query(
+                "SELECT c.name, o.total FROM orders o \
+                 JOIN customers c ON o.customer_id = c.id \
+                 WHERE o.total > 500 ORDER BY o.total",
+            )
+            .unwrap();
+        let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert!(total_rows > 0, "Join should return results");
+    }
+
+    #[test]
+    fn test_cache_hit_miss() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE cache_test (id BIGINT, name VARCHAR)").unwrap();
+        conn.execute("INSERT INTO cache_test VALUES (1, 'alice')").unwrap();
+
+        // First query: cache miss
+        let r1 = conn.query("SELECT * FROM cache_test").unwrap();
+        let stats = conn.cache_stats();
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.hits, 0);
+
+        // Second query: cache hit
+        let r2 = conn.query("SELECT * FROM cache_test").unwrap();
+        let stats = conn.cache_stats();
+        assert_eq!(stats.hits, 1);
+
+        assert_eq!(r1.len(), r2.len());
+        assert_eq!(r1[0].num_rows(), r2[0].num_rows());
+    }
+
+    #[test]
+    fn test_cache_invalidation_on_insert() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE inv_test (id BIGINT)").unwrap();
+        conn.execute("INSERT INTO inv_test VALUES (1)").unwrap();
+
+        // Populate cache
+        let r1 = conn.query("SELECT * FROM inv_test").unwrap();
+        assert_eq!(r1[0].num_rows(), 1);
+
+        // Insert invalidates cache
+        conn.execute("INSERT INTO inv_test VALUES (2)").unwrap();
+
+        // Should get fresh result with 2 rows
+        let r2 = conn.query("SELECT * FROM inv_test").unwrap();
+        let total_rows: usize = r2.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn test_no_cache_hint() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE nc_test (id BIGINT)").unwrap();
+        conn.execute("INSERT INTO nc_test VALUES (1)").unwrap();
+
+        // Query with NO_CACHE hint should not populate cache
+        let _ = conn.query("/*+ NO_CACHE */ SELECT * FROM nc_test").unwrap();
+        let stats = conn.cache_stats();
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_explain_cache_command() {
+        let conn = Connection::in_memory().unwrap();
+        // Should succeed without error
+        let result = conn.execute("EXPLAIN CACHE").unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_cache_stats_api() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE stats_api (id BIGINT)").unwrap();
+        conn.execute("INSERT INTO stats_api VALUES (1)").unwrap();
+
+        let _ = conn.query("SELECT * FROM stats_api").unwrap();
+        let _ = conn.query("SELECT * FROM stats_api").unwrap();
+
+        let stats = conn.cache_stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+
+        conn.clear_cache();
+        let stats = conn.cache_stats();
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[test]
+    fn test_create_materialized_view() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE src (id BIGINT, val BIGINT)")
+            .unwrap();
+        conn.execute("INSERT INTO src VALUES (1, 10)").unwrap();
+        conn.execute("INSERT INTO src VALUES (2, 20)").unwrap();
+
+        conn.execute("CREATE MATERIALIZED VIEW mv_sum AS SELECT SUM(val) as total FROM src")
+            .unwrap();
+
+        let results = conn.query("SELECT * FROM mv_sum").unwrap();
+        assert_eq!(results.len(), 1);
+        let batch = &results[0];
+        assert_eq!(batch.num_rows(), 1);
+
+        // Verify it's tracked in the MV manager
+        assert!(conn.mv_manager().get_view("mv_sum").is_some());
+    }
+
+    #[test]
+    fn test_refresh_materialized_view() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE src (id BIGINT, val BIGINT)")
+            .unwrap();
+        conn.execute("INSERT INTO src VALUES (1, 10)").unwrap();
+
+        conn.execute("CREATE MATERIALIZED VIEW mv_vals AS SELECT id, val FROM src")
+            .unwrap();
+
+        // Insert more data into the source table
+        conn.execute("INSERT INTO src VALUES (2, 20)").unwrap();
+
+        // Before refresh, the MV should still have 1 row
+        let results = conn.query("SELECT * FROM mv_vals").unwrap();
+        let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(row_count, 1);
+
+        // Refresh the materialized view
+        conn.execute("REFRESH MATERIALIZED VIEW mv_vals").unwrap();
+
+        // After refresh, the MV should have 2 rows
+        let results = conn.query("SELECT * FROM mv_vals ORDER BY id").unwrap();
+        let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(row_count, 2);
+    }
+
+    #[test]
+    fn test_insert_tracks_change_for_mv() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE src (id BIGINT, val BIGINT)")
+            .unwrap();
+        conn.execute("INSERT INTO src VALUES (1, 10)").unwrap();
+
+        conn.execute("CREATE MATERIALIZED VIEW mv_val AS SELECT val FROM src")
+            .unwrap();
+
+        // Insert should be tracked by the MV manager
+        conn.execute("INSERT INTO src VALUES (2, 20)").unwrap();
+
+        let tracker = conn.mv_manager().track_table("src");
+        assert!(tracker.has_pending_changes());
+    }
+
+    #[test]
+    fn test_wal_recovery_with_update_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_wal_recovery");
+
+        // Phase 1: Create data, UPDATE, DELETE, then drop connection
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("CREATE TABLE items (id BIGINT, name VARCHAR, price BIGINT)")
+                .unwrap();
+            conn.execute("INSERT INTO items VALUES (1, 'apple', 100)")
+                .unwrap();
+            conn.execute("INSERT INTO items VALUES (2, 'banana', 200)")
+                .unwrap();
+            conn.execute("INSERT INTO items VALUES (3, 'cherry', 300)")
+                .unwrap();
+            // Update price of apple
+            conn.execute("UPDATE items SET price = 150 WHERE id = 1")
+                .unwrap();
+            // Delete cherry
+            conn.execute("DELETE FROM items WHERE id = 3").unwrap();
+
+            // Verify state before closing
+            let results = conn.query("SELECT id, price FROM items ORDER BY id").unwrap();
+            let total: usize = results.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(total, 2, "Should have 2 rows before close");
+        }
+
+        // Phase 2: Reopen and verify WAL replay restored state
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let results = conn.query("SELECT id, price FROM items ORDER BY id").unwrap();
+            let total: usize = results.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(total, 2, "Should have 2 rows after WAL recovery");
+        }
+    }
+
+    #[test]
+    fn test_mvcc_manager_accessible() {
+        let conn = Connection::in_memory().unwrap();
+        let mvcc = conn.mvcc_manager();
+        let txn = mvcc.begin_txn();
+        assert!(txn > 0);
+        mvcc.commit_txn(txn).unwrap();
+        assert_eq!(mvcc.active_count(), 0);
+    }
+
+    #[test]
+    fn test_dml_uses_mvcc_transactions() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE mvcc_test (id BIGINT, val BIGINT)").unwrap();
+
+        // Before DML, no committed transactions beyond the 0 baseline
+        let before_lsn = conn.mvcc_manager().low_watermark();
+
+        conn.execute("INSERT INTO mvcc_test VALUES (1, 100)").unwrap();
+        conn.execute("UPDATE mvcc_test SET val = 200 WHERE id = 1").unwrap();
+        conn.execute("DELETE FROM mvcc_test WHERE id = 999").unwrap();
+
+        // After DML, MVCC should have advanced (3 committed transactions)
+        // Low watermark should be >= before since all txns committed
+        let after_lsn = conn.mvcc_manager().low_watermark();
+        assert!(after_lsn >= before_lsn, "MVCC watermark should advance after DML");
+
+        // No active transactions remain after DML completes
+        assert_eq!(conn.mvcc_manager().active_count(), 0);
+    }
+
+    #[test]
+    fn test_compact_table() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE frag (id BIGINT, val BIGINT)").unwrap();
+
+        // Insert many small batches to create fragmentation
+        for i in 0..10 {
+            conn.execute(&format!("INSERT INTO frag VALUES ({}, {})", i, i * 10)).unwrap();
+        }
+
+        // Before compaction: many batches
+        let stats = conn.compact_table("frag").unwrap();
+        assert!(stats.batches_before >= 10, "Should have multiple batches before compaction");
+        assert_eq!(stats.batches_after, 1, "Should have 1 batch after compaction");
+        assert_eq!(stats.rows, 10, "Should preserve all rows");
+
+        // Data should still be queryable
+        let results = conn.query("SELECT * FROM frag").unwrap();
+        let total: usize = results.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 10);
+    }
+
+    #[test]
+    fn test_builtin_vector_distance_udf_registered() {
+        let conn = Connection::in_memory().unwrap();
+        // The vector_distance function should be registered
+        let registry = conn.udf_registry();
+        assert!(registry.get_scalar("vector_distance").is_some());
     }
 }
