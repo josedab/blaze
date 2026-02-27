@@ -60,3 +60,37 @@ impl SortOperator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use crate::planner::{ColumnExpr, SortExpr};
+
+    fn make_batch(values: Vec<i64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap()
+    }
+
+    #[test]
+    fn test_sort_ascending_integers() {
+        let batch = make_batch(vec![3, 1, 4, 1, 5, 9, 2, 6]);
+        let sort_expr = SortExpr::new(Arc::new(ColumnExpr::new("a", 0)), true, true);
+
+        let result = SortOperator::execute(&[sort_expr], vec![batch]).unwrap();
+        assert_eq!(result.len(), 1);
+
+        let col = result[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let values: Vec<i64> = col.iter().map(|v| v.unwrap()).collect();
+        assert_eq!(values, vec![1, 1, 2, 3, 4, 5, 6, 9]);
+    }
+
+    #[test]
+    fn test_sort_empty_input() {
+        let sort_expr = SortExpr::new(Arc::new(ColumnExpr::new("a", 0)), true, true);
+        let result = SortOperator::execute(&[sort_expr], vec![]).unwrap();
+        assert!(result.is_empty());
+    }
+}
+

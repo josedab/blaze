@@ -105,3 +105,65 @@ impl CrossJoinOperator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    fn make_batch(name: &str, values: Vec<i64>) -> (Arc<ArrowSchema>, RecordBatch) {
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(values))],
+        )
+        .unwrap();
+        (schema, batch)
+    }
+
+    #[test]
+    fn test_cross_join_basic() {
+        let (_, left) = make_batch("a", vec![1, 2]);
+        let (_, right) = make_batch("b", vec![10, 20]);
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Int64, false),
+        ]));
+
+        let result = CrossJoinOperator::execute(vec![left], vec![right], &output_schema).unwrap();
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 4); // 2 × 2
+    }
+
+    #[test]
+    fn test_cross_join_empty_left() {
+        let (schema_a, _) = make_batch("a", vec![1]);
+        let left_empty = RecordBatch::new_empty(schema_a);
+        let (_, right) = make_batch("b", vec![10, 20]);
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Int64, false),
+        ]));
+
+        let result =
+            CrossJoinOperator::execute(vec![left_empty], vec![right], &output_schema).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_cross_join_exceeds_limit() {
+        // Create batches that would produce > MAX_CROSS_JOIN_ROWS
+        let large_values: Vec<i64> = (0..3163).collect();
+        let (_, left) = make_batch("a", large_values.clone());
+        let (_, right) = make_batch("b", large_values);
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Int64, false),
+        ]));
+
+        // 3163 × 3163 = ~10M, which exceeds MAX_CROSS_JOIN_ROWS
+        let result = CrossJoinOperator::execute(vec![left], vec![right], &output_schema);
+        assert!(result.is_err());
+    }
+}
+

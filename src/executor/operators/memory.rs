@@ -119,3 +119,42 @@ impl<'a> Drop for MemoryReservation<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_manager_reserve_and_release() {
+        let mgr = MemoryManager::new(1000);
+        assert_eq!(mgr.used(), 0);
+        assert_eq!(mgr.available(), 1000);
+
+        assert!(mgr.try_reserve(400));
+        assert_eq!(mgr.used(), 400);
+        assert_eq!(mgr.available(), 600);
+
+        mgr.release(400);
+        assert_eq!(mgr.used(), 0);
+    }
+
+    #[test]
+    fn test_memory_manager_over_budget() {
+        let mgr = MemoryManager::new(100);
+        assert!(mgr.try_reserve(50));
+        assert!(!mgr.try_reserve(60)); // 50 + 60 > 100
+
+        let result = mgr.reserve(60);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_memory_reservation_releases_on_drop() {
+        let mgr = MemoryManager::new(1000);
+        {
+            let _reservation = mgr.reserve(500).unwrap();
+            assert_eq!(mgr.used(), 500);
+        }
+        // After drop, memory should be released
+        assert_eq!(mgr.used(), 0);
+    }
+}
