@@ -7,6 +7,8 @@
 
 A high-performance, memory-safe embedded OLAP query engine written in Rust with SQL:2016 compliance and native Apache Arrow/Parquet integration.
 
+**[Try Blaze in your browser →](https://blaze-db.github.io/blaze/)**
+
 ## Features
 
 - **Memory Safety**: Built in Rust for guaranteed memory safety
@@ -30,13 +32,12 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 | Connection Pooling | ✅ Stable | _(default)_ |
 | WASM Bindings | ✅ Stable | _(default)_ |
 | SIMD Optimization | ⚠️ Experimental | `simd` |
-| Arrow Flight / Flight SQL | ⚠️ Experimental | `flight` |
 | Time-Series Extensions | ⚠️ Experimental | `timeseries` |
 | Streaming Queries | ⚠️ Experimental | `streaming` |
 | Adaptive Query Execution | ⚠️ Experimental | `adaptive` |
 | Lakehouse (Delta Lake) | ⚠️ Experimental | `lakehouse` |
+| Arrow Flight / Flight SQL | 🚧 Preview | `flight` |
 | Federated Queries | 🚧 Preview | `federation` |
-| GPU Acceleration | 🚧 Preview | `gpu` |
 | Natural Language Queries | 🚧 Preview | `nlq` |
 | Learned Optimizer | 🚧 Preview | `learned-optimizer` |
 

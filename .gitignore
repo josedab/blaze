@@ -11,6 +11,11 @@
 /node/node_modules
 /node/dist
 
+# Website build artifacts
+/website/node_modules
+/website/build
+/website/.docusaurus
+
 # IDE
 .idea/
 *.swp

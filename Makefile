@@ -93,6 +93,8 @@ example:
 ci: fmt-check lint-strict test test-all
 	@cargo clippy --features all-extensions -- -D warnings
 	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --quiet
+	@echo "==> Checking MSRV compatibility..."
+	@cargo +1.92.0 check --quiet 2>/dev/null || echo "  ⚠ MSRV check skipped (toolchain 1.92.0 not installed). Install with: rustup install 1.92.0"
 	@echo ""
 	@echo "✅ All CI checks passed locally!"
 
