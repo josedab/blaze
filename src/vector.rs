@@ -1628,7 +1628,7 @@ impl VectorIndexManager {
         self.indexes
             .iter()
             .map(|(name, entry)| {
-                let size = entry.meta.num_vectors as usize;
+                let size = entry.meta.num_vectors;
                 let metric = format!("{:?}", entry.meta.metric);
                 (name.clone(), size, metric)
             })

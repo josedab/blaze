@@ -371,7 +371,7 @@ impl ParallelExecutor {
             let merge_plan = PhysicalPlan::HashAggregate {
                 group_by: group_by.clone(),
                 aggr_exprs: aggr_exprs.iter().map(|e| crate::planner::AggregateExpr {
-                    func: e.func.clone(),
+                    func: e.func,
                     args: e.args.clone(),
                     distinct: e.distinct,
                     alias: e.alias.clone(),
@@ -635,7 +635,7 @@ impl ParallelExecutor {
             } => PhysicalPlan::HashAggregate {
                 group_by: group_by.clone(),
                 aggr_exprs: aggr_exprs.iter().map(|e| crate::planner::AggregateExpr {
-                    func: e.func.clone(),
+                    func: e.func,
                     args: e.args.clone(),
                     distinct: e.distinct,
                     alias: e.alias.clone(),
