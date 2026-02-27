@@ -224,6 +224,7 @@ pub mod python;
 // Re-export commonly used types
 pub use error::{BlazeError, Result};
 pub use prepared::{ParameterInfo, PreparedStatement, PreparedStatementCache};
+pub use sql::parser::CompatMode;
 pub use types::{DataType, Field, ScalarValue, Schema};
 
 use std::collections::HashMap;
@@ -234,9 +235,9 @@ use arrow::record_batch::RecordBatch;
 
 use catalog::{CatalogList, TableProvider};
 use executor::ExecutionContext;
-use planner::{Binder, Optimizer, PhysicalPlanner};
+use planner::{Binder, Optimizer, PhysicalPlan, PhysicalPlanner};
 use sql::parser::Parser;
-use storage::{CsvTable, MemoryTable, ParquetTable};
+use storage::{CsvTable, MemoryTable, ParquetTable, ViewTable};
 
 /// Validate that a string is a safe SQL identifier (alphanumeric + underscores).
 fn validate_identifier(name: &str) -> Result<()> {
@@ -285,6 +286,8 @@ pub struct Connection {
     execution_context: ExecutionContext,
     /// Query optimizer
     optimizer: Optimizer,
+    /// Connection configuration
+    config: ConnectionConfig,
     /// User-defined function registry
     udf_registry: Arc<udf::UdfRegistry>,
     /// Transaction manager for MVCC
@@ -305,6 +308,8 @@ pub struct Connection {
     query_cache: Arc<cache::QueryCache>,
     /// Materialized view manager
     mv_manager: Arc<materialized::MaterializedViewManager>,
+    /// Cardinality feedback from actual query executions
+    cardinality_feedback: Arc<optimizer::CardinalityFeedback>,
 }
 
 impl Connection {
@@ -320,6 +325,7 @@ impl Connection {
     #[must_use = "connection creation may fail; handle the Result"]
     pub fn in_memory() -> Result<Self> {
         let catalog_list = Arc::new(CatalogList::default());
+        catalog::information_schema::register_information_schema(&catalog_list);
         let execution_context = ExecutionContext::new().with_catalog_list(catalog_list.clone());
         let mv_manager = Arc::new(materialized::MaterializedViewManager::new(
             catalog_list.clone(),
@@ -329,6 +335,7 @@ impl Connection {
             execution_context,
             catalog_list,
             optimizer: Optimizer::default(),
+            config: ConnectionConfig::default(),
             udf_registry: Arc::new(udf::UdfRegistry::new()),
             transaction_manager: Arc::new(transaction::TransactionManager::new()),
             active_txn: parking_lot::Mutex::new(None),
@@ -339,6 +346,7 @@ impl Connection {
             stats_manager: Arc::new(optimizer::StatisticsManager::new()),
             query_cache: Arc::new(cache::QueryCache::with_default_config()),
             mv_manager,
+            cardinality_feedback: Arc::new(optimizer::CardinalityFeedback::new()),
         };
         conn.register_builtin_functions();
         Ok(conn)
@@ -369,10 +377,58 @@ impl Connection {
         let _ = self.udf_registry.register_scalar(vector_distance_udf);
     }
 
+    /// Check if parallel execution should be used for a given plan.
+    fn should_use_parallel(&self, _plan: &PhysicalPlan) -> bool {
+        self.config.num_threads.is_some_and(|n| n > 1)
+    }
+
+    /// Record cardinality feedback from actual query execution results.
+    ///
+    /// Walks the physical plan to find Scan nodes, then records the actual
+    /// row count from the results so future estimates can use observed data.
+    fn record_cardinality_feedback(&self, plan: &PhysicalPlan, results: &[RecordBatch]) {
+        let actual_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+
+        // Collect table names from scan nodes in the physical plan
+        let mut table_names = Vec::new();
+        Self::collect_scan_tables(plan, &mut table_names);
+
+        // For single-table queries, the result row count is a useful signal
+        // for that table's base cardinality (filtered results are a lower bound).
+        // For multi-table queries, we can't attribute rows to individual tables.
+        if table_names.len() == 1 {
+            self.cardinality_feedback
+                .record_table_rows(&table_names[0], actual_rows);
+        }
+
+        // When the learned-optimizer feature is enabled, also feed the model
+        #[cfg(feature = "learned-optimizer")]
+        {
+            use crate::learned_optimizer::QueryFeatures;
+            let features = QueryFeatures {
+                tables: table_names,
+                ..Default::default()
+            };
+            let model = learned_optimizer::LearnedCardinalityModel::default_model();
+            model.train(&features, actual_rows as f64);
+        }
+    }
+
+    /// Recursively collect table names from Scan nodes in a physical plan.
+    fn collect_scan_tables(plan: &PhysicalPlan, tables: &mut Vec<String>) {
+        if let PhysicalPlan::Scan { table_name, .. } = plan {
+            tables.push(table_name.clone());
+        }
+        for child in plan.children() {
+            Self::collect_scan_tables(child, tables);
+        }
+    }
+
     /// Create a connection with custom configuration.
     #[must_use = "connection creation may fail; handle the Result"]
     pub fn with_config(config: ConnectionConfig) -> Result<Self> {
         let catalog_list = Arc::new(CatalogList::default());
+        catalog::information_schema::register_information_schema(&catalog_list);
         let mut ctx = ExecutionContext::new()
             .with_batch_size(config.batch_size)
             .with_catalog_list(catalog_list.clone());
@@ -390,6 +446,7 @@ impl Connection {
             execution_context: ctx,
             catalog_list,
             optimizer: Optimizer::default(),
+            config,
             udf_registry: Arc::new(udf::UdfRegistry::new()),
             transaction_manager: Arc::new(transaction::TransactionManager::new()),
             active_txn: parking_lot::Mutex::new(None),
@@ -400,6 +457,7 @@ impl Connection {
             stats_manager: Arc::new(optimizer::StatisticsManager::new()),
             query_cache: Arc::new(cache::QueryCache::with_default_config()),
             mv_manager,
+            cardinality_feedback: Arc::new(optimizer::CardinalityFeedback::new()),
         };
         conn.register_builtin_functions();
         Ok(conn)
@@ -430,7 +488,7 @@ impl Connection {
         }
 
         // Parse SQL
-        let statements = Parser::parse(&clean_sql)?;
+        let statements = Parser::parse_with_compat(&clean_sql, self.config.compat_mode)?;
 
         // Take the first statement (ignore any additional statements)
         let Some(statement) = statements.into_iter().next() else {
@@ -458,8 +516,18 @@ impl Connection {
         let physical_planner = PhysicalPlanner::new();
         let physical_plan = physical_planner.create_physical_plan(&optimized_plan)?;
 
-        // Execute
-        let result = self.execution_context.execute(&physical_plan)?;
+        // Execute (use parallel executor when configured with multiple threads)
+        let result = if self.should_use_parallel(&physical_plan) {
+            let config = crate::parallel::ExecutionConfig::new()
+                .with_parallelism(self.config.num_threads.unwrap_or(1));
+            let executor = crate::parallel::ParallelExecutor::new(config);
+            executor.execute(&physical_plan)?
+        } else {
+            self.execution_context.execute(&physical_plan)?
+        };
+
+        // Record cardinality feedback from actual execution
+        self.record_cardinality_feedback(&physical_plan, &result);
 
         // Cache the result (unless NO_CACHE hint)
         if use_cache {
@@ -490,7 +558,7 @@ impl Connection {
         }
 
         // Parse SQL
-        let statements = Parser::parse(sql)?;
+        let statements = Parser::parse_with_compat(sql, self.config.compat_mode)?;
 
         // Take the first statement (ignore any additional statements)
         let Some(statement) = statements.into_iter().next() else {
@@ -684,6 +752,47 @@ impl Connection {
                 }
                 Ok(0)
             }
+            sql::Statement::CreateView { name, query, or_replace } => {
+                let view_name = name.last().cloned().unwrap_or_default();
+
+                // Bind the query to determine its schema
+                let binder = Binder::new(self.catalog_list.clone());
+                let mut ctx = crate::planner::BindContext::new();
+                let logical_plan = binder.bind_query_public(*query.clone(), &mut ctx)?;
+                let schema = logical_plan.schema().clone();
+
+                // If or_replace, remove existing view first
+                if *or_replace {
+                    let _ = self.deregister_table(&view_name);
+                }
+
+                // Store the original SQL for view expansion
+                let view_sql = sql.to_string();
+                let view_table = ViewTable::new(view_sql, schema);
+                self.register_table(&view_name, Arc::new(view_table))?;
+                self.query_cache.invalidate_table(&view_name);
+                Ok(0)
+            }
+            sql::Statement::DropView { name, if_exists } => {
+                let view_name = name.last().cloned().unwrap_or_default();
+                self.query_cache.invalidate_table(&view_name);
+                // Verify the target is actually a view before dropping
+                if let Some(catalog) = self.catalog_list.catalog("default") {
+                    if let Some(table) = catalog.get_table(&view_name) {
+                        if table.table_type() != catalog::TableType::View {
+                            return Err(BlazeError::execution(format!(
+                                "'{}' is not a view",
+                                view_name
+                            )));
+                        }
+                    }
+                }
+                match self.deregister_table(&view_name) {
+                    Ok(_) => Ok(0),
+                    Err(_) if *if_exists => Ok(0),
+                    Err(e) => Err(e),
+                }
+            }
             sql::Statement::CreateMaterializedView(cmv) => {
                 self.execute_create_materialized_view(cmv.clone(), sql)
             }
@@ -694,6 +803,45 @@ impl Connection {
             sql::Statement::AnalyzeTable { name } => {
                 let table_name = name.last().cloned().unwrap_or_default();
                 self.execute_analyze_table(&table_name)
+            }
+            sql::Statement::AlterTable { name, operation } => {
+                let table_name = name.last().cloned().unwrap_or_default();
+                let catalog = self
+                    .catalog_list
+                    .catalog("default")
+                    .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
+                let table = catalog.get_table(&table_name).ok_or_else(|| {
+                    BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
+                })?;
+                let memory_table = table
+                    .as_any()
+                    .downcast_ref::<MemoryTable>()
+                    .ok_or_else(|| {
+                        BlazeError::not_implemented(
+                            "ALTER TABLE is only supported for in-memory tables",
+                        )
+                    })?;
+
+                let new_table = match operation {
+                    sql::parser::AlterTableOperation::AddColumn { column } => {
+                        let arrow_dt = DataType::from_sql_type(&column.data_type).to_arrow();
+                        memory_table.with_added_column(&column.name, arrow_dt, column.nullable)?
+                    }
+                    sql::parser::AlterTableOperation::DropColumn { name, if_exists } => {
+                        match memory_table.with_dropped_column(name) {
+                            Ok(t) => t,
+                            Err(e) if *if_exists => return Ok(0),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    sql::parser::AlterTableOperation::RenameColumn { old_name, new_name } => {
+                        memory_table.with_renamed_column(old_name, new_name)?
+                    }
+                };
+
+                self.register_table(&table_name, Arc::new(new_table))?;
+                self.query_cache.invalidate_table(&table_name);
+                Ok(0)
             }
             _ => {
                 // For other statements, bind and execute through the query path
@@ -734,8 +882,8 @@ impl Connection {
             .catalog_list
             .catalog("default")
             .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
-        let table = catalog.get_table(&table_name).ok_or_else(|| {
-            BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
+        let table = catalog.get_table(table_name).ok_or_else(|| {
+            BlazeError::catalog_with_suggestions(table_name, &catalog.list_tables())
         })?;
 
         // Get the table as MemoryTable (DML only works on MemoryTable)
@@ -825,10 +973,10 @@ impl Connection {
             }
         }
 
-        self.query_cache.invalidate_table(&table_name);
+        self.query_cache.invalidate_table(table_name);
 
         // Notify materialized view manager of the insert
-        self.mv_manager.notify_insert(&table_name, &batches);
+        self.mv_manager.notify_insert(table_name, &batches);
 
         Ok(row_count)
     }
@@ -856,8 +1004,8 @@ impl Connection {
             .catalog_list
             .catalog("default")
             .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
-        let table = catalog.get_table(&table_name).ok_or_else(|| {
-            BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
+        let table = catalog.get_table(table_name).ok_or_else(|| {
+            BlazeError::catalog_with_suggestions(table_name, &catalog.list_tables())
         })?;
 
         // Get the table as MemoryTable
@@ -949,7 +1097,7 @@ impl Connection {
         memory_table.replace(new_batches);
 
         // Invalidate cache for this table
-        self.query_cache.invalidate_table(&table_name);
+        self.query_cache.invalidate_table(table_name);
 
         // Log to WAL if persistent
         if let Some(ref wal) = self.wal {
@@ -958,7 +1106,7 @@ impl Connection {
                 .iter()
                 .map(|(col, expr)| (col.clone(), Self::expr_to_sql(expr)))
                 .collect();
-            let predicate = update.selection.as_ref().map(|s| Self::expr_to_sql(s));
+            let predicate = update.selection.as_ref().map(Self::expr_to_sql);
             let mut wal = wal.lock();
             wal.append(&persistence::WalEntry::UpdateRows {
                 table: table_name.to_string(),
@@ -997,8 +1145,8 @@ impl Connection {
             .catalog_list
             .catalog("default")
             .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
-        let table = catalog.get_table(&table_name).ok_or_else(|| {
-            BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
+        let table = catalog.get_table(table_name).ok_or_else(|| {
+            BlazeError::catalog_with_suggestions(table_name, &catalog.list_tables())
         })?;
 
         // Get the table as MemoryTable
@@ -1066,14 +1214,14 @@ impl Connection {
         memory_table.replace(new_batches);
 
         // Invalidate cache for this table
-        self.query_cache.invalidate_table(&table_name);
+        self.query_cache.invalidate_table(table_name);
 
         // Track delete for materialized view staleness
         self.mv_manager.track_table(table_name).record_delete(&[]);
 
         // Log to WAL if persistent
         if let Some(ref wal) = self.wal {
-            let predicate = delete.selection.as_ref().map(|s| Self::expr_to_sql(s));
+            let predicate = delete.selection.as_ref().map(Self::expr_to_sql);
             let mut wal = wal.lock();
             wal.append(&persistence::WalEntry::DeleteRows {
                 table: table_name.to_string(),
@@ -1746,7 +1894,7 @@ impl Connection {
     #[must_use = "prepare may fail; handle the Result"]
     pub fn prepare(&self, sql: &str) -> Result<PreparedStatement> {
         // Parse SQL
-        let statements = Parser::parse(sql)?;
+        let statements = Parser::parse_with_compat(sql, self.config.compat_mode)?;
 
         let Some(statement) = statements.into_iter().next() else {
             return Err(BlazeError::analysis("Empty SQL statement"));
@@ -1799,7 +1947,7 @@ impl Connection {
 
         let (logical_plan, parameters) = cache.get_or_create(sql, || {
             // Parse SQL
-            let statements = Parser::parse(sql)?;
+            let statements = Parser::parse_with_compat(sql, self.config.compat_mode)?;
 
             let Some(statement) = statements.into_iter().next() else {
                 return Err(BlazeError::analysis("Empty SQL statement"));
@@ -2227,6 +2375,8 @@ pub struct ConnectionConfig {
     pub memory_limit: Option<usize>,
     /// Number of threads for parallel execution
     pub num_threads: Option<usize>,
+    /// SQL compatibility mode for dialect-specific syntax
+    pub compat_mode: sql::parser::CompatMode,
 }
 
 impl Default for ConnectionConfig {
@@ -2235,6 +2385,7 @@ impl Default for ConnectionConfig {
             batch_size: 8192,
             memory_limit: None,
             num_threads: None,
+            compat_mode: sql::parser::CompatMode::Standard,
         }
     }
 }
@@ -2275,6 +2426,22 @@ impl ConnectionConfig {
     /// Set the number of threads.
     pub fn with_num_threads(mut self, num_threads: usize) -> Self {
         self.num_threads = Some(num_threads);
+        self
+    }
+
+    /// Enable or disable parallel execution.
+    ///
+    /// When disabled, forces `num_threads` to 1.
+    pub fn with_parallel(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.num_threads = Some(1);
+        }
+        self
+    }
+
+    /// Set the SQL compatibility mode.
+    pub fn with_compat_mode(mut self, mode: sql::parser::CompatMode) -> Self {
+        self.compat_mode = mode;
         self
     }
 }

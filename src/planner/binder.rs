@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 
+use crate::catalog::TableType;
 use crate::catalog::{CatalogList, ResolvedTableRef, TableRef};
 use crate::error::{BlazeError, Result};
-use crate::sql::parser::Expr;
+use crate::sql::parser::{Expr, Parser};
 use crate::sql::{self, Statement};
+use crate::storage::ViewTable;
 use crate::types::{DataType, Field, ScalarValue, Schema};
 
 use super::logical_expr::{
@@ -170,23 +172,64 @@ impl Binder {
     fn bind_copy(&self, copy: sql::parser::Copy, _ctx: &mut BindContext) -> Result<LogicalPlan> {
         use super::logical_plan::{CopyFormat, CopyOptions};
 
-        // Only COPY TO is supported for now
-        if copy.direction != sql::parser::CopyDirection::To {
-            return Err(BlazeError::not_implemented("Only COPY TO is supported"));
-        }
-
-        // Determine the target path
-        let target = match copy.target {
+        // Determine the file path
+        let file_path = match copy.target {
             sql::parser::CopyTarget::File(filename) => filename,
             sql::parser::CopyTarget::Stdout => {
-                return Err(BlazeError::not_implemented("COPY TO STDOUT not supported"))
+                return Err(BlazeError::not_implemented("COPY TO/FROM STDOUT not supported"))
             }
             sql::parser::CopyTarget::Stdin => {
-                return Err(BlazeError::analysis("COPY TO STDIN is invalid"))
+                return Err(BlazeError::not_implemented("COPY TO/FROM STDIN not supported"))
             }
         };
 
-        // Build a scan from the table
+        // Determine format from file extension or explicit format option
+        let format = if let Some(ref fmt) = copy.format {
+            CopyFormat::from_str(fmt).unwrap_or(CopyFormat::Parquet)
+        } else if let Some(ext) = std::path::Path::new(&file_path).extension() {
+            match ext.to_str().unwrap_or("").to_lowercase().as_str() {
+                "parquet" | "pq" => CopyFormat::Parquet,
+                "csv" => CopyFormat::Csv,
+                "json" | "jsonl" | "ndjson" => CopyFormat::Json,
+                _ => CopyFormat::Parquet,
+            }
+        } else {
+            CopyFormat::Parquet
+        };
+
+        // Parse options
+        let mut options = CopyOptions {
+            header: true,
+            ..CopyOptions::default()
+        };
+
+        for (key, value) in &copy.options {
+            match key.to_lowercase().as_str() {
+                "header" => options.header = value.to_lowercase() == "true",
+                "delimiter" => options.delimiter = value.bytes().next(),
+                "compression" => options.compression = Some(value.clone()),
+                _ => {}
+            }
+        }
+
+        if copy.direction == sql::parser::CopyDirection::From {
+            // COPY FROM: import data from file into table
+            let table_name = copy
+                .table_name
+                .last()
+                .cloned()
+                .unwrap_or_default();
+
+            return Ok(LogicalPlan::CopyFrom {
+                table_name,
+                source: file_path,
+                format,
+                options,
+                schema: Schema::empty(),
+            });
+        }
+
+        // COPY TO: export data to file
         let table_ref = TableRef::from_parts(&copy.table_name)?;
         let resolved = table_ref.resolve(&self.default_catalog, &self.default_schema);
         let schema = self.get_table_schema(&resolved)?;
@@ -216,38 +259,9 @@ impl Binder {
             }
         };
 
-        // Determine format from file extension or explicit format option
-        let format = if let Some(ref fmt) = copy.format {
-            CopyFormat::from_str(fmt).unwrap_or(CopyFormat::Parquet)
-        } else if let Some(ext) = std::path::Path::new(&target).extension() {
-            match ext.to_str().unwrap_or("").to_lowercase().as_str() {
-                "parquet" | "pq" => CopyFormat::Parquet,
-                "csv" => CopyFormat::Csv,
-                "json" | "jsonl" | "ndjson" => CopyFormat::Json,
-                _ => CopyFormat::Parquet, // Default
-            }
-        } else {
-            CopyFormat::Parquet
-        };
-
-        // Parse options
-        let mut options = CopyOptions {
-            header: true, // Default to include header for CSV
-            ..CopyOptions::default()
-        };
-
-        for (key, value) in &copy.options {
-            match key.to_lowercase().as_str() {
-                "header" => options.header = value.to_lowercase() == "true",
-                "delimiter" => options.delimiter = value.bytes().next(),
-                "compression" => options.compression = Some(value.clone()),
-                _ => {} // Ignore unknown options
-            }
-        }
-
         Ok(LogicalPlan::Copy {
             input: Arc::new(input),
-            target,
+            target: file_path,
             format,
             options,
             schema: Schema::empty(),
@@ -660,6 +674,40 @@ impl Binder {
 
                 let table_ref = TableRef::from_parts(name)?;
                 let resolved = table_ref.resolve(&self.default_catalog, &self.default_schema);
+
+                // Check if this table is a view — if so, expand it as a subquery
+                if let Some(catalog) = self.catalog_list.catalog(&resolved.catalog) {
+                    if let Some(schema_provider) = catalog.schema(&resolved.schema) {
+                        if let Some(table_provider) = schema_provider.table(&resolved.table) {
+                            if table_provider.table_type() == TableType::View {
+                                if let Some(view) = table_provider.as_any().downcast_ref::<ViewTable>() {
+                                    let view_sql = view.view_sql();
+                                    // Parse the CREATE VIEW SQL to extract the query
+                                    let view_query_sql = Self::extract_view_query(view_sql)?;
+                                    let stmts = Parser::parse(&view_query_sql)?;
+                                    let query_stmt = stmts.into_iter().next().ok_or_else(|| {
+                                        BlazeError::internal("View SQL produced no statements")
+                                    })?;
+                                    let view_plan = match query_stmt {
+                                        Statement::Query(q) => self.bind_query(*q, ctx)?,
+                                        _ => return Err(BlazeError::internal("View SQL is not a query")),
+                                    };
+                                    let view_alias = alias
+                                        .as_ref()
+                                        .map(|a| a.name.as_str())
+                                        .unwrap_or(table_name);
+                                    let plan = LogicalPlanBuilder::from(view_plan)
+                                        .alias(view_alias)
+                                        .build();
+                                    if let Some(a) = alias {
+                                        ctx.with_alias(a.name.clone(), plan.schema().clone());
+                                    }
+                                    return Ok(plan);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Try to get schema from catalog
                 let schema = self.get_table_schema(&resolved)?;
@@ -1293,6 +1341,26 @@ impl Binder {
         Err(BlazeError::catalog(format!(
             "Table '{}' not found (schema '{}' in catalog '{}')",
             table_ref.table, table_ref.schema, table_ref.catalog
+        )))
+    }
+
+    /// Extract the SELECT query from a CREATE VIEW SQL string.
+    /// If the SQL is already a SELECT, return it as-is.
+    fn extract_view_query(sql: &str) -> Result<String> {
+        let upper = sql.trim().to_uppercase();
+        if upper.starts_with("SELECT") || upper.starts_with("WITH") {
+            return Ok(sql.to_string());
+        }
+        // Find "AS" keyword after CREATE [OR REPLACE] VIEW <name>
+        if let Some(as_pos) = upper.find(" AS ") {
+            let query_part = sql[as_pos + 4..].trim().trim_end_matches(';').to_string();
+            if !query_part.is_empty() {
+                return Ok(query_part);
+            }
+        }
+        Err(BlazeError::internal(format!(
+            "Could not extract query from view SQL: {}",
+            sql
         )))
     }
 

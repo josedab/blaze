@@ -49,12 +49,39 @@ pub enum Statement {
     ReleaseSavepoint(String),
     /// ROLLBACK TO SAVEPOINT name
     RollbackToSavepoint(String),
+    /// CREATE VIEW
+    CreateView {
+        name: Vec<String>,
+        query: Box<Query>,
+        or_replace: bool,
+    },
+    /// DROP VIEW
+    DropView {
+        name: Vec<String>,
+        if_exists: bool,
+    },
     /// CREATE MATERIALIZED VIEW
     CreateMaterializedView(CreateMaterializedView),
     /// REFRESH MATERIALIZED VIEW
     RefreshMaterializedView { name: Vec<String> },
     /// ANALYZE TABLE for statistics collection
     AnalyzeTable { name: Vec<String> },
+    /// ALTER TABLE statement
+    AlterTable {
+        name: Vec<String>,
+        operation: AlterTableOperation,
+    },
+}
+
+/// ALTER TABLE operation.
+#[derive(Debug, Clone)]
+pub enum AlterTableOperation {
+    /// ADD COLUMN
+    AddColumn { column: ColumnDef },
+    /// DROP COLUMN
+    DropColumn { name: String, if_exists: bool },
+    /// RENAME COLUMN
+    RenameColumn { old_name: String, new_name: String },
 }
 
 /// A SELECT query.
@@ -583,6 +610,42 @@ pub struct CreateMaterializedView {
     pub query: Box<Query>,
 }
 
+/// SQL compatibility mode for dialect-specific syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompatMode {
+    /// Standard SQL (no transformations)
+    #[default]
+    Standard,
+    /// DuckDB compatibility: transforms DuckDB-specific syntax
+    DuckDB,
+}
+
+/// Transform DuckDB-specific SQL syntax to standard SQL.
+pub fn preprocess_duckdb_sql(sql: &str) -> String {
+    let mut result = sql.to_string();
+
+    // Transform ::TYPE casts to CAST(expr AS TYPE)
+    if let Ok(cast_re) = regex::Regex::new(r"(\w+)::(\w+)") {
+        result = cast_re.replace_all(&result, "CAST($1 AS $2)").to_string();
+    }
+
+    // Transform ILIKE to LIKE (case-insensitive LIKE → use LOWER)
+    result = result.replace(" ILIKE ", " LIKE ");
+
+    // Transform EPOCH_MS() to standard
+    result = result.replace("epoch_ms(", "TO_TIMESTAMP(");
+
+    // Transform LIST_AGG to GROUP_CONCAT
+    result = result.replace("list_agg(", "GROUP_CONCAT(");
+    result = result.replace("LIST_AGG(", "GROUP_CONCAT(");
+
+    // Transform string_agg to GROUP_CONCAT
+    result = result.replace("string_agg(", "GROUP_CONCAT(");
+    result = result.replace("STRING_AGG(", "GROUP_CONCAT(");
+
+    result
+}
+
 /// SQL Parser for Blaze.
 pub struct Parser;
 
@@ -616,6 +679,15 @@ impl Parser {
         Ok(statements.remove(0))
     }
 
+    /// Parse SQL with dialect-specific compatibility preprocessing.
+    pub fn parse_with_compat(sql: &str, mode: CompatMode) -> Result<Vec<Statement>> {
+        let sql = match mode {
+            CompatMode::DuckDB => preprocess_duckdb_sql(sql),
+            CompatMode::Standard => sql.to_string(),
+        };
+        Self::parse(&sql)
+    }
+
     fn convert_statement(stmt: sql_ast::Statement) -> Result<Statement> {
         match stmt {
             sql_ast::Statement::Query(query) => {
@@ -633,6 +705,15 @@ impl Parser {
                 name: Self::convert_object_name(&names[0]),
                 if_exists,
             })),
+            sql_ast::Statement::Drop {
+                object_type: sql_ast::ObjectType::View,
+                names,
+                if_exists,
+                ..
+            } => Ok(Statement::DropView {
+                name: Self::convert_object_name(&names[0]),
+                if_exists,
+            }),
             sql_ast::Statement::Insert(insert) => {
                 Ok(Statement::Insert(Self::convert_insert(insert)?))
             }
@@ -799,6 +880,7 @@ impl Parser {
                 name,
                 query,
                 materialized,
+                or_replace,
                 ..
             } => {
                 if materialized {
@@ -807,7 +889,13 @@ impl Parser {
                         query: Box::new(Self::convert_query(*query)?),
                     }))
                 } else {
-                    Err(BlazeError::not_implemented("Non-materialized views"))
+                    let view_name = Self::convert_object_name(&name);
+                    let blaze_query = Self::convert_query(*query)?;
+                    Ok(Statement::CreateView {
+                        name: view_name,
+                        query: Box::new(blaze_query),
+                        or_replace,
+                    })
                 }
             }
             // ANALYZE TABLE (sqlparser parses as ANALYZE)
@@ -817,6 +905,48 @@ impl Parser {
             } => {
                 Ok(Statement::AnalyzeTable {
                     name: Self::convert_object_name(&table_name),
+                })
+            }
+            sql_ast::Statement::AlterTable {
+                name,
+                operations,
+                ..
+            } => {
+                let table_name = Self::convert_object_name(&name);
+                // We support a single operation per ALTER TABLE statement
+                let op = operations.into_iter().next().ok_or_else(|| {
+                    BlazeError::analysis("ALTER TABLE requires an operation")
+                })?;
+                let operation = match op {
+                    sql_ast::AlterTableOperation::AddColumn { column_def, .. } => {
+                        AlterTableOperation::AddColumn {
+                            column: Self::convert_column_def(column_def)?,
+                        }
+                    }
+                    sql_ast::AlterTableOperation::DropColumn {
+                        column_name,
+                        if_exists,
+                        ..
+                    } => AlterTableOperation::DropColumn {
+                        name: column_name.to_string(),
+                        if_exists,
+                    },
+                    sql_ast::AlterTableOperation::RenameColumn {
+                        old_column_name,
+                        new_column_name,
+                    } => AlterTableOperation::RenameColumn {
+                        old_name: old_column_name.to_string(),
+                        new_name: new_column_name.to_string(),
+                    },
+                    other => {
+                        return Err(BlazeError::not_implemented(format!(
+                            "ALTER TABLE operation: {other}"
+                        )));
+                    }
+                };
+                Ok(Statement::AlterTable {
+                    name: table_name,
+                    operation,
                 })
             }
             _ => Err(BlazeError::not_implemented(format!(

@@ -11,6 +11,7 @@ mod object_store;
 mod parquet;
 mod persistent;
 pub mod type_inference;
+pub mod view;
 
 pub use self::csv::{write_csv, CsvOptions, CsvTable};
 #[cfg(feature = "lakehouse")]
@@ -30,6 +31,7 @@ pub use persistent::{
     persistent_table, BufferPool, Page, PageType, PersistentConfig, PersistentTable, WalEntry,
     WalOperation, WriteAheadLog,
 };
+pub use view::ViewTable;
 
 use std::path::Path;
 use std::sync::Arc;

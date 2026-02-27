@@ -5,4 +5,4 @@
 
 pub mod parser;
 
-pub use parser::{Parser, Statement};
+pub use parser::{CompatMode, Parser, Statement};

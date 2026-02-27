@@ -5,6 +5,7 @@
 
 mod table;
 pub mod external;
+pub mod information_schema;
 
 use std::collections::HashMap;
 use std::sync::Arc;

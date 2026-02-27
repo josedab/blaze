@@ -9,9 +9,9 @@ use arrow::record_batch::RecordBatch;
 use parking_lot::RwLock;
 
 use crate::catalog::{ColumnStatistics, TableProvider, TableStatistics, TableType};
-use crate::error::Result;
+use crate::error::{BlazeError, Result};
 use crate::planner::PhysicalExpr;
-use crate::types::Schema;
+use crate::types::{Field, Schema};
 
 /// An in-memory table backed by Arrow RecordBatches.
 #[derive(Debug)]
@@ -65,6 +65,117 @@ impl MemoryTable {
     /// Get a clone of all batches in the table.
     pub fn batches(&self) -> Vec<RecordBatch> {
         self.batches.read().clone()
+    }
+
+    /// Return a new MemoryTable with an additional column filled with nulls.
+    pub fn with_added_column(
+        &self,
+        name: &str,
+        data_type: arrow::datatypes::DataType,
+        nullable: bool,
+    ) -> Result<Self> {
+        if !nullable {
+            return Err(BlazeError::analysis(
+                "ADD COLUMN with NOT NULL requires a default value, which is not yet supported",
+            ));
+        }
+        let mut fields: Vec<Field> = self.schema.fields().to_vec();
+        fields.push(Field::new(
+            name,
+            crate::types::DataType::from_arrow(&data_type)?,
+            nullable,
+        ));
+        let new_schema = Schema::new(fields);
+
+        let batches = self.batches.read();
+        let new_batches: Vec<RecordBatch> = batches
+            .iter()
+            .map(|batch| {
+                let mut columns: Vec<Arc<dyn arrow::array::Array>> =
+                    batch.columns().to_vec();
+                columns.push(arrow::array::new_null_array(&data_type, batch.num_rows()));
+                let arrow_schema = Arc::new(new_schema.to_arrow());
+                RecordBatch::try_new(arrow_schema, columns)
+                    .map_err(|e| BlazeError::execution(format!("Failed to add column: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Self::new(new_schema, new_batches))
+    }
+
+    /// Return a new MemoryTable with the specified column removed.
+    pub fn with_dropped_column(&self, name: &str) -> Result<Self> {
+        let idx = self.schema.index_of(name).ok_or_else(|| {
+            BlazeError::analysis(format!("Column '{name}' not found in table"))
+        })?;
+
+        let fields: Vec<Field> = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != idx)
+            .map(|(_, f)| f.clone())
+            .collect();
+        if fields.is_empty() {
+            return Err(BlazeError::analysis(
+                "Cannot drop the last column of a table",
+            ));
+        }
+        let new_schema = Schema::new(fields);
+
+        let batches = self.batches.read();
+        let new_batches: Vec<RecordBatch> = batches
+            .iter()
+            .map(|batch| {
+                let columns: Vec<Arc<dyn arrow::array::Array>> = batch
+                    .columns()
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .map(|(_, c)| c.clone())
+                    .collect();
+                let arrow_schema = Arc::new(new_schema.to_arrow());
+                RecordBatch::try_new(arrow_schema, columns)
+                    .map_err(|e| BlazeError::execution(format!("Failed to drop column: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Self::new(new_schema, new_batches))
+    }
+
+    /// Return a new MemoryTable with a column renamed.
+    pub fn with_renamed_column(&self, old_name: &str, new_name: &str) -> Result<Self> {
+        let idx = self.schema.index_of(old_name).ok_or_else(|| {
+            BlazeError::analysis(format!("Column '{old_name}' not found in table"))
+        })?;
+
+        let fields: Vec<Field> = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                if i == idx {
+                    Field::new(new_name, f.data_type().clone(), f.is_nullable())
+                } else {
+                    f.clone()
+                }
+            })
+            .collect();
+        let new_schema = Schema::new(fields);
+
+        let batches = self.batches.read();
+        let new_batches: Vec<RecordBatch> = batches
+            .iter()
+            .map(|batch| {
+                let arrow_schema = Arc::new(new_schema.to_arrow());
+                RecordBatch::try_new(arrow_schema, batch.columns().to_vec())
+                    .map_err(|e| BlazeError::execution(format!("Failed to rename column: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Self::new(new_schema, new_batches))
     }
 }
 
