@@ -337,8 +337,10 @@ pub fn simd_add_i32(a: &[i32], b: &[i32], result: &mut [i32], level: SimdLevel) 
 
     match level {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: len >= 8 is checked by the guard; slices a, b, result are valid for len elements.
         SimdLevel::Avx2 if len >= 8 => unsafe { simd_add_i32_avx2(a, b, result, len) },
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: len >= 4 is checked by the guard; slices a, b, result are valid for len elements.
         SimdLevel::Sse42 if len >= 4 => unsafe { simd_add_i32_sse42(a, b, result, len) },
         _ => {
             // Scalar fallback
@@ -349,6 +351,9 @@ pub fn simd_add_i32(a: &[i32], b: &[i32], result: &mut [i32], level: SimdLevel) 
     }
 }
 
+/// # Safety
+/// Caller must ensure `len <= a.len()`, `len <= b.len()`, `len <= result.len()`.
+/// Only call on x86_64 with AVX2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_add_i32_avx2(a: &[i32], b: &[i32], result: &mut [i32], len: usize) {
@@ -372,6 +377,9 @@ unsafe fn simd_add_i32_avx2(a: &[i32], b: &[i32], result: &mut [i32], len: usize
     }
 }
 
+/// # Safety
+/// Caller must ensure `len <= a.len()`, `len <= b.len()`, `len <= result.len()`.
+/// Only call on x86_64 with SSE4.2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
 unsafe fn simd_add_i32_sse42(a: &[i32], b: &[i32], result: &mut [i32], len: usize) {
@@ -399,6 +407,7 @@ unsafe fn simd_add_i32_sse42(a: &[i32], b: &[i32], result: &mut [i32], len: usiz
 pub fn simd_filter_gt_i32(data: &[i32], threshold: i32, level: SimdLevel) -> Vec<bool> {
     match level {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: data.len() >= 8 is checked by the guard; data slice is valid.
         SimdLevel::Avx2 if data.len() >= 8 => unsafe { simd_filter_gt_i32_avx2(data, threshold) },
         _ => {
             // Scalar fallback
@@ -407,6 +416,9 @@ pub fn simd_filter_gt_i32(data: &[i32], threshold: i32, level: SimdLevel) -> Vec
     }
 }
 
+/// # Safety
+/// Caller must ensure `data` has at least 8 elements.
+/// Only call on x86_64 with AVX2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_filter_gt_i32_avx2(data: &[i32], threshold: i32) -> Vec<bool> {
@@ -443,8 +455,10 @@ unsafe fn simd_filter_gt_i32_avx2(data: &[i32], threshold: i32) -> Vec<bool> {
 pub fn simd_sum_i64(data: &[i64], level: SimdLevel) -> i64 {
     match level {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: data.len() >= 4 is checked by the guard; data slice is valid.
         SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_sum_i64_avx2(data) },
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: data.len() >= 2 is checked by the guard; data slice is valid.
         SimdLevel::Sse42 if data.len() >= 2 => unsafe { simd_sum_i64_sse42(data) },
         _ => {
             // Scalar fallback
@@ -453,6 +467,9 @@ pub fn simd_sum_i64(data: &[i64], level: SimdLevel) -> i64 {
     }
 }
 
+/// # Safety
+/// Caller must ensure `data` has at least 4 elements.
+/// Only call on x86_64 with AVX2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_sum_i64_avx2(data: &[i64]) -> i64 {
@@ -482,6 +499,9 @@ unsafe fn simd_sum_i64_avx2(data: &[i64]) -> i64 {
     total
 }
 
+/// # Safety
+/// Caller must ensure `data` has at least 2 elements.
+/// Only call on x86_64 with SSE4.2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
 unsafe fn simd_sum_i64_sse42(data: &[i64]) -> i64 {
@@ -515,8 +535,10 @@ unsafe fn simd_sum_i64_sse42(data: &[i64]) -> i64 {
 pub fn simd_sum_f64(data: &[f64], level: SimdLevel) -> f64 {
     match level {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: data.len() >= 4 is checked by the guard; data slice is valid.
         SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_sum_f64_avx2(data) },
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: data.len() >= 2 is checked by the guard; data slice is valid.
         SimdLevel::Sse42 if data.len() >= 2 => unsafe { simd_sum_f64_sse42(data) },
         _ => {
             // Scalar fallback
@@ -525,6 +547,9 @@ pub fn simd_sum_f64(data: &[f64], level: SimdLevel) -> f64 {
     }
 }
 
+/// # Safety
+/// Caller must ensure `data` has at least 4 elements.
+/// Only call on x86_64 with AVX support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
 unsafe fn simd_sum_f64_avx2(data: &[f64]) -> f64 {
@@ -554,6 +579,9 @@ unsafe fn simd_sum_f64_avx2(data: &[f64]) -> f64 {
     total
 }
 
+/// # Safety
+/// Caller must ensure `data` has at least 2 elements.
+/// Only call on x86_64 with SSE2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn simd_sum_f64_sse42(data: &[f64]) -> f64 {
@@ -591,6 +619,7 @@ pub fn simd_min_i64(data: &[i64], level: SimdLevel) -> i64 {
 
     match level {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: data.len() >= 4 is checked by the guard; data slice is valid and non-empty.
         SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_min_i64_avx2(data) },
         _ => {
             // Safety: data is non-empty (checked above)
@@ -602,6 +631,9 @@ pub fn simd_min_i64(data: &[i64], level: SimdLevel) -> i64 {
     }
 }
 
+/// # Safety
+/// Caller must ensure `data` is non-empty.
+/// Only call on x86_64 with AVX2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_min_i64_avx2(data: &[i64]) -> i64 {
@@ -625,6 +657,7 @@ pub fn simd_max_i64(data: &[i64], level: SimdLevel) -> i64 {
 
     match level {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: data.len() >= 4 is checked by the guard; data slice is valid and non-empty.
         SimdLevel::Avx2 if data.len() >= 4 => unsafe { simd_max_i64_avx2(data) },
         _ => {
             // Safety: data is non-empty (checked above)
@@ -636,6 +669,9 @@ pub fn simd_max_i64(data: &[i64], level: SimdLevel) -> i64 {
     }
 }
 
+/// # Safety
+/// Caller must ensure `data` is non-empty.
+/// Only call on x86_64 with AVX2 support (enforced by `#[target_feature]`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn simd_max_i64_avx2(data: &[i64]) -> i64 {
