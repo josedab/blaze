@@ -49,8 +49,9 @@ impl JoinHashTable {
                 .map(|expr| expr.evaluate(batch))
                 .collect::<Result<Vec<_>>>()?;
 
-            for row in 0..batch.num_rows() {
-                let hash = Self::compute_hash_from_arrays(&key_columns, row)?;
+            let hashes = Self::compute_hashes_batch(&key_columns, batch.num_rows())?;
+
+            for (row, hash) in hashes.into_iter().enumerate() {
                 map.entry(hash).or_default().push((batch_idx, row));
             }
             total_rows += batch.num_rows();
@@ -198,6 +199,160 @@ impl JoinHashTable {
             dt => {
                 return Err(BlazeError::not_implemented(format!(
                     "Hash for type {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp",
+                    dt
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Compute hash values for all rows in the given key columns at once.
+    ///
+    /// This is more efficient than calling `compute_hash_from_arrays` per row
+    /// because it processes each column across all rows before moving to the next,
+    /// improving cache locality and enabling future SIMD optimizations.
+    fn compute_hashes_batch(key_columns: &[ArrayRef], num_rows: usize) -> Result<Vec<u64>> {
+        let mut hashes = vec![0u64; num_rows];
+
+        for col in key_columns {
+            Self::hash_column_batch(col, &mut hashes)?;
+        }
+
+        Ok(hashes)
+    }
+
+    fn hash_column_batch(array: &ArrayRef, hashes: &mut [u64]) -> Result<()> {
+        use std::collections::hash_map::DefaultHasher;
+
+        macro_rules! hash_primitive_batch {
+            ($array_type:ty, $array:expr, $hashes:expr, $write_fn:ident) => {{
+                let arr = try_downcast::<$array_type>($array, stringify!($array_type))?;
+                for (i, hash) in $hashes.iter_mut().enumerate() {
+                    let mut hasher = DefaultHasher::new();
+                    hasher.write_u64(*hash);
+                    if arr.is_null(i) {
+                        0xDEADBEEFu64.hash(&mut hasher);
+                    } else {
+                        hasher.$write_fn(arr.value(i));
+                    }
+                    *hash = hasher.finish();
+                }
+            }};
+        }
+
+        match array.data_type() {
+            DataType::Boolean => {
+                let arr = try_downcast::<BooleanArray>(array, "BooleanArray")?;
+                for (i, hash) in hashes.iter_mut().enumerate() {
+                    let mut hasher = DefaultHasher::new();
+                    hasher.write_u64(*hash);
+                    if arr.is_null(i) {
+                        0xDEADBEEFu64.hash(&mut hasher);
+                    } else {
+                        arr.value(i).hash(&mut hasher);
+                    }
+                    *hash = hasher.finish();
+                }
+            }
+            DataType::Int8 => {
+                hash_primitive_batch!(Int8Array, array, hashes, write_i8);
+            }
+            DataType::Int16 => {
+                hash_primitive_batch!(Int16Array, array, hashes, write_i16);
+            }
+            DataType::Int32 => {
+                hash_primitive_batch!(Int32Array, array, hashes, write_i32);
+            }
+            DataType::Int64 => {
+                hash_primitive_batch!(Int64Array, array, hashes, write_i64);
+            }
+            DataType::UInt32 => {
+                hash_primitive_batch!(UInt32Array, array, hashes, write_u32);
+            }
+            DataType::UInt64 => {
+                hash_primitive_batch!(UInt64Array, array, hashes, write_u64);
+            }
+            DataType::Float32 => {
+                let arr = try_downcast::<Float32Array>(array, "Float32Array")?;
+                for (i, hash) in hashes.iter_mut().enumerate() {
+                    let mut hasher = DefaultHasher::new();
+                    hasher.write_u64(*hash);
+                    if arr.is_null(i) {
+                        0xDEADBEEFu64.hash(&mut hasher);
+                    } else {
+                        hasher.write_u32(arr.value(i).to_bits());
+                    }
+                    *hash = hasher.finish();
+                }
+            }
+            DataType::Float64 => {
+                let arr = try_downcast::<Float64Array>(array, "Float64Array")?;
+                for (i, hash) in hashes.iter_mut().enumerate() {
+                    let mut hasher = DefaultHasher::new();
+                    hasher.write_u64(*hash);
+                    if arr.is_null(i) {
+                        0xDEADBEEFu64.hash(&mut hasher);
+                    } else {
+                        hasher.write_u64(arr.value(i).to_bits());
+                    }
+                    *hash = hasher.finish();
+                }
+            }
+            DataType::Utf8 => {
+                let arr = try_downcast::<StringArray>(array, "StringArray")?;
+                for (i, hash) in hashes.iter_mut().enumerate() {
+                    let mut hasher = DefaultHasher::new();
+                    hasher.write_u64(*hash);
+                    if arr.is_null(i) {
+                        0xDEADBEEFu64.hash(&mut hasher);
+                    } else {
+                        arr.value(i).hash(&mut hasher);
+                    }
+                    *hash = hasher.finish();
+                }
+            }
+            DataType::Date32 => {
+                hash_primitive_batch!(Date32Array, array, hashes, write_i32);
+            }
+            DataType::Date64 => {
+                hash_primitive_batch!(Date64Array, array, hashes, write_i64);
+            }
+            DataType::Timestamp(unit, _) => {
+                use arrow::datatypes::TimeUnit;
+                match unit {
+                    TimeUnit::Second => {
+                        hash_primitive_batch!(TimestampSecondArray, array, hashes, write_i64);
+                    }
+                    TimeUnit::Millisecond => {
+                        hash_primitive_batch!(
+                            TimestampMillisecondArray,
+                            array,
+                            hashes,
+                            write_i64
+                        );
+                    }
+                    TimeUnit::Microsecond => {
+                        hash_primitive_batch!(
+                            TimestampMicrosecondArray,
+                            array,
+                            hashes,
+                            write_i64
+                        );
+                    }
+                    TimeUnit::Nanosecond => {
+                        hash_primitive_batch!(
+                            TimestampNanosecondArray,
+                            array,
+                            hashes,
+                            write_i64
+                        );
+                    }
+                }
+            }
+            dt => {
+                return Err(BlazeError::not_implemented(format!(
+                    "Batch hash for type {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp",
                     dt
                 )));
             }
@@ -470,9 +625,11 @@ impl HashJoinOperator {
         let mut left_indices: Vec<usize> = Vec::new();
         let mut right_indices: Vec<Option<(usize, usize)>> = Vec::new();
 
-        for left_row in 0..left_batch.num_rows() {
-            let hash = JoinHashTable::compute_hash_from_arrays(left_key_arrays, left_row)?;
+        // Batch-hash all probe-side keys at once
+        let probe_hashes =
+            JoinHashTable::compute_hashes_batch(left_key_arrays, left_batch.num_rows())?;
 
+        for (left_row, hash) in probe_hashes.into_iter().enumerate() {
             let matches = hash_table.probe(hash);
             let mut found_match = false;
 
