@@ -513,6 +513,12 @@ impl ParquetTable {
         filters: &[Arc<dyn crate::planner::PhysicalExpr>],
         limit: Option<usize>,
     ) -> Result<Vec<RecordBatch>> {
+        // Delegate to scan_lazy which handles both limited and unlimited reads
+        // with per-row-group early termination
+        if limit.is_some() && filters.is_empty() {
+            return self.scan_lazy(projection, limit);
+        }
+
         use arrow::array::BooleanArray;
         use arrow::compute::filter_record_batch;
 
@@ -615,6 +621,109 @@ impl ParquetTable {
                 }
             } else {
                 result.push(projected);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Lazy row group reader with early termination when a limit is specified.
+    ///
+    /// Reads row groups one at a time and stops as soon as enough rows have been
+    /// collected to satisfy `limit`. This avoids reading the entire Parquet file
+    /// when only a small number of rows are needed (e.g., `SELECT * FROM t LIMIT 10`).
+    ///
+    /// Optionally performs a best-effort memory check before reading each row group
+    /// using the row group's compressed byte size from Parquet metadata.
+    pub fn scan_lazy(
+        &self,
+        projection: Option<&[usize]>,
+        limit: Option<usize>,
+    ) -> Result<Vec<RecordBatch>> {
+        let file = File::open(&self.path)?;
+        let initial_builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let metadata = initial_builder.metadata().clone();
+        let num_row_groups = metadata.num_row_groups();
+
+        // Determine row groups to read (respect pre-configured selection)
+        let row_group_indices: Vec<usize> = match &self.options.row_groups {
+            Some(groups) => groups.clone(),
+            None => (0..num_row_groups).collect(),
+        };
+
+        let mut result = Vec::new();
+        let mut rows_collected: usize = 0;
+
+        for &rg_idx in &row_group_indices {
+            // Best-effort memory check: skip row group if its compressed size
+            // would exceed a reasonable per-query budget (256 MB default).
+            let rg_meta = metadata.row_group(rg_idx);
+            let rg_byte_size = rg_meta.total_byte_size() as usize;
+            const MAX_ROW_GROUP_BYTES: usize = 256 * 1024 * 1024;
+            if rg_byte_size > MAX_ROW_GROUP_BYTES {
+                // Log-style warning: skip oversized row groups as best-effort guard
+                // but still allow processing if it's the only row group
+                if num_row_groups > 1 {
+                    continue;
+                }
+            }
+
+            // Open a fresh reader for this single row group
+            let file = File::open(&self.path)?;
+            let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?
+                .with_batch_size(self.options.batch_size)
+                .with_row_groups(vec![rg_idx]);
+
+            // Apply projection pushdown at I/O level
+            if let Some(indices) = projection {
+                let mask = parquet::arrow::ProjectionMask::leaves(
+                    builder.metadata().file_metadata().schema_descr(),
+                    indices.iter().copied(),
+                );
+                builder = builder.with_projection(mask);
+            }
+
+            // Apply limit hint to the reader so the underlying parquet decoder
+            // can avoid decoding more rows than needed within this row group.
+            if let Some(limit) = limit {
+                let remaining = limit.saturating_sub(rows_collected);
+                if remaining == 0 {
+                    break;
+                }
+                builder = builder.with_limit(remaining);
+            }
+
+            let reader = builder.build()?;
+
+            for batch_result in reader {
+                let batch = batch_result?;
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+
+                if let Some(limit) = limit {
+                    let remaining = limit - rows_collected;
+                    if remaining == 0 {
+                        break;
+                    }
+                    if batch.num_rows() <= remaining {
+                        rows_collected += batch.num_rows();
+                        result.push(batch);
+                    } else {
+                        result.push(batch.slice(0, remaining));
+                        rows_collected += remaining;
+                        break;
+                    }
+                } else {
+                    result.push(batch);
+                }
+            }
+
+            // Early termination: stop reading further row groups
+            if let Some(limit) = limit {
+                if rows_collected >= limit {
+                    break;
+                }
             }
         }
 
