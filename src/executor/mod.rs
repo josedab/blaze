@@ -291,6 +291,14 @@ impl Executor {
                 let input_batches = self.execute_plan(input)?;
                 self.execute_copy(&input_batches, target, format, options)
             }
+            PhysicalPlan::CopyFrom {
+                table_name,
+                source,
+                format,
+                ..
+            } => {
+                self.execute_copy_from(table_name, source, format)
+            }
             PhysicalPlan::Exchange {
                 input,
                 exchange_type,
@@ -500,6 +508,17 @@ impl Executor {
                 stats.add_metric("format", &format!("{:?}", format));
                 self.execute_copy(&input_batches, target, format, options)?
             }
+            PhysicalPlan::CopyFrom {
+                table_name,
+                source,
+                format,
+                ..
+            } => {
+                stats.add_metric("source", source);
+                stats.add_metric("table", table_name);
+                stats.add_metric("format", &format!("{:?}", format));
+                self.execute_copy_from(table_name, source, format)?
+            }
             PhysicalPlan::Exchange {
                 input,
                 exchange_type,
@@ -547,6 +566,7 @@ impl Executor {
             PhysicalPlan::Window { .. } => "Window".to_string(),
             PhysicalPlan::ExplainAnalyze { .. } => "ExplainAnalyze".to_string(),
             PhysicalPlan::Copy { target, .. } => format!("Copy({})", target),
+            PhysicalPlan::CopyFrom { source, .. } => format!("CopyFrom({})", source),
             PhysicalPlan::Exchange { exchange_type, num_partitions, .. } => {
                 format!("Exchange({:?}, {})", exchange_type, num_partitions)
             }
@@ -937,6 +957,76 @@ impl Executor {
         let partitioned = exchange.execute(inputs)?;
         // Flatten all partitions into a single result vector
         Ok(partitioned.into_iter().flatten().collect())
+    }
+
+    /// Execute COPY FROM: read file and insert batches into the target table.
+    fn execute_copy_from(
+        &self,
+        table_name: &str,
+        source: &str,
+        format: &crate::planner::CopyFormat,
+    ) -> Result<Vec<RecordBatch>> {
+        use crate::storage::{CsvTable, ParquetTable};
+
+        let source_path = std::path::Path::new(source);
+        for component in source_path.components() {
+            if let std::path::Component::ParentDir = component {
+                return Err(crate::error::BlazeError::invalid_argument(format!(
+                    "COPY FROM path '{}' contains '..' traversal which is not allowed",
+                    source
+                )));
+            }
+        }
+
+        // Read batches from the source file
+        let source_table: Box<dyn crate::catalog::TableProvider> = match format {
+            crate::planner::CopyFormat::Csv => {
+                Box::new(CsvTable::open(source_path)?)
+            }
+            crate::planner::CopyFormat::Parquet => {
+                Box::new(ParquetTable::open(source_path)?)
+            }
+            crate::planner::CopyFormat::Json => {
+                return Err(crate::error::BlazeError::not_implemented(
+                    "COPY FROM JSON format",
+                ));
+            }
+        };
+
+        let batches = source_table.scan(None, &[], None)?;
+
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        // Insert batches into the target table
+        if let Some(catalog_list) = &self.catalog_list {
+            if let Some(catalog) = catalog_list.catalog("default") {
+                if let Some(table) = catalog.get_table(table_name) {
+                    let memory_table = table
+                        .as_any()
+                        .downcast_ref::<crate::storage::MemoryTable>()
+                        .ok_or_else(|| {
+                            crate::error::BlazeError::not_implemented(
+                                "COPY FROM is only supported for in-memory tables",
+                            )
+                        })?;
+                    memory_table.append(batches);
+                } else {
+                    return Err(crate::error::BlazeError::catalog(format!(
+                        "Table '{}' not found",
+                        table_name
+                    )));
+                }
+            }
+        }
+
+        // Return a result batch showing the count
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+            "count",
+            arrow::datatypes::DataType::Int64,
+            false,
+        )]));
+        let count_array = Arc::new(arrow::array::Int64Array::from(vec![row_count as i64]));
+        Ok(vec![RecordBatch::try_new(schema, vec![count_array])?])
     }
 }
 

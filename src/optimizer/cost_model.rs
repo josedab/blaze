@@ -397,6 +397,7 @@ impl CostModel {
                 let io_cost = Cost::io(1000.0 * self.io_cost_factor);
                 Ok(input_cost + io_cost)
             }
+            LogicalPlan::CopyFrom { .. } => Ok(Cost::zero()),
         }
     }
 
@@ -429,7 +430,7 @@ impl CostModel {
                 Ok(input_cost + self.projection_cost(card, exprs.len()))
             }
             LogicalPlan::Aggregate {
-                input, group_by, aggr_exprs, ..
+                input, group_by: _, aggr_exprs, ..
             } => {
                 let input_cost = self.estimate_with_stats(input, estimator, stats_manager)?;
                 let input_card = estimator.estimate_plan(input, stats_manager).unwrap_or(1000);

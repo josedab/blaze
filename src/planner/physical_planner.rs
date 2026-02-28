@@ -410,6 +410,29 @@ impl PhysicalPlanner {
                     schema: Arc::new(ArrowSchema::empty()),
                 })
             }
+            LogicalPlan::CopyFrom {
+                table_name,
+                source,
+                format,
+                options,
+                ..
+            } => {
+                let physical_format = match format {
+                    crate::planner::logical_plan::CopyFormat::Parquet => {
+                        PhysicalCopyFormat::Parquet
+                    }
+                    crate::planner::logical_plan::CopyFormat::Csv => PhysicalCopyFormat::Csv,
+                    crate::planner::logical_plan::CopyFormat::Json => PhysicalCopyFormat::Json,
+                };
+
+                Ok(PhysicalPlan::CopyFrom {
+                    table_name: table_name.clone(),
+                    source: source.clone(),
+                    format: physical_format,
+                    options: options.clone(),
+                    schema: Arc::new(ArrowSchema::empty()),
+                })
+            }
         }
     }
 
@@ -819,6 +842,7 @@ impl PhysicalPlanner {
             PhysicalPlan::Window { schema, .. } => schema.clone(),
             PhysicalPlan::ExplainAnalyze { schema, .. } => schema.clone(),
             PhysicalPlan::Copy { schema, .. } => schema.clone(),
+            PhysicalPlan::CopyFrom { schema, .. } => schema.clone(),
             PhysicalPlan::Exchange { schema, .. } => schema.clone(),
         }
     }

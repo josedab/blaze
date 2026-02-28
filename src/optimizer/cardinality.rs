@@ -2,10 +2,41 @@
 //!
 //! Estimates the number of rows produced by query operators using statistics.
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
 use crate::error::Result;
 use crate::planner::{BinaryOp, JoinType, LogicalExpr, LogicalPlan};
 
 use super::statistics::StatisticsManager;
+
+/// Stores cardinality feedback from actual query executions.
+#[derive(Debug, Default)]
+pub struct CardinalityFeedback {
+    /// Table name → actual row count (most recent observation)
+    table_row_counts: RwLock<HashMap<String, usize>>,
+}
+
+impl CardinalityFeedback {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_table_rows(&self, table_name: &str, row_count: usize) {
+        self.table_row_counts
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(table_name.to_string(), row_count);
+    }
+
+    pub fn get_table_rows(&self, table_name: &str) -> Option<usize> {
+        self.table_row_counts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(table_name)
+            .copied()
+    }
+}
 
 /// Default selectivity for equality predicates.
 const DEFAULT_EQ_SELECTIVITY: f64 = 0.1;
@@ -27,6 +58,8 @@ const DEFAULT_ROW_COUNT: usize = 1000;
 pub struct CardinalityEstimator {
     /// Use statistics when available
     use_statistics: bool,
+    /// Optional cardinality feedback from actual executions
+    feedback: Option<Arc<CardinalityFeedback>>,
 }
 
 impl CardinalityEstimator {
@@ -34,6 +67,7 @@ impl CardinalityEstimator {
     pub fn new() -> Self {
         Self {
             use_statistics: true,
+            feedback: None,
         }
     }
 
@@ -41,7 +75,14 @@ impl CardinalityEstimator {
     pub fn without_statistics() -> Self {
         Self {
             use_statistics: false,
+            feedback: None,
         }
+    }
+
+    /// Attach cardinality feedback to improve future estimates.
+    pub fn with_feedback(mut self, feedback: Arc<CardinalityFeedback>) -> Self {
+        self.feedback = Some(feedback);
+        self
     }
 
     /// Estimate cardinality for a logical plan and return the same plan.
@@ -131,11 +172,18 @@ impl CardinalityEstimator {
                 let _ = self.estimate_plan(input, stats_manager)?;
                 Ok(1)
             }
+            LogicalPlan::CopyFrom { .. } => Ok(0),
         }
     }
 
     /// Estimate cardinality for a table scan.
     fn estimate_scan(&self, table_name: &str, stats_manager: &StatisticsManager) -> Result<usize> {
+        // Prefer feedback from actual execution if available
+        if let Some(ref feedback) = self.feedback {
+            if let Some(row_count) = feedback.get_table_rows(table_name) {
+                return Ok(row_count);
+            }
+        }
         if self.use_statistics {
             if let Some(stats) = stats_manager.get(table_name) {
                 return Ok(stats.row_count);

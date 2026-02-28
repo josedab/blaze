@@ -460,6 +460,7 @@ fn substitute_parameters(
                 schema: schema.clone(),
             })
         }
+        LogicalPlan::CopyFrom { .. } => Ok(plan.clone()),
     }
 }
 
@@ -815,6 +816,7 @@ fn extract_parameters_from_plan(plan: &LogicalPlan, params: &mut Vec<ParameterIn
         LogicalPlan::Copy { input, .. } => {
             extract_parameters_from_plan(input, params);
         }
+        LogicalPlan::CopyFrom { .. } => {}
     }
 }
 

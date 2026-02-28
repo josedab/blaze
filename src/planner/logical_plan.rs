@@ -288,6 +288,19 @@ pub enum LogicalPlan {
         /// Schema (empty since COPY TO doesn't return rows)
         schema: Schema,
     },
+    /// COPY FROM: import data from file into table
+    CopyFrom {
+        /// Target table name
+        table_name: String,
+        /// Source file path
+        source: String,
+        /// File format
+        format: CopyFormat,
+        /// Copy options
+        options: CopyOptions,
+        /// Schema (empty since COPY FROM returns affected row count)
+        schema: Schema,
+    },
 }
 
 /// Output format for COPY TO.
@@ -361,6 +374,7 @@ impl LogicalPlan {
             LogicalPlan::Delete { schema, .. } => schema,
             LogicalPlan::Update { schema, .. } => schema,
             LogicalPlan::Copy { schema, .. } => schema,
+            LogicalPlan::CopyFrom { schema, .. } => schema,
         }
     }
 
@@ -389,6 +403,7 @@ impl LogicalPlan {
             LogicalPlan::Delete { .. } => vec![],
             LogicalPlan::Update { .. } => vec![],
             LogicalPlan::Copy { input, .. } => vec![input.as_ref()],
+            LogicalPlan::CopyFrom { .. } => vec![],
         }
     }
 
@@ -622,6 +637,17 @@ impl LogicalPlan {
                     prefix, target, format
                 ));
                 input.format_indent(f, indent + 1);
+            }
+            LogicalPlan::CopyFrom {
+                table_name,
+                source,
+                format,
+                ..
+            } => {
+                f.push_str(&format!(
+                    "{}CopyFrom: source='{}' table='{}' format={}\n",
+                    prefix, source, table_name, format
+                ));
             }
         }
     }

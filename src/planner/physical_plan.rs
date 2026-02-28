@@ -185,6 +185,20 @@ pub enum PhysicalPlan {
         schema: Arc<ArrowSchema>,
     },
 
+    /// COPY FROM: import data from file into table
+    CopyFrom {
+        /// Target table name
+        table_name: String,
+        /// Source file path
+        source: String,
+        /// File format
+        format: CopyFormat,
+        /// Copy options
+        options: super::logical_plan::CopyOptions,
+        /// Output schema
+        schema: Arc<ArrowSchema>,
+    },
+
     /// Exchange operator for parallel data redistribution
     Exchange {
         /// Input plan
@@ -231,6 +245,7 @@ impl PhysicalPlan {
             PhysicalPlan::Window { schema, .. } => schema.clone(),
             PhysicalPlan::ExplainAnalyze { schema, .. } => schema.clone(),
             PhysicalPlan::Copy { schema, .. } => schema.clone(),
+            PhysicalPlan::CopyFrom { schema, .. } => schema.clone(),
             PhysicalPlan::Exchange { schema, .. } => schema.clone(),
         }
     }
@@ -254,6 +269,7 @@ impl PhysicalPlan {
             PhysicalPlan::Window { input, .. } => vec![input.as_ref()],
             PhysicalPlan::ExplainAnalyze { input, .. } => vec![input.as_ref()],
             PhysicalPlan::Copy { input, .. } => vec![input.as_ref()],
+            PhysicalPlan::CopyFrom { .. } => vec![],
             PhysicalPlan::Exchange { input, .. } => vec![input.as_ref()],
         }
     }
@@ -398,6 +414,17 @@ impl PhysicalPlan {
                     prefix, target, format
                 ));
                 input.format_indent(f, indent + 1);
+            }
+            PhysicalPlan::CopyFrom {
+                table_name,
+                source,
+                format,
+                ..
+            } => {
+                f.push_str(&format!(
+                    "{}CopyFrom: source='{}' table='{}' format={:?}\n",
+                    prefix, source, table_name, format
+                ));
             }
             PhysicalPlan::Exchange {
                 input,

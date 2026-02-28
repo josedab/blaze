@@ -24,7 +24,7 @@ mod cost_model;
 mod join_ordering;
 pub mod statistics;
 
-pub use cardinality::CardinalityEstimator;
+pub use cardinality::{CardinalityEstimator, CardinalityFeedback};
 pub use cost_model::{Cost, CostModel, DEFAULT_CPU_COST, DEFAULT_IO_COST};
 pub use join_ordering::JoinOrderOptimizer;
 pub use statistics::{ColumnStatistics, Histogram, HistogramBucket, StatisticsManager, TableStatistics};
