@@ -5,7 +5,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Write;
+use std::process::Command;
 use std::sync::{Arc, RwLock};
+
+use crate::catalog::TableProvider;
+use crate::storage::{CsvTable, ParquetTable};
 
 use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
@@ -146,6 +151,10 @@ impl TvfRegistry {
         let _ = self.register(unnest_str_tvf());
         let _ = self.register(json_each_tvf());
         let _ = self.register(regexp_matches_tvf());
+        let _ = self.register(git_log_tvf());
+        let _ = self.register(git_diff_tvf());
+        let _ = self.register(read_csv_url_tvf());
+        let _ = self.register(read_parquet_url_tvf());
     }
 }
 
@@ -504,6 +513,249 @@ pub fn generate_series_float_tvf() -> TableFunction {
         )]));
         let batch = RecordBatch::try_new(schema, vec![array])?;
         Ok(vec![batch])
+    })
+}
+
+/// `GIT_LOG(path)` - Return git commit history for a file.
+pub fn git_log_tvf() -> TableFunction {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("commit_hash", DataType::Utf8, false),
+        Field::new("author", DataType::Utf8, false),
+        Field::new("date", DataType::Utf8, false),
+        Field::new("message", DataType::Utf8, false),
+    ]));
+
+    TableFunction::new("git_log", schema, |args| {
+        if args.len() != 1 {
+            return Err(BlazeError::execution(
+                "GIT_LOG requires exactly 1 argument: (path)",
+            ));
+        }
+
+        let path = args[0]
+            .as_str()
+            .ok_or_else(|| BlazeError::execution("GIT_LOG: path must be a string"))?;
+
+        let output = Command::new("git")
+            .args(["log", "--format=%H|%an|%aI|%s", "--", path])
+            .output()
+            .map_err(|e| BlazeError::execution(format!("Failed to run git log: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(BlazeError::execution(format!(
+                "git log failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut hashes = Vec::new();
+        let mut authors = Vec::new();
+        let mut dates = Vec::new();
+        let mut messages = Vec::new();
+
+        for line in stdout.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(4, '|').collect();
+            if parts.len() == 4 {
+                hashes.push(parts[0].to_string());
+                authors.push(parts[1].to_string());
+                dates.push(parts[2].to_string());
+                messages.push(parts[3].to_string());
+            }
+        }
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("commit_hash", DataType::Utf8, false),
+            Field::new("author", DataType::Utf8, false),
+            Field::new("date", DataType::Utf8, false),
+            Field::new("message", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(hashes)) as ArrayRef,
+                Arc::new(StringArray::from(authors)) as ArrayRef,
+                Arc::new(StringArray::from(dates)) as ArrayRef,
+                Arc::new(StringArray::from(messages)) as ArrayRef,
+            ],
+        )?;
+        Ok(vec![batch])
+    })
+}
+
+/// `GIT_DIFF(path, ref1, ref2)` - Return a summary of changes between two refs.
+pub fn git_diff_tvf() -> TableFunction {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("file", DataType::Utf8, false),
+        Field::new("change_type", DataType::Utf8, false),
+        Field::new("additions", DataType::Int64, false),
+        Field::new("deletions", DataType::Int64, false),
+    ]));
+
+    TableFunction::new("git_diff", schema, |args| {
+        if args.len() != 3 {
+            return Err(BlazeError::execution(
+                "GIT_DIFF requires exactly 3 arguments: (path, ref1, ref2)",
+            ));
+        }
+
+        let path = args[0]
+            .as_str()
+            .ok_or_else(|| BlazeError::execution("GIT_DIFF: path must be a string"))?;
+        let ref1 = args[1]
+            .as_str()
+            .ok_or_else(|| BlazeError::execution("GIT_DIFF: ref1 must be a string"))?;
+        let ref2 = args[2]
+            .as_str()
+            .ok_or_else(|| BlazeError::execution("GIT_DIFF: ref2 must be a string"))?;
+
+        let ref_range = format!("{}..{}", ref1, ref2);
+        let output = Command::new("git")
+            .args(["diff", "--numstat", &ref_range, "--", path])
+            .output()
+            .map_err(|e| BlazeError::execution(format!("Failed to run git diff: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(BlazeError::execution(format!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut files = Vec::new();
+        let mut change_types = Vec::new();
+        let mut additions = Vec::new();
+        let mut deletions = Vec::new();
+
+        for line in stdout.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() == 3 {
+                let added: i64 = parts[0].parse().unwrap_or(0);
+                let deleted: i64 = parts[1].parse().unwrap_or(0);
+                let file = parts[2].to_string();
+
+                let change_type = if added > 0 && deleted > 0 {
+                    "modified"
+                } else if added > 0 {
+                    "added"
+                } else if deleted > 0 {
+                    "deleted"
+                } else {
+                    "unchanged"
+                };
+
+                files.push(file);
+                change_types.push(change_type.to_string());
+                additions.push(added);
+                deletions.push(deleted);
+            }
+        }
+
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("file", DataType::Utf8, false),
+            Field::new("change_type", DataType::Utf8, false),
+            Field::new("additions", DataType::Int64, false),
+            Field::new("deletions", DataType::Int64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(files)) as ArrayRef,
+                Arc::new(StringArray::from(change_types)) as ArrayRef,
+                Arc::new(Int64Array::from(additions)) as ArrayRef,
+                Arc::new(Int64Array::from(deletions)) as ArrayRef,
+            ],
+        )?;
+        Ok(vec![batch])
+    })
+}
+
+/// `READ_CSV_URL(url)` - Download a CSV file from an HTTP URL and return it as a table.
+pub fn read_csv_url_tvf() -> TableFunction {
+    // Placeholder schema; the actual schema comes from the downloaded CSV.
+    let schema = Arc::new(ArrowSchema::empty());
+
+    TableFunction::new("read_csv_url", schema, |args| {
+        if args.len() != 1 {
+            return Err(BlazeError::execution(
+                "READ_CSV_URL requires exactly 1 argument: (url)",
+            ));
+        }
+
+        let url = args[0]
+            .as_str()
+            .ok_or_else(|| BlazeError::execution("READ_CSV_URL: url must be a string"))?;
+
+        let response = Command::new("curl")
+            .args(["-sL", url])
+            .output()
+            .map_err(|e| BlazeError::execution(format!("Failed to download CSV: {}", e)))?;
+
+        if !response.status.success() {
+            return Err(BlazeError::execution(format!(
+                "HTTP download failed for: {}",
+                url
+            )));
+        }
+
+        let mut tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| BlazeError::execution(format!("Failed to create temp file: {}", e)))?;
+        tmp.write_all(&response.stdout)
+            .map_err(|e| BlazeError::execution(format!("Failed to write temp file: {}", e)))?;
+        tmp.flush()
+            .map_err(|e| BlazeError::execution(format!("Failed to flush temp file: {}", e)))?;
+
+        let table = CsvTable::open(tmp.path())?;
+        table.scan(None, &[], None)
+    })
+}
+
+/// `READ_PARQUET_URL(url)` - Download a Parquet file from an HTTP URL and return it as a table.
+pub fn read_parquet_url_tvf() -> TableFunction {
+    // Placeholder schema; the actual schema comes from the downloaded Parquet file.
+    let schema = Arc::new(ArrowSchema::empty());
+
+    TableFunction::new("read_parquet_url", schema, |args| {
+        if args.len() != 1 {
+            return Err(BlazeError::execution(
+                "READ_PARQUET_URL requires exactly 1 argument: (url)",
+            ));
+        }
+
+        let url = args[0]
+            .as_str()
+            .ok_or_else(|| BlazeError::execution("READ_PARQUET_URL: url must be a string"))?;
+
+        let response = Command::new("curl")
+            .args(["-sL", url])
+            .output()
+            .map_err(|e| BlazeError::execution(format!("Failed to download Parquet: {}", e)))?;
+
+        if !response.status.success() {
+            return Err(BlazeError::execution(format!(
+                "HTTP download failed for: {}",
+                url
+            )));
+        }
+
+        let mut tmp = tempfile::NamedTempFile::new()
+            .map_err(|e| BlazeError::execution(format!("Failed to create temp file: {}", e)))?;
+        tmp.write_all(&response.stdout)
+            .map_err(|e| BlazeError::execution(format!("Failed to write temp file: {}", e)))?;
+        tmp.flush()
+            .map_err(|e| BlazeError::execution(format!("Failed to flush temp file: {}", e)))?;
+
+        let table = ParquetTable::open(tmp.path())?;
+        table.scan(None, &[], None)
     })
 }
 
