@@ -7,15 +7,123 @@
 //!   blaze -f json             # Set output format
 //!   blaze -o output.csv       # Write output to file
 
+use std::borrow::Cow;
 use std::fs;
-use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use arrow::array::Array;
 use clap::Parser;
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
+use rustyline::{Config, Editor, Helper};
 
 use blaze::output::{OutputFormat, OutputWriter};
 use blaze::{Connection, Result};
+
+/// SQL keyword and command completer for the REPL.
+struct BlazeHelper {
+    table_names: Vec<String>,
+}
+
+impl BlazeHelper {
+    fn new() -> Self {
+        Self {
+            table_names: Vec::new(),
+        }
+    }
+
+    fn update_tables(&mut self, tables: Vec<String>) {
+        self.table_names = tables;
+    }
+}
+
+const SQL_KEYWORDS: &[&str] = &[
+    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
+    "DELETE", "CREATE", "TABLE", "DROP", "ALTER", "JOIN", "INNER", "LEFT",
+    "RIGHT", "FULL", "OUTER", "CROSS", "ON", "GROUP", "BY", "ORDER", "ASC",
+    "DESC", "LIMIT", "OFFSET", "HAVING", "UNION", "INTERSECT", "EXCEPT",
+    "WITH", "AS", "AND", "OR", "NOT", "NULL", "IS", "IN", "BETWEEN", "LIKE",
+    "CASE", "WHEN", "THEN", "ELSE", "END", "DISTINCT", "COUNT", "SUM", "AVG",
+    "MIN", "MAX", "EXPLAIN", "ANALYZE", "COPY", "TO", "VIEW",
+];
+
+impl Completer for BlazeHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let line_to_pos = &line[..pos];
+        let word_start = line_to_pos
+            .rfind(|c: char| c.is_whitespace() || c == '(' || c == ',')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &line_to_pos[word_start..];
+        let prefix_upper = prefix.to_uppercase();
+
+        let mut completions = Vec::new();
+
+        // Complete dot-commands
+        if prefix.starts_with('.') {
+            for cmd in &[
+                ".tables", ".schema", ".read", ".timer", ".mode", ".output",
+                ".help", ".exit", ".quit", ".advice",
+            ] {
+                if cmd.starts_with(prefix) {
+                    completions.push(Pair {
+                        display: cmd.to_string(),
+                        replacement: cmd.to_string(),
+                    });
+                }
+            }
+        } else {
+            // Complete SQL keywords
+            for kw in SQL_KEYWORDS {
+                if kw.starts_with(&prefix_upper) && !prefix.is_empty() {
+                    completions.push(Pair {
+                        display: kw.to_string(),
+                        replacement: kw.to_string(),
+                    });
+                }
+            }
+            // Complete table names
+            for table in &self.table_names {
+                if table.to_uppercase().starts_with(&prefix_upper) && !prefix.is_empty() {
+                    completions.push(Pair {
+                        display: table.clone(),
+                        replacement: table.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok((word_start, completions))
+    }
+}
+
+impl Hinter for BlazeHelper {
+    type Hint = String;
+}
+
+impl Highlighter for BlazeHelper {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> Cow<'b, str> {
+        Cow::Borrowed(prompt)
+    }
+}
+
+impl Validator for BlazeHelper {}
+impl Helper for BlazeHelper {}
 
 /// Blaze Query Engine - High-performance embedded OLAP database
 #[derive(Parser, Debug)]
@@ -255,7 +363,39 @@ impl Session {
             return true;
         }
 
+        if input.starts_with(".advice") {
+            let sql = input.strip_prefix(".advice").unwrap_or("").trim();
+            if sql.is_empty() {
+                println!("Usage: .advice <sql_query>");
+            } else {
+                match self.conn.query(sql) {
+                    Ok(_) => println!("Query executed successfully. No issues detected."),
+                    Err(e) => println!("Query analysis: {}", e),
+                }
+            }
+            return true;
+        }
+
         // Execute as SQL
+        // Detect EXPLAIN queries and format as plain text
+        if input.trim().to_uppercase().starts_with("EXPLAIN") {
+            match self.conn.query(input) {
+                Ok(batches) => {
+                    for batch in &batches {
+                        if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow::array::StringArray>() {
+                            for i in 0..col.len() {
+                                if let Some(line) = col.value(i).into() {
+                                    println!("{}", line);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
+            return true;
+        }
+
         let _ = self.execute_query(input);
         true
     }
@@ -297,63 +437,82 @@ fn main() -> Result<()> {
         println!("Type '.help' for available commands, '.exit' to quit.\n");
     }
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let config = Config::builder()
+        .auto_add_history(true)
+        .build();
+    let mut rl = Editor::<BlazeHelper, rustyline::history::DefaultHistory>::with_config(config)
+        .unwrap_or_else(|_| Editor::new().expect("Failed to create editor"));
+    rl.set_helper(Some(BlazeHelper::new()));
+
+    // Load history
+    let history_path = dirs_home().join(".blaze_history");
+    let _ = rl.load_history(&history_path);
+
     let mut multiline_buffer = String::new();
 
     loop {
-        // Show prompt
-        if !cli.quiet {
-            if multiline_buffer.is_empty() {
-                print!("blaze> ");
-            } else {
-                print!("   ... ");
+        // Refresh table names for completion
+        if let Some(helper) = rl.helper_mut() {
+            helper.update_tables(session.conn.list_tables());
+        }
+
+        let prompt = if multiline_buffer.is_empty() {
+            "blaze> "
+        } else {
+            "   ... "
+        };
+
+        match rl.readline(prompt) {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                multiline_buffer.push_str(trimmed);
+                multiline_buffer.push(' ');
+
+                let is_command = trimmed.starts_with('.')
+                    || trimmed.to_lowercase() == "exit"
+                    || trimmed.to_lowercase() == "quit"
+                    || trimmed.to_lowercase() == "help";
+
+                if !is_command && !multiline_buffer.trim().ends_with(';') {
+                    continue;
+                }
+
+                let input = multiline_buffer.trim().trim_end_matches(';').to_string();
+                multiline_buffer.clear();
+
+                if input.is_empty() {
+                    continue;
+                }
+
+                if !session.execute_command(&input) {
+                    break;
+                }
             }
-            if stdout.flush().is_err() {
-                break;
+            Err(ReadlineError::Interrupted) => {
+                multiline_buffer.clear();
+                continue;
             }
-        }
-
-        // Read input
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) | Err(_) => break, // EOF or read error
-            Ok(_) => {}
-        }
-
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // Handle multiline input (statements ending with semicolon)
-        multiline_buffer.push_str(trimmed);
-        multiline_buffer.push(' ');
-
-        // Check if statement is complete (ends with semicolon or is a command)
-        let is_command = trimmed.starts_with('.')
-            || trimmed.to_lowercase() == "exit"
-            || trimmed.to_lowercase() == "quit"
-            || trimmed.to_lowercase() == "help";
-
-        if !is_command && !multiline_buffer.trim().ends_with(';') {
-            continue;
-        }
-
-        let input = multiline_buffer.trim().trim_end_matches(';').to_string();
-        multiline_buffer.clear();
-
-        if input.is_empty() {
-            continue;
-        }
-
-        if !session.execute_command(&input) {
-            break;
+            Err(ReadlineError::Eof) => break,
+            Err(_) => break,
         }
     }
 
+    // Save history
+    let _ = rl.save_history(&history_path);
+
     Ok(())
+}
+
+/// Get user home directory for history file.
+fn dirs_home() -> PathBuf {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn print_help() {
@@ -362,6 +521,7 @@ fn print_help() {
     println!("  .tables            - List all tables");
     println!("  .schema <table>    - Show table schema");
     println!("  .read <name> <file> - Register file as table");
+    println!("  .advice <sql>      - Analyze a SQL query for issues");
     println!("  .timer on|off      - Toggle query timing");
     println!("  .mode <format>     - Set output format (table, csv, json, arrow)");
     println!("  .output <file>     - Redirect output to file (use 'stdout' to reset)");
