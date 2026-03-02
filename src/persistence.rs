@@ -88,6 +88,63 @@ pub enum WalEntry {
 }
 
 // ---------------------------------------------------------------------------
+// WAL Encryption
+// ---------------------------------------------------------------------------
+
+// NOTE: XOR encryption is a placeholder. Replace with aes-gcm crate for production use.
+
+/// WAL encryption configuration.
+#[derive(Debug, Clone, Default)]
+pub struct WalEncryption {
+    /// Encryption key (32 bytes for AES-256 equivalent)
+    key: [u8; 32],
+    /// Whether encryption is enabled
+    enabled: bool,
+}
+
+impl WalEncryption {
+    /// Create encryption config from a key.
+    pub fn new(key: [u8; 32]) -> Self {
+        Self { key, enabled: true }
+    }
+
+    /// Create encryption config from an environment variable.
+    pub fn from_env(var_name: &str) -> Option<Self> {
+        std::env::var(var_name).ok().map(|key_str| {
+            let mut key = [0u8; 32];
+            let bytes = key_str.as_bytes();
+            for (i, byte) in bytes.iter().enumerate().take(32) {
+                key[i] = *byte;
+            }
+            Self::new(key)
+        })
+    }
+
+    /// Encrypt data (placeholder - uses XOR with key rotation).
+    /// In production, replace with AES-256-GCM via the `aes-gcm` crate.
+    pub fn encrypt(&self, data: &[u8]) -> Vec<u8> {
+        if !self.enabled {
+            return data.to_vec();
+        }
+        data.iter()
+            .enumerate()
+            .map(|(i, b)| b ^ self.key[i % 32])
+            .collect()
+    }
+
+    /// Decrypt data (placeholder - XOR is its own inverse).
+    pub fn decrypt(&self, data: &[u8]) -> Vec<u8> {
+        self.encrypt(data) // XOR is symmetric
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+
+
+// ---------------------------------------------------------------------------
 // Write-Ahead Log
 // ---------------------------------------------------------------------------
 
@@ -102,6 +159,8 @@ pub struct WriteAheadLog {
     writer: Option<BufWriter<File>>,
     /// Next sequence number to assign
     sequence: u64,
+    /// Optional encryption configuration
+    encryption: WalEncryption,
 }
 
 impl WriteAheadLog {
@@ -121,6 +180,7 @@ impl WriteAheadLog {
             path,
             writer: Some(writer),
             sequence: 0,
+            encryption: WalEncryption::default(),
         })
     }
 
@@ -147,9 +207,14 @@ impl WriteAheadLog {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok((seq, _)) = Self::deserialize_entry(&line) {
-                    if seq > max_seq {
-                        max_seq = seq;
+                // Extract only the sequence number (before the first '|').
+                // This works for both encrypted and unencrypted WAL lines
+                // since the sequence prefix is never encrypted.
+                if let Some(first_pipe) = line.find('|') {
+                    if let Ok(seq) = line[..first_pipe].parse::<u64>() {
+                        if seq > max_seq {
+                            max_seq = seq;
+                        }
                     }
                 }
             }
@@ -166,7 +231,14 @@ impl WriteAheadLog {
             path,
             writer: Some(writer),
             sequence,
+            encryption: WalEncryption::default(),
         })
+    }
+
+    /// Set the encryption configuration for this WAL.
+    pub fn with_encryption(mut self, encryption: WalEncryption) -> Self {
+        self.encryption = encryption;
+        self
     }
 
     /// Append a new entry to the WAL and return the assigned sequence number.
@@ -175,7 +247,13 @@ impl WriteAheadLog {
         let seq = self.sequence;
 
         let serialized = Self::serialize_entry(entry)?;
-        let line = format!("{}|{}\n", seq, serialized);
+        let line_payload = if self.encryption.is_enabled() {
+            let encrypted = self.encryption.encrypt(serialized.as_bytes());
+            BASE64_ENGINE.encode(&encrypted)
+        } else {
+            serialized
+        };
+        let line = format!("{}|{}\n", seq, line_payload);
 
         if let Some(ref mut writer) = self.writer {
             writer.write_all(line.as_bytes())?;
@@ -202,7 +280,32 @@ impl WriteAheadLog {
             if trimmed.is_empty() {
                 continue;
             }
-            match Self::deserialize_entry(trimmed) {
+            let decoded_line = if self.encryption.is_enabled() {
+                // Sequence number is unencrypted; payload after first '|' is encrypted
+                if let Some(first_pipe) = trimmed.find('|') {
+                    let seq_part = &trimmed[..first_pipe];
+                    let encrypted_payload = &trimmed[first_pipe + 1..];
+                    let encrypted_bytes = BASE64_ENGINE.decode(encrypted_payload).map_err(|e| {
+                        BlazeError::execution(format!(
+                            "Failed to decode encrypted WAL payload: {}",
+                            e
+                        ))
+                    })?;
+                    let decrypted = self.encryption.decrypt(&encrypted_bytes);
+                    let decrypted_str = String::from_utf8(decrypted).map_err(|e| {
+                        BlazeError::execution(format!(
+                            "Failed to decode decrypted WAL data as UTF-8: {}",
+                            e
+                        ))
+                    })?;
+                    format!("{}|{}", seq_part, decrypted_str)
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                trimmed.to_string()
+            };
+            match Self::deserialize_entry(&decoded_line) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => {
                     // Log warning but continue - partial WAL lines can happen
