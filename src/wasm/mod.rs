@@ -32,7 +32,10 @@ mod serialization;
 pub mod vfs;
 pub mod worker;
 
-pub use bindings::{WasmConnection, WasmError, WasmQueryResult, WasmStreamingResult};
+pub use bindings::{
+    WasmConnection, WasmError, WasmParam, WasmPreparedStatement, WasmQueryResult,
+    WasmStreamingResult,
+};
 pub use memory::{WasmBuffer, WasmMemoryManager};
 pub use serialization::{ArrowIpcSerializer, JsonSerializer};
 pub use worker::{QueryTaskId, QueryTaskStatus, WasmOptConfig, WorkerQueryManager};

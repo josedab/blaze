@@ -10,6 +10,7 @@ use arrow::record_batch::RecordBatch;
 use super::serialization::{ArrowIpcSerializer, JsonSerializer};
 use super::{indexeddb, serialization, ResultFormat, WasmConfig, WasmQueryOptions, WasmStats};
 use crate::error::{BlazeError, Result};
+use crate::types::ScalarValue;
 use crate::Connection;
 
 /// Error type for WASM bindings.
@@ -546,6 +547,86 @@ impl WasmConnection {
         }
 
         Ok(())
+    }
+
+    /// Prepare a SQL statement for repeated execution with parameters.
+    pub fn prepare(&self, sql: &str) -> Result<WasmPreparedStatement> {
+        let stmt = self.inner.prepare(sql)?;
+        Ok(WasmPreparedStatement { inner: stmt })
+    }
+}
+
+/// Parameter types for prepared statement execution in WASM.
+#[derive(Debug, Clone)]
+pub enum WasmParam {
+    /// Null value
+    Null,
+    /// Boolean value
+    Bool(bool),
+    /// 64-bit integer value
+    Int(i64),
+    /// 64-bit floating point value
+    Float(f64),
+    /// UTF-8 string value
+    String(String),
+}
+
+impl WasmParam {
+    /// Convert to a ScalarValue for query execution.
+    fn into_scalar(self) -> ScalarValue {
+        match self {
+            WasmParam::Null => ScalarValue::Null,
+            WasmParam::Bool(b) => ScalarValue::Boolean(Some(b)),
+            WasmParam::Int(i) => ScalarValue::Int64(Some(i)),
+            WasmParam::Float(f) => ScalarValue::Float64(Some(f)),
+            WasmParam::String(s) => ScalarValue::Utf8(Some(s)),
+        }
+    }
+}
+
+/// A prepared statement for WASM that supports parameterized execution.
+pub struct WasmPreparedStatement {
+    inner: crate::prepared::PreparedStatement,
+}
+
+impl WasmPreparedStatement {
+    /// Execute the prepared statement with the given parameters.
+    pub fn execute(&self, params: Vec<WasmParam>) -> Result<WasmQueryResult> {
+        let scalar_params: Vec<ScalarValue> =
+            params.into_iter().map(|p| p.into_scalar()).collect();
+        let batches = self.inner.execute(&scalar_params)?;
+
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        let column_count = batches.first().map(|b| b.num_columns()).unwrap_or(0);
+        let schema = batches
+            .first()
+            .map(|b| WasmSchema::from_arrow(b.schema().as_ref()));
+
+        let json = JsonSerializer::serialize(&batches, false)?;
+        let data = json.into_bytes();
+
+        let mut result =
+            WasmQueryResult::new(data, ResultFormat::Json, row_count, column_count);
+        if let Some(s) = schema {
+            result = result.with_schema(s);
+        }
+
+        Ok(result)
+    }
+
+    /// Execute the prepared statement with no parameters.
+    pub fn execute_no_params(&self) -> Result<WasmQueryResult> {
+        self.execute(vec![])
+    }
+
+    /// Get the number of parameters expected by this statement.
+    pub fn parameter_count(&self) -> usize {
+        self.inner.parameter_count()
+    }
+
+    /// Get the original SQL query.
+    pub fn sql(&self) -> &str {
+        self.inner.sql()
     }
 }
 
