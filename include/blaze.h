@@ -103,7 +103,8 @@ void blaze_connection_free(BlazeConnection* conn);
  * @param conn Valid connection pointer.
  * @return Pointer to a null-terminated error string, or NULL if no error.
  *
- * The returned string must be freed with blaze_string_free().
+ * The returned string is valid until the next operation on conn.
+ * Do NOT free this string.
  */
 const char* blaze_last_error(const BlazeConnection* conn);
 
@@ -237,6 +238,41 @@ int blaze_drop_table(BlazeConnection* conn, const char* table_name);
  * Example return: "[\"users\", \"orders\"]"
  */
 char* blaze_list_tables(const BlazeConnection* conn);
+
+/**
+ * Register a CSV file as a table.
+ *
+ * @param conn Valid connection pointer.
+ * @param name Null-terminated table name.
+ * @param path Null-terminated file path.
+ * @return 0 on success, -1 on error.
+ *
+ * On error, check blaze_last_error() for details.
+ */
+int blaze_register_csv(BlazeConnection* conn, const char* name, const char* path);
+
+/**
+ * Register a Parquet file as a table.
+ *
+ * @param conn Valid connection pointer.
+ * @param name Null-terminated table name.
+ * @param path Null-terminated file path.
+ * @return 0 on success, -1 on error.
+ *
+ * On error, check blaze_last_error() for details.
+ */
+int blaze_register_parquet(BlazeConnection* conn, const char* name, const char* path);
+
+/**
+ * Get the schema of a table as a JSON string.
+ *
+ * @param conn Valid connection pointer.
+ * @param name Null-terminated table name.
+ * @return JSON string with schema, or NULL if table not found.
+ *
+ * The returned string must be freed with blaze_string_free().
+ */
+char* blaze_table_schema(const BlazeConnection* conn, const char* name);
 
 /* ============================================================================
  * Version Info

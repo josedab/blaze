@@ -46,7 +46,7 @@
 //! - `BlazeConnection` is NOT thread-safe. Use separate connections per thread.
 //! - `BlazeResult` can be read from multiple threads but not modified.
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 use std::sync::Mutex;
 
@@ -63,6 +63,8 @@ use crate::Connection;
 pub struct BlazeConnection {
     inner: Connection,
     last_error: Mutex<Option<String>>,
+    /// Cached CString for the last error, kept alive as long as the connection
+    last_error_cstring: Mutex<Option<CString>>,
 }
 
 /// Opaque handle to a query result.
@@ -132,6 +134,7 @@ pub extern "C" fn blaze_connection_new() -> *mut BlazeConnection {
             let boxed = Box::new(BlazeConnection {
                 inner: conn,
                 last_error: Mutex::new(None),
+                last_error_cstring: Mutex::new(None),
             });
             Box::into_raw(boxed)
         }
@@ -167,19 +170,23 @@ pub unsafe extern "C" fn blaze_last_error(conn: *const BlazeConnection) -> *cons
     }
 
     let conn = &*conn;
-    match conn.last_error.lock() {
-        Ok(guard) => match &*guard {
-            Some(err) => {
-                // This is a temporary string - in production, we'd need to
-                // manage the lifetime more carefully
-                match CString::new(err.as_str()) {
-                    Ok(cstr) => cstr.into_raw(),
-                    Err(_) => ptr::null(),
+    let error_msg = match conn.last_error.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return ptr::null(),
+    };
+
+    match error_msg {
+        Some(err) => match CString::new(err.as_str()) {
+            Ok(cstr) => {
+                if let Ok(mut cstr_guard) = conn.last_error_cstring.lock() {
+                    *cstr_guard = Some(cstr);
+                    return cstr_guard.as_ref().map_or(ptr::null(), |c| c.as_ptr());
                 }
+                ptr::null()
             }
-            None => ptr::null(),
+            Err(_) => ptr::null(),
         },
-        Err(_) => ptr::null(),
+        None => ptr::null(),
     }
 }
 
@@ -550,6 +557,161 @@ pub unsafe extern "C" fn blaze_list_tables(conn: *const BlazeConnection) -> *mut
     match CString::new(json) {
         Ok(cstr) => cstr.into_raw(),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Register a CSV file as a table.
+///
+/// # Arguments
+/// - `conn`: Valid connection pointer
+/// - `name`: Null-terminated table name
+/// - `path`: Null-terminated file path
+///
+/// # Returns
+/// - 0 on success
+/// - -1 on error (check `blaze_last_error`)
+///
+/// # Safety
+/// All pointers must be valid null-terminated strings
+#[no_mangle]
+pub unsafe extern "C" fn blaze_register_csv(
+    conn: *mut BlazeConnection,
+    name: *const c_char,
+    path: *const c_char,
+) -> i32 {
+    if conn.is_null() || name.is_null() || path.is_null() {
+        return -1;
+    }
+
+    let conn = &mut *conn;
+
+    let name_str = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(conn, "Invalid UTF-8 in table name");
+            return -1;
+        }
+    };
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(conn, "Invalid UTF-8 in file path");
+            return -1;
+        }
+    };
+
+    match conn.inner.register_csv(name_str, path_str) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_error(conn, &e.to_string());
+            -1
+        }
+    }
+}
+
+/// Register a Parquet file as a table.
+///
+/// # Arguments
+/// - `conn`: Valid connection pointer
+/// - `name`: Null-terminated table name
+/// - `path`: Null-terminated file path
+///
+/// # Returns
+/// - 0 on success
+/// - -1 on error (check `blaze_last_error`)
+///
+/// # Safety
+/// All pointers must be valid null-terminated strings
+#[no_mangle]
+pub unsafe extern "C" fn blaze_register_parquet(
+    conn: *mut BlazeConnection,
+    name: *const c_char,
+    path: *const c_char,
+) -> i32 {
+    if conn.is_null() || name.is_null() || path.is_null() {
+        return -1;
+    }
+
+    let conn = &mut *conn;
+
+    let name_str = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(conn, "Invalid UTF-8 in table name");
+            return -1;
+        }
+    };
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(conn, "Invalid UTF-8 in file path");
+            return -1;
+        }
+    };
+
+    match conn.inner.register_parquet(name_str, path_str) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_error(conn, &e.to_string());
+            -1
+        }
+    }
+}
+
+/// Get the schema of a table as a JSON string.
+///
+/// # Arguments
+/// - `conn`: Valid connection pointer
+/// - `name`: Null-terminated table name
+///
+/// # Returns
+/// - JSON string with schema on success (caller must free with `blaze_string_free`)
+/// - NULL if table not found or on error
+///
+/// # Safety
+/// - All pointers must be valid
+/// - The returned string must be freed with `blaze_string_free`
+#[no_mangle]
+pub unsafe extern "C" fn blaze_table_schema(
+    conn: *const BlazeConnection,
+    name: *const c_char,
+) -> *mut c_char {
+    if conn.is_null() || name.is_null() {
+        return ptr::null_mut();
+    }
+
+    let conn = &*conn;
+
+    let name_str = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    match conn.inner.table_schema(name_str) {
+        Some(schema) => {
+            let fields: Vec<serde_json::Value> = schema
+                .fields()
+                .iter()
+                .map(|f| {
+                    json!({
+                        "name": f.name(),
+                        "type": format!("{:?}", f.data_type()),
+                        "nullable": f.is_nullable()
+                    })
+                })
+                .collect();
+            let json_str = match serde_json::to_string(&fields) {
+                Ok(s) => s,
+                Err(_) => return ptr::null_mut(),
+            };
+            match CString::new(json_str) {
+                Ok(cstr) => cstr.into_raw(),
+                Err(_) => ptr::null_mut(),
+            }
+        }
+        None => ptr::null_mut(),
     }
 }
 
