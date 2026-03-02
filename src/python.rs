@@ -90,6 +90,22 @@ impl PyConnection {
         Ok(PyQueryResult { batches })
     }
 
+    /// Execute a SQL query and return a streaming iterator over result batches.
+    ///
+    /// Each call to `next()` yields one RecordBatch as a PyArrow RecordBatch.
+    /// This is useful for processing large results without loading everything
+    /// into memory at once.
+    ///
+    /// Args:
+    ///     sql: The SQL query to execute.
+    ///
+    /// Returns:
+    ///     A BatchIterator that yields PyArrow RecordBatch objects.
+    fn query_iter(&self, sql: &str) -> PyResult<PyBatchIterator> {
+        let batches = py_result(self.inner.query(sql))?;
+        Ok(PyBatchIterator { batches, index: 0 })
+    }
+
     /// Execute a SQL statement that doesn't return results.
     ///
     /// This is used for DDL statements like CREATE TABLE, DROP TABLE, etc.
@@ -196,6 +212,47 @@ impl PyConnection {
 
     fn __repr__(&self) -> String {
         format!("Connection(tables={})", self.inner.list_tables().len())
+    }
+}
+
+/// Python iterator that yields individual RecordBatches as PyArrow RecordBatch objects.
+///
+/// Created by `Connection.query_iter()`. Each call to `__next__()` returns
+/// one batch, enabling streaming-style processing of large results.
+#[pyclass(name = "BatchIterator")]
+pub struct PyBatchIterator {
+    batches: Vec<RecordBatch>,
+    index: usize,
+}
+
+#[pymethods]
+impl PyBatchIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        if self.index >= self.batches.len() {
+            return Ok(None);
+        }
+        let batch = &self.batches[self.index];
+        self.index += 1;
+        let pyarrow = py.import_bound("pyarrow")?;
+        let pa_batch = record_batch_to_pyarrow(py, &pyarrow, batch)?;
+        Ok(Some(pa_batch))
+    }
+
+    /// Return the total number of batches.
+    fn __len__(&self) -> usize {
+        self.batches.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BatchIterator(batches={}, position={})",
+            self.batches.len(),
+            self.index
+        )
     }
 }
 
@@ -1164,6 +1221,7 @@ fn read_delta(path: &str, version: Option<i64>) -> PyResult<PyQueryResult> {
 #[pymodule]
 fn pyblaze(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyConnection>()?;
+    m.add_class::<PyBatchIterator>()?;
     m.add_class::<PyQueryResult>()?;
     m.add_class::<PyPreparedStatement>()?;
     m.add_class::<PySchema>()?;
