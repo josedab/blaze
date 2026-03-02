@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 use subtle::ConstantTimeEq;
 
+use crate::error::{BlazeError, Result};
+
 // ---------------------------------------------------------------------------
 // HTTP primitives
 // ---------------------------------------------------------------------------
@@ -109,6 +111,126 @@ impl ApiResponse {
 }
 
 // ---------------------------------------------------------------------------
+// JWT authentication
+// ---------------------------------------------------------------------------
+
+/// JWT authentication configuration.
+#[derive(Debug, Clone)]
+pub struct JwtConfig {
+    /// HMAC secret for JWT validation (HS256).
+    pub secret: String,
+    /// Expected issuer (optional).
+    pub issuer: Option<String>,
+    /// Expected audience (optional).
+    pub audience: Option<String>,
+    /// Whether JWT auth is enabled.
+    pub enabled: bool,
+}
+
+impl JwtConfig {
+    pub fn new(secret: &str) -> Self {
+        Self {
+            secret: secret.to_string(),
+            issuer: None,
+            audience: None,
+            enabled: true,
+        }
+    }
+
+    pub fn with_issuer(mut self, issuer: &str) -> Self {
+        self.issuer = Some(issuer.to_string());
+        self
+    }
+
+    pub fn with_audience(mut self, audience: &str) -> Self {
+        self.audience = Some(audience.to_string());
+        self
+    }
+
+    /// Validate a JWT token (basic HS256 HMAC validation).
+    pub fn validate_token(&self, token: &str) -> std::result::Result<JwtClaims, String> {
+        // Split token into parts
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return Err("Invalid JWT format".to_string());
+        }
+
+        // Verify HMAC-SHA256 signature
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let mac = hmac_sha256(self.secret.as_bytes(), signing_input.as_bytes());
+        let expected_sig = engine.encode(&mac);
+
+        // Constant-time comparison
+        if !constant_time_eq(expected_sig.as_bytes(), parts[2].as_bytes()) {
+            return Err("Invalid signature".to_string());
+        }
+
+        // Decode claims
+        let claims_json = engine
+            .decode(parts[1])
+            .map_err(|e| format!("Invalid base64: {}", e))?;
+        let claims: JwtClaims = serde_json::from_slice(&claims_json)
+            .map_err(|e| format!("Invalid claims JSON: {}", e))?;
+
+        // Check expiry
+        if let Some(exp) = claims.exp {
+            let now = chrono::Utc::now().timestamp() as u64;
+            if now > exp {
+                return Err("Token expired".to_string());
+            }
+        }
+
+        Ok(claims)
+    }
+}
+
+/// Decoded JWT claims.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct JwtClaims {
+    pub sub: Option<String>,
+    pub exp: Option<u64>,
+    pub iss: Option<String>,
+    pub aud: Option<String>,
+}
+
+/// Simple HMAC-SHA256 using the `sha2` crate.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
+    let block_size = 64;
+    let mut padded_key = vec![0u8; block_size];
+    if key.len() > block_size {
+        let hash = Sha256::digest(key);
+        padded_key[..hash.len()].copy_from_slice(&hash);
+    } else {
+        padded_key[..key.len()].copy_from_slice(key);
+    }
+
+    let ipad: Vec<u8> = padded_key.iter().map(|b| b ^ 0x36).collect();
+    let opad: Vec<u8> = padded_key.iter().map(|b| b ^ 0x5c).collect();
+
+    let mut inner = Sha256::new();
+    inner.update(&ipad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(&opad);
+    outer.update(inner_hash);
+    outer.finalize().to_vec()
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -126,6 +248,12 @@ pub struct ApiConfig {
     pub max_result_rows: usize,
     /// Maximum request body size in bytes (0 = unlimited).
     pub max_body_size: usize,
+    /// Path to TLS certificate file (PEM format).
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS private key file (PEM format).
+    pub tls_key_path: Option<String>,
+    /// JWT authentication configuration.
+    pub jwt_config: Option<JwtConfig>,
 }
 
 impl Default for ApiConfig {
@@ -137,7 +265,53 @@ impl Default for ApiConfig {
             cors_allowed_origin: None,
             max_result_rows: 10_000,
             max_body_size: 0,
+            tls_cert_path: None,
+            tls_key_path: None,
+            jwt_config: None,
         }
+    }
+}
+
+impl ApiConfig {
+    /// Configure TLS with certificate and key file paths.
+    ///
+    /// NOTE: This sets the TLS configuration only. Actual TLS socket binding
+    /// requires a runtime dependency (e.g. tokio-rustls or native-tls) which
+    /// should be added separately.
+    pub fn with_tls(mut self, cert_path: &str, key_path: &str) -> Self {
+        self.tls_cert_path = Some(cert_path.to_string());
+        self.tls_key_path = Some(key_path.to_string());
+        self
+    }
+
+    /// Configure JWT authentication.
+    pub fn with_jwt(mut self, config: JwtConfig) -> Self {
+        self.jwt_config = Some(config);
+        self
+    }
+
+    /// Returns `true` if both TLS certificate and key paths are configured.
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert_path.is_some() && self.tls_key_path.is_some()
+    }
+
+    /// Validate that configured TLS certificate and key files exist on disk.
+    pub fn validate_tls(&self) -> Result<()> {
+        if let (Some(cert), Some(key)) = (&self.tls_cert_path, &self.tls_key_path) {
+            if !std::path::Path::new(cert).exists() {
+                return Err(BlazeError::invalid_argument(format!(
+                    "TLS certificate file not found: {}",
+                    cert
+                )));
+            }
+            if !std::path::Path::new(key).exists() {
+                return Err(BlazeError::invalid_argument(format!(
+                    "TLS key file not found: {}",
+                    key
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -280,7 +454,7 @@ impl ApiServer {
             }
         }
 
-        // Authentication
+        // API key authentication
         if !self.config.api_keys.is_empty() {
             let api_key = request
                 .headers
@@ -297,6 +471,29 @@ impl ApiServer {
                 _ => {
                     self.stats.write().unwrap_or_else(|e| e.into_inner()).unauthorized_requests += 1;
                     return ApiResponse::unauthorized();
+                }
+            }
+        }
+
+        // JWT authentication
+        if let Some(ref jwt) = self.config.jwt_config {
+            if jwt.enabled {
+                let token = request
+                    .headers
+                    .get("authorization")
+                    .or_else(|| request.headers.get("Authorization"))
+                    .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")));
+                match token {
+                    Some(t) => {
+                        if jwt.validate_token(t).is_err() {
+                            self.stats.write().unwrap_or_else(|e| e.into_inner()).unauthorized_requests += 1;
+                            return ApiResponse::unauthorized();
+                        }
+                    }
+                    None => {
+                        self.stats.write().unwrap_or_else(|e| e.into_inner()).unauthorized_requests += 1;
+                        return ApiResponse::unauthorized();
+                    }
                 }
             }
         }
