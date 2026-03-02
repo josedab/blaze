@@ -4,6 +4,11 @@
 //! for multi-tenant and enterprise deployments.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use parking_lot::Mutex;
+use serde::Serialize;
 
 use crate::error::{BlazeError, Result};
 
@@ -244,7 +249,7 @@ impl MaskingEngine {
 // ---------------------------------------------------------------------------
 
 /// Types of auditable actions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum AuditAction {
     Query,
     Insert,
@@ -273,7 +278,7 @@ impl std::fmt::Display for AuditAction {
 }
 
 /// A single audit log entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
     pub timestamp: u64,
     pub user: String,
@@ -281,6 +286,32 @@ pub struct AuditEvent {
     pub table: Option<String>,
     pub query: Option<String>,
     pub success: bool,
+}
+
+impl AuditEvent {
+    /// Create an audit event for a query execution.
+    pub fn query(user: &str, sql: &str) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            user: user.to_string(),
+            action: AuditAction::Query,
+            table: None,
+            query: Some(sql.to_string()),
+            success: true,
+        }
+    }
+
+    /// Create an audit event for a DDL operation.
+    pub fn ddl(action: AuditAction, user: &str, table: &str) -> Self {
+        Self {
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            user: user.to_string(),
+            action,
+            table: Some(table.to_string()),
+            query: None,
+            success: true,
+        }
+    }
 }
 
 /// Optional filters for querying the audit log.
@@ -537,6 +568,48 @@ impl Default for AuditLogConfig {
             retention_days: 90,
             sample_rate: 1.0,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent Audit Log Writer
+// ---------------------------------------------------------------------------
+
+/// Persistent audit log writer. Writes events as JSON lines to an append-only file.
+#[derive(Debug)]
+pub struct AuditLogWriter {
+    path: PathBuf,
+    file: Mutex<std::io::BufWriter<std::fs::File>>,
+}
+
+impl AuditLogWriter {
+    /// Open (or create) an append-only audit log file at the given path.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            path,
+            file: Mutex::new(std::io::BufWriter::new(file)),
+        })
+    }
+
+    /// Serialize and append an audit event as a single JSON line.
+    pub fn log_event(&self, event: &AuditEvent) -> Result<()> {
+        let json = serde_json::to_string(event).map_err(|e| {
+            BlazeError::internal(format!("Failed to serialize audit event: {}", e))
+        })?;
+        let mut file = self.file.lock();
+        writeln!(file, "{}", json)?;
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Return the path of the underlying log file.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
