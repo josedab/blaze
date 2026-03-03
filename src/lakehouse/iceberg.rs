@@ -550,6 +550,7 @@ struct IcebergMetadata {
 // ---------------------------------------------------------------------------
 
 /// A schema evolution operation.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum SchemaEvolution {
     /// Add a new column at the end.
@@ -567,8 +568,10 @@ pub enum SchemaEvolution {
 }
 
 /// Applies schema evolution operations to a schema.
+#[allow(dead_code)]
 pub struct SchemaEvolver;
 
+#[allow(dead_code)]
 impl SchemaEvolver {
     /// Apply a sequence of evolutions to a schema, returning the new schema.
     pub fn evolve(schema: &Schema, ops: &[SchemaEvolution]) -> Result<Schema> {
@@ -636,6 +639,7 @@ impl SchemaEvolver {
 // ---------------------------------------------------------------------------
 
 /// A partition transform for Iceberg hidden partitioning.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartitionTransform {
     /// Use the raw column value.
@@ -655,6 +659,7 @@ pub enum PartitionTransform {
 }
 
 /// A partition field specification.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PartitionField {
     pub source_column: String,
@@ -664,12 +669,14 @@ pub struct PartitionField {
 }
 
 /// Manages partition spec evolution without data rewrite.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct PartitionSpecEvolver {
     specs: Vec<Vec<PartitionField>>,
     current_spec_id: usize,
 }
 
+#[allow(dead_code)]
 impl PartitionSpecEvolver {
     /// Create with an initial partition spec.
     pub fn new(initial_spec: Vec<PartitionField>) -> Self {

@@ -44,6 +44,7 @@ pub enum TimeUnit {
 
 impl TimeUnit {
     /// Parse a time unit from a string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "microsecond" | "microseconds" | "us" => Ok(TimeUnit::Microsecond),
@@ -469,6 +470,7 @@ pub enum GapFillStrategy {
 
 impl GapFillStrategy {
     /// Parse a gap fill strategy from a string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "null" | "none" => Ok(GapFillStrategy::Null),
@@ -714,7 +716,7 @@ pub fn asof_join(
                     };
                 candidate_idx.and_then(|ci| {
                     let diff = (lt - right_timestamps[ci]).abs();
-                    if config.tolerance.map_or(true, |tol| diff <= tol) {
+                    if config.tolerance.is_none_or(|tol| diff <= tol) {
                         Some(right_values[ci])
                     } else {
                         None
@@ -730,7 +732,7 @@ pub fn asof_join(
                 };
                 candidate_idx.and_then(|ci| {
                     let diff = (right_timestamps[ci] - lt).abs();
-                    if config.tolerance.map_or(true, |tol| diff <= tol) {
+                    if config.tolerance.is_none_or(|tol| diff <= tol) {
                         Some(right_values[ci])
                     } else {
                         None
@@ -763,7 +765,7 @@ pub fn asof_join(
                     (None, None) => None,
                 };
                 best.and_then(|(ci, diff)| {
-                    if config.tolerance.map_or(true, |tol| diff <= tol) {
+                    if config.tolerance.is_none_or(|tol| diff <= tol) {
                         Some(right_values[ci])
                     } else {
                         None
@@ -1329,6 +1331,12 @@ pub struct DeltaDeltaEncoder {
     encoded: Vec<i64>,
 }
 
+impl Default for DeltaDeltaEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeltaDeltaEncoder {
     pub fn new() -> Self {
         Self {
@@ -1643,10 +1651,8 @@ impl AsofJoinExecutor {
             AsofDirection::Forward => {
                 // Find the earliest right time >= left_time
                 let pos = right_times.partition_point(|&t| t < left_time);
-                if pos < right_times.len() {
-                    if (right_times[pos] - left_time).abs() <= tolerance {
-                        return Some(pos);
-                    }
+                if pos < right_times.len() && (right_times[pos] - left_time).abs() <= tolerance {
+                    return Some(pos);
                 }
                 None
             }
@@ -1860,6 +1866,7 @@ impl RetentionEnforcer {
 /// Cubic spline interpolation for smooth curve fitting through time-series data.
 pub struct CubicSplineInterpolator {
     xs: Vec<f64>,
+    #[allow(dead_code)]
     ys: Vec<f64>,
     coeffs: Vec<(f64, f64, f64, f64)>, // (a, b, c, d) for each segment
 }

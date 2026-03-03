@@ -423,6 +423,7 @@ impl DeviceManager {
 }
 
 /// GPU device selector for multi-GPU configurations.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum DeviceSelector {
     /// Use the first available device
@@ -441,6 +442,7 @@ pub enum DeviceSelector {
 
 impl DeviceSelector {
     /// Select a device from the manager.
+    #[allow(dead_code)]
     pub fn select<'a>(&self, manager: &'a DeviceManager) -> Option<&'a GpuDevice> {
         match self {
             DeviceSelector::First => manager.devices.first(),

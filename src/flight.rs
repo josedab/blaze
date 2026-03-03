@@ -857,6 +857,12 @@ pub struct QueryCancellationManager {
     cancelled: parking_lot::RwLock<HashMap<String, std::time::Instant>>,
 }
 
+impl Default for QueryCancellationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QueryCancellationManager {
     pub fn new() -> Self {
         Self {

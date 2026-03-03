@@ -232,6 +232,7 @@ impl DeltaTableOptions {
 #[derive(Debug, Clone)]
 pub struct DeltaLog {
     /// Log directory path
+    #[allow(dead_code)]
     path: PathBuf,
     /// Current version
     version: i64,

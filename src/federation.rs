@@ -343,12 +343,9 @@ impl ExternalDataProvider for HttpProvider {
                 // If the URL is actually a local file, read it
                 if std::path::Path::new(url).exists() {
                     let format_str = options.get("format").map(|s| s.as_str()).unwrap_or("json");
-                    match format_str {
-                        "csv" => {
-                            let table = crate::storage::CsvTable::open(url)?;
-                            return table.scan(None, config.max_rows);
-                        }
-                        _ => {}
+                    if format_str == "csv" {
+                        let table = crate::storage::CsvTable::open(url)?;
+                        return table.scan(None, config.max_rows);
                     }
                 }
 
@@ -410,7 +407,7 @@ impl ExternalDataProvider for PostgresConnector {
             ExternalSourceType::Custom { options, .. } => {
                 let _query = options
                     .get("query")
-                    .or_else(|| options.get("table").map(|t| t))
+                    .or_else(|| options.get("table"))
                     .ok_or_else(|| {
                         BlazeError::invalid_argument(
                             "Postgres source requires 'query' or 'table' option",
@@ -1331,6 +1328,12 @@ pub struct CostBasedRouter {
     source_capabilities: HashMap<String, SourceCapabilities>,
 }
 
+impl Default for CostBasedRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CostBasedRouter {
     pub fn new() -> Self {
         Self {
@@ -1731,6 +1734,12 @@ pub enum CredentialType {
     Token(String),
     AccessKey { key_id: String, secret: String },
     Certificate { cert_pem: String, key_pem: String },
+}
+
+impl Default for CredentialVault {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CredentialVault {
@@ -2811,7 +2820,7 @@ impl SchemaDriftDetector {
             new.schema.fields().iter().map(|f| (f.name(), f)).collect();
 
         // Check for removed columns
-        for (name, _) in &old_fields {
+        for name in old_fields.keys() {
             if !new_fields.contains_key(name) {
                 drifts.push(SchemaDrift::ColumnRemoved {
                     column_name: name.to_string(),

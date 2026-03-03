@@ -225,6 +225,7 @@ impl SkewMitigation {
 }
 
 /// Statistics about skew handling operations.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct SkewStats {
     /// Number of skewed partitions detected
@@ -237,6 +238,7 @@ pub struct SkewStats {
     pub sub_partitions_created: usize,
 }
 
+#[allow(dead_code)]
 impl SkewStats {
     /// Create new skew stats.
     pub fn new() -> Self {

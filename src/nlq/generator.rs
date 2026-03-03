@@ -509,6 +509,7 @@ impl Default for SqlGenerator {
 }
 
 /// SQL template for common query patterns.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SqlTemplate {
     /// Template name
@@ -519,6 +520,7 @@ pub struct SqlTemplate {
     pub parameters: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl SqlTemplate {
     /// Create a new template.
     pub fn new(
@@ -550,6 +552,7 @@ impl SqlTemplate {
 }
 
 /// Common SQL templates.
+#[allow(dead_code)]
 pub fn common_templates() -> Vec<SqlTemplate> {
     vec![
         SqlTemplate::new(

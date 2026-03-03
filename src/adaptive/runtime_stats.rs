@@ -264,6 +264,7 @@ impl Default for StatsCollector {
 }
 
 /// Operator-level statistics.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OperatorStats {
     /// Operator name
@@ -278,6 +279,7 @@ pub struct OperatorStats {
     pub batches_produced: usize,
 }
 
+#[allow(dead_code)]
 impl OperatorStats {
     /// Create new operator stats.
     pub fn new(name: impl Into<String>) -> Self {

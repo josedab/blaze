@@ -307,6 +307,7 @@ const DEFAULT_BYTES_PER_ROW: usize = 100;
 
 /// Adaptive strategy selector that uses workload history to make decisions.
 pub struct AdaptiveStrategySelector {
+    #[allow(dead_code)]
     collector: Arc<WorkloadCollector>,
     cardinality_model: Arc<LearnedCardinalityModel>,
     /// Optional statistics manager for catalog-based estimates
@@ -545,6 +546,12 @@ impl Default for TuningConfig {
     }
 }
 
+impl Default for BayesianAutoTuner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BayesianAutoTuner {
     pub fn new() -> Self {
         Self {
@@ -576,7 +583,7 @@ impl BayesianAutoTuner {
         let should_explore = (obs_len % 10) < ((self.exploration_rate * 10.0) as usize);
 
         if should_explore && obs_len > 0 {
-            let factor = if obs_len % 2 == 0 { 1.25 } else { 0.8 };
+            let factor = if obs_len.is_multiple_of(2) { 1.25 } else { 0.8 };
             TuningConfig {
                 batch_size: ((base.batch_size as f64 * factor) as usize).max(1024),
                 parallelism: (base.parallelism).max(1),
@@ -743,6 +750,12 @@ pub struct CostValidation {
     pub actual_cost: f64,
     pub error_ratio: f64,
     pub timestamp: Instant,
+}
+
+impl Default for CostModelValidator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CostModelValidator {
@@ -969,7 +982,7 @@ impl PlanABTester {
         let mut counter = self.counter.write();
         *counter += 1;
         let threshold = (1.0 / self.exploration_rate).max(1.0) as u64;
-        *counter % threshold == 0
+        (*counter).is_multiple_of(threshold)
     }
 
     pub fn record_result(&self, result: ABTestResult) {
@@ -1069,6 +1082,12 @@ impl ModelDriftDetector {
 pub struct CardinalityFeedbackLoop {
     corrections: RwLock<HashMap<String, f64>>,
     observation_count: RwLock<HashMap<String, u64>>,
+}
+
+impl Default for CardinalityFeedbackLoop {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CardinalityFeedbackLoop {
@@ -1325,6 +1344,12 @@ pub struct PatternStats {
     pub has_aggregation: bool,
 }
 
+impl Default for PatternDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PatternDetector {
     pub fn new() -> Self {
         Self {
@@ -1338,31 +1363,31 @@ impl PatternDetector {
         let mut pattern = String::new();
 
         if upper.contains("SELECT") {
-            pattern.push_str("S");
+            pattern.push('S');
         }
         if upper.contains("JOIN") {
-            pattern.push_str("J");
+            pattern.push('J');
         }
         if upper.contains("WHERE") {
-            pattern.push_str("W");
+            pattern.push('W');
         }
         if upper.contains("GROUP BY") {
-            pattern.push_str("G");
+            pattern.push('G');
         }
         if upper.contains("HAVING") {
-            pattern.push_str("H");
+            pattern.push('H');
         }
         if upper.contains("ORDER BY") {
-            pattern.push_str("O");
+            pattern.push('O');
         }
         if upper.contains("LIMIT") {
-            pattern.push_str("L");
+            pattern.push('L');
         }
         if upper.contains("UNION") || upper.contains("INTERSECT") || upper.contains("EXCEPT") {
-            pattern.push_str("U");
+            pattern.push('U');
         }
         if upper.contains("WITH") {
-            pattern.push_str("C");
+            pattern.push('C');
         } // CTE
 
         pattern
@@ -2897,7 +2922,7 @@ impl CostModelLearner {
     ) {
         self.observations
             .entry(operator_type.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((input_rows, actual_cost_ms));
     }
 
@@ -2998,10 +3023,10 @@ impl RuntimeAdvisor {
         let mut adaptations = Vec::new();
 
         // Check for hash join OOM
-        if execution_stats.peak_memory > self.high_memory_threshold {
-            if execution_stats.operator_timings.contains_key("HashJoin") {
-                adaptations.push(PlanAdaptation::SwitchJoinAlgorithm);
-            }
+        if execution_stats.peak_memory > self.high_memory_threshold
+            && execution_stats.operator_timings.contains_key("HashJoin")
+        {
+            adaptations.push(PlanAdaptation::SwitchJoinAlgorithm);
         }
 
         // Check for sort spilling

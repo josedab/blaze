@@ -44,6 +44,7 @@ pub struct NaturalLanguageProcessor {
     /// Schema context
     schema_context: Option<SchemaContext>,
     /// Configuration
+    #[allow(dead_code)]
     config: NLQConfig,
 }
 

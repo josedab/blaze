@@ -547,11 +547,10 @@ impl DistributedCoordinator {
     /// Remove a node from the cluster by its ID.
     pub fn remove_node(&self, node_id: &str) -> Option<ClusterNode> {
         let mut nodes = self.nodes.write();
-        if let Some(pos) = nodes.iter().position(|n| n.id == node_id) {
-            Some(nodes.remove(pos))
-        } else {
-            None
-        }
+        nodes
+            .iter()
+            .position(|n| n.id == node_id)
+            .map(|pos| nodes.remove(pos))
     }
 
     /// Return a snapshot of all registered nodes.
@@ -888,7 +887,7 @@ impl ScatterGatherExecutor {
     /// Scatter data across available nodes using the given strategy.
     pub fn scatter(
         &self,
-        data: &[RecordBatch],
+        _data: &[RecordBatch],
         strategy: &ScatterStrategy,
         fragment_id: usize,
     ) -> Result<Vec<ScatterTask>> {
@@ -1626,7 +1625,7 @@ impl TwoPhaseAggregator {
                 let col = batch.column(partial.column_index);
                 let arr = col
                     .as_primitive_opt::<arrow::datatypes::Float64Type>()
-                    .or_else(|| None);
+                    .or(None);
 
                 // Try Int64 first, then Float64.
                 let values: Vec<f64> =
@@ -2157,7 +2156,7 @@ impl DistributedSort {
 
     /// Merge pre-sorted partition results into a single sorted output.
     pub fn merge_sorted(&self, partitions: Vec<Vec<RecordBatch>>) -> Result<Vec<RecordBatch>> {
-        let mut all: Vec<RecordBatch> = partitions.into_iter().flatten().collect();
+        let all: Vec<RecordBatch> = partitions.into_iter().flatten().collect();
         if all.is_empty() {
             return Ok(Vec::new());
         }

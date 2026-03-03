@@ -158,3 +158,7 @@ opt-level = 3
 [profile.bench]
 lto = true
 codegen-units = 1
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(feature, values("tracing", "cuda", "opencl"))']

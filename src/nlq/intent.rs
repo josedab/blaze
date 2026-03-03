@@ -131,6 +131,7 @@ impl From<FilterOp> for FilterOperator {
 /// Intent classifier.
 pub struct IntentClassifier {
     /// Classification weights
+    #[allow(dead_code)]
     weights: ClassificationWeights,
 }
 
@@ -138,10 +139,13 @@ pub struct IntentClassifier {
 #[derive(Debug, Clone)]
 struct ClassificationWeights {
     /// Weight for aggregate keywords
+    #[allow(dead_code)]
     aggregate_weight: f64,
     /// Weight for join keywords
+    #[allow(dead_code)]
     join_weight: f64,
     /// Weight for count keywords
+    #[allow(dead_code)]
     count_weight: f64,
 }
 
@@ -293,6 +297,7 @@ impl Default for IntentClassifier {
 }
 
 /// Intent validation result.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct IntentValidation {
     /// Whether the intent is valid
@@ -303,6 +308,7 @@ pub struct IntentValidation {
     pub suggestions: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl IntentValidation {
     /// Create a valid result.
     pub fn valid() -> Self {
@@ -330,6 +336,7 @@ impl IntentValidation {
 }
 
 /// Validate an intent.
+#[allow(dead_code)]
 pub fn validate_intent(intent: &QueryIntent) -> IntentValidation {
     match intent {
         QueryIntent::Select {

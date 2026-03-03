@@ -64,7 +64,7 @@ pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> + Send {
     fn schema(&self) -> Arc<ArrowSchema>;
 }
 
-/// A simple stream that wraps a vector of RecordBatches.
+// A simple stream that wraps a vector of RecordBatches.
 pin_project! {
     pub struct MemoryStream {
         schema: Arc<ArrowSchema>,
@@ -114,7 +114,7 @@ impl RecordBatchStream for MemoryStream {
     }
 }
 
-/// A stream backed by an async channel for backpressure support.
+// A stream backed by an async channel for backpressure support.
 pin_project! {
     pub struct ChannelStream {
         schema: Arc<ArrowSchema>,
@@ -145,7 +145,7 @@ impl RecordBatchStream for ChannelStream {
     }
 }
 
-/// A stream that applies a filter to each batch.
+// A stream that applies a filter to each batch.
 pin_project! {
     pub struct FilterStream<S> {
         schema: Arc<ArrowSchema>,
@@ -190,7 +190,7 @@ impl<S: RecordBatchStream> RecordBatchStream for FilterStream<S> {
     }
 }
 
-/// A stream that projects columns from each batch.
+// A stream that projects columns from each batch.
 pin_project! {
     pub struct ProjectionStream<S> {
         schema: Arc<ArrowSchema>,
@@ -240,7 +240,7 @@ impl<S: RecordBatchStream> RecordBatchStream for ProjectionStream<S> {
     }
 }
 
-/// A stream that limits the number of rows returned.
+// A stream that limits the number of rows returned.
 pin_project! {
     pub struct LimitStream<S> {
         schema: Arc<ArrowSchema>,
@@ -292,11 +292,7 @@ impl<S: RecordBatchStream> Stream for LimitStream<S> {
                     }
 
                     // Calculate slice bounds
-                    let start_in_batch = if *this.rows_seen < *this.offset {
-                        *this.offset - *this.rows_seen
-                    } else {
-                        0
-                    };
+                    let start_in_batch = (*this.offset).saturating_sub(*this.rows_seen);
 
                     let rows_remaining = *this.limit - *this.rows_returned;
                     let rows_available = batch_rows - start_in_batch;
@@ -328,7 +324,7 @@ impl<S: RecordBatchStream> RecordBatchStream for LimitStream<S> {
     }
 }
 
-/// A stream that coalesces small batches into larger ones.
+// A stream that coalesces small batches into larger ones.
 pin_project! {
     pub struct CoalesceStream<S> {
         schema: Arc<ArrowSchema>,
@@ -355,6 +351,7 @@ impl<S: RecordBatchStream> CoalesceStream<S> {
         }
     }
 
+    #[allow(dead_code)]
     fn flush_buffer(&mut self) -> Result<RecordBatch> {
         if self.buffer.is_empty() {
             return Ok(RecordBatch::new_empty(self.schema.clone()));
@@ -788,6 +785,7 @@ impl StreamDefinition {
 pub struct Watermark {
     current_value: i64, // microseconds since epoch
     delay: std::time::Duration,
+    #[allow(dead_code)]
     column_name: String,
 }
 
@@ -1051,6 +1049,7 @@ impl WindowedAggregator {
 /// Continuous query that processes streaming data.
 pub struct ContinuousQuery {
     name: String,
+    #[allow(dead_code)]
     definition: StreamDefinition,
     window: Option<StreamWindow>,
     is_running: Arc<std::sync::atomic::AtomicBool>,
@@ -1107,6 +1106,12 @@ pub enum StreamSink {
 pub struct StreamRegistry {
     streams: parking_lot::RwLock<HashMap<String, StreamDefinition>>,
     queries: parking_lot::RwLock<HashMap<String, Arc<ContinuousQuery>>>,
+}
+
+impl Default for StreamRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StreamRegistry {
@@ -1497,7 +1502,7 @@ impl StreamingJoinOperator {
                 }
                 for (c, field) in buf_batch.schema().fields().iter().enumerate() {
                     let new_field = ArrowField::new(
-                        &format!("right_{}", field.name()),
+                        format!("right_{}", field.name()),
                         field.data_type().clone(),
                         field.is_nullable(),
                     );
@@ -1570,6 +1575,12 @@ pub struct CdcProcessor {
     state: HashMap<Vec<u8>, HashMap<String, String>>,
     columns: Vec<String>,
     stats: CdcStats,
+}
+
+impl Default for CdcProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CdcProcessor {
@@ -2087,7 +2098,7 @@ impl ExactlyOnceTracker {
     pub fn is_duplicate(&self, partition: &str, offset: u64) -> bool {
         self.committed_offsets
             .get(partition)
-            .map_or(false, |&committed| offset <= committed)
+            .is_some_and(|&committed| offset <= committed)
     }
 }
 
@@ -3781,6 +3792,7 @@ pub struct StreamJoinConfig {
 /// Buffer entry for windowed join.
 #[derive(Debug, Clone)]
 struct WindowedBatch {
+    #[allow(dead_code)]
     batch: RecordBatch,
     timestamp: std::time::Instant,
 }
@@ -4120,6 +4132,7 @@ impl Default for StreamPipelineBuilder {
 pub struct StreamPipeline {
     source: Box<dyn StreamConnector>,
     stages: Vec<PipelineStage>,
+    #[allow(dead_code)]
     config: StreamConfig,
     processed_batches: usize,
     processed_rows: usize,

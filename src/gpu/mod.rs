@@ -648,6 +648,7 @@ pub struct GpuKernelCache {
 #[derive(Debug, Clone)]
 struct CachedKernel {
     kernel_hash: String,
+    #[allow(dead_code)]
     compiled_at: std::time::Instant,
     use_count: u64,
 }
@@ -731,6 +732,12 @@ pub struct GpuPipelineStage {
     pub output_rows: u64,
     pub execution_time_us: u64,
     pub memory_used: u64,
+}
+
+impl Default for GpuPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GpuPipeline {

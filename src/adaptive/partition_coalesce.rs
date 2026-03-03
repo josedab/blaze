@@ -60,8 +60,7 @@ impl PartitionCoalescer {
         sorted_partitions.sort_by(|a, b| b.byte_size.cmp(&a.byte_size));
 
         // Use greedy bin packing
-        let mut groups: Vec<PartitionGroup> =
-            (0..target).map(|id| PartitionGroup::new(id)).collect();
+        let mut groups: Vec<PartitionGroup> = (0..target).map(PartitionGroup::new).collect();
 
         for partition in sorted_partitions {
             // Find the group with the smallest total size
@@ -127,7 +126,7 @@ impl PartitionCoalescer {
         target_count: usize,
     ) -> Vec<Vec<usize>> {
         let target = target_count.max(1);
-        let partitions_per_group = (partitions.len() + target - 1) / target;
+        let partitions_per_group = partitions.len().div_ceil(target);
 
         partitions
             .chunks(partitions_per_group)
@@ -240,6 +239,7 @@ impl CoalescePlan {
 }
 
 /// Coalesce multiple record batches into a single batch.
+#[allow(dead_code)]
 pub fn coalesce_batches(batches: &[RecordBatch]) -> Result<RecordBatch> {
     if batches.is_empty() {
         return Err(BlazeError::invalid_argument(

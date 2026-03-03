@@ -218,11 +218,11 @@ impl AdaptiveExecutor {
         }
 
         // Check for dynamic join selection opportunity
-        if self.config.dynamic_join_selection {
-            if stats.total_bytes < self.config.broadcast_join_threshold {
-                // Could switch to broadcast join for small datasets
-                self.planner.mark_for_broadcast(stage_idx);
-            }
+        if self.config.dynamic_join_selection
+            && stats.total_bytes < self.config.broadcast_join_threshold
+        {
+            // Could switch to broadcast join for small datasets
+            self.planner.mark_for_broadcast(stage_idx);
         }
 
         Ok(())

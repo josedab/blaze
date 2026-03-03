@@ -517,11 +517,13 @@ pub struct ExecutorStats {
 }
 
 /// Builder for GPU execution plans.
+#[allow(dead_code)]
 pub struct GpuPlanBuilder {
     /// Plan being built
     plan: GpuExecutionPlan,
 }
 
+#[allow(dead_code)]
 impl GpuPlanBuilder {
     /// Create a new plan builder.
     pub fn new() -> Self {

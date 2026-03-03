@@ -573,6 +573,7 @@ impl GpuKernel for ProjectKernel {
 }
 
 /// Fused kernel that combines multiple operations.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct FusedKernel {
     /// Kernel name
@@ -581,6 +582,7 @@ pub struct FusedKernel {
     components: Vec<Arc<dyn GpuKernel>>,
 }
 
+#[allow(dead_code)]
 impl FusedKernel {
     /// Create a new fused kernel.
     pub fn new(name: String, components: Vec<Arc<dyn GpuKernel>>) -> Self {
