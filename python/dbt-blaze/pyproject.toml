@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbt-blaze"
+version = "0.1.0"
+description = "dbt adapter for the Blaze Query Engine"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "dbt-core>=1.7,<2.0",
+    "pyblaze>=0.1.0",
+]
+
+[project.entry-points."dbt.adapters"]
+blaze = "dbt_blaze.adapter:BlazeAdapter"
