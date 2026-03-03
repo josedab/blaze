@@ -63,10 +63,10 @@ impl SortOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use crate::planner::{ColumnExpr, SortExpr};
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
-    use crate::planner::{ColumnExpr, SortExpr};
+    use std::sync::Arc;
 
     fn make_batch(values: Vec<i64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
@@ -81,7 +81,11 @@ mod tests {
         let result = SortOperator::execute(&[sort_expr], vec![batch]).unwrap();
         assert_eq!(result.len(), 1);
 
-        let col = result[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let col = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         let values: Vec<i64> = col.iter().map(|v| v.unwrap()).collect();
         assert_eq!(values, vec![1, 1, 2, 3, 4, 5, 6, 9]);
     }
@@ -93,4 +97,3 @@ mod tests {
         assert!(result.is_empty());
     }
 }
-

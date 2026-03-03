@@ -457,8 +457,7 @@ mod tests {
 
     #[test]
     fn test_arrow_error_conversion() {
-        let arrow_err =
-            arrow::error::ArrowError::InvalidArgumentError("bad arg".to_string());
+        let arrow_err = arrow::error::ArrowError::InvalidArgumentError("bad arg".to_string());
         let blaze_err: BlazeError = arrow_err.into();
         let msg = blaze_err.to_string();
         assert!(msg.contains("Arrow error"));
@@ -483,8 +482,7 @@ mod tests {
 
     #[test]
     fn test_sqlparser_error_conversion() {
-        let parser_err =
-            sqlparser::parser::ParserError::ParserError("syntax error".to_string());
+        let parser_err = sqlparser::parser::ParserError::ParserError("syntax error".to_string());
         let blaze_err: BlazeError = parser_err.into();
         assert!(blaze_err.to_string().contains("SQL parse error"));
     }
@@ -555,11 +553,7 @@ mod tests {
 
     #[test]
     fn test_function_not_found() {
-        let available = vec![
-            "COUNT".to_string(),
-            "SUM".to_string(),
-            "AVG".to_string(),
-        ];
+        let available = vec!["COUNT".to_string(), "SUM".to_string(), "AVG".to_string()];
         let err = BlazeError::function_not_found("CONT", &available);
         let msg = err.to_string();
         assert!(msg.contains("Function 'CONT' not found"));

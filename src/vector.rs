@@ -507,9 +507,9 @@ impl HnswIndex {
             return Ok(node_id);
         }
 
-        let entry = self.entry_point.ok_or_else(|| {
-            BlazeError::execution("Entry point should exist after initial check")
-        })?;
+        let entry = self
+            .entry_point
+            .ok_or_else(|| BlazeError::execution("Entry point should exist after initial check"))?;
         let mut current = entry;
         for layer in (level + 1..=self.max_layer).rev() {
             current = self.greedy_search_layer(&self.nodes[node_id].vector, current, layer)?;
@@ -714,9 +714,9 @@ impl HnswIndex {
 
             let mut vector = Vec::with_capacity(dim);
             for _ in 0..dim {
-                vector.push(f32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
-                    BlazeError::invalid_argument("Truncated HNSW index data: bad vector bytes")
-                })?));
+                vector.push(f32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(
+                    |_| BlazeError::invalid_argument("Truncated HNSW index data: bad vector bytes"),
+                )?));
                 pos += 4;
             }
 
@@ -729,15 +729,20 @@ impl HnswIndex {
             for _ in 0..num_layers {
                 let num_conns =
                     u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
-                        BlazeError::invalid_argument("Truncated HNSW index data: bad connection count bytes")
+                        BlazeError::invalid_argument(
+                            "Truncated HNSW index data: bad connection count bytes",
+                        )
                     })?) as usize;
                 pos += 4;
                 let mut conns = Vec::with_capacity(num_conns);
                 for _ in 0..num_conns {
-                    conns
-                        .push(u64::from_le_bytes(bytes[pos..pos + 8].try_into().map_err(|_| {
-                            BlazeError::invalid_argument("Truncated HNSW index data: bad connection bytes")
-                        })?) as usize);
+                    conns.push(
+                        u64::from_le_bytes(bytes[pos..pos + 8].try_into().map_err(|_| {
+                            BlazeError::invalid_argument(
+                                "Truncated HNSW index data: bad connection bytes",
+                            )
+                        })?) as usize,
+                    );
                     pos += 8;
                 }
                 connections.push(conns);
@@ -791,8 +796,7 @@ impl HnswIndex {
                 })
                 .collect();
             all_dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            let true_ids: HashSet<usize> =
-                all_dists.iter().take(k).map(|(id, _)| *id).collect();
+            let true_ids: HashSet<usize> = all_dists.iter().take(k).map(|(id, _)| *id).collect();
 
             let overlap = hnsw_ids.intersection(&true_ids).count();
             total_recall += overlap as f64 / k as f64;
@@ -808,9 +812,9 @@ impl VectorIndex for HnswIndex {
             return Ok(Vec::new());
         }
 
-        let entry = self.entry_point.ok_or_else(|| {
-            BlazeError::execution("HNSW index has nodes but no entry point")
-        })?;
+        let entry = self
+            .entry_point
+            .ok_or_else(|| BlazeError::execution("HNSW index has nodes but no entry point"))?;
         let mut current = entry;
 
         // Traverse from top layer to layer 1
@@ -1568,7 +1572,11 @@ impl VectorIndexManager {
                 meta,
             },
         );
-        self.indexes.get_mut(name).expect("just inserted").index.as_mut()
+        self.indexes
+            .get_mut(name)
+            .expect("just inserted")
+            .index
+            .as_mut()
     }
 
     /// Create and register a new brute force index.
@@ -1595,7 +1603,11 @@ impl VectorIndexManager {
                 meta,
             },
         );
-        self.indexes.get_mut(name).expect("just inserted").index.as_mut()
+        self.indexes
+            .get_mut(name)
+            .expect("just inserted")
+            .index
+            .as_mut()
     }
 
     /// Get an index by name.
@@ -1896,12 +1908,7 @@ pub const HNSW_PARQUET_CONFIG_KEY: &str = "blaze.hnsw.config";
 pub fn serialize_hnsw_config(config: &HnswConfig, metric: DistanceMetric) -> String {
     format!(
         r#"{{"m":{},"m_max":{},"ef_construction":{},"ef_search":{},"ml":{},"metric":{}}}"#,
-        config.m,
-        config.m_max,
-        config.ef_construction,
-        config.ef_search,
-        config.ml,
-        metric as u8,
+        config.m, config.m_max, config.ef_construction, config.ef_search, config.ml, metric as u8,
     )
 }
 
@@ -2728,7 +2735,14 @@ mod tests {
     #[test]
     fn test_ivfpq_train_and_search() {
         let vectors: Vec<Vec<f32>> = (0..50)
-            .map(|i| vec![i as f32 * 0.1, i as f32 * 0.2, i as f32 * 0.3, i as f32 * 0.4])
+            .map(|i| {
+                vec![
+                    i as f32 * 0.1,
+                    i as f32 * 0.2,
+                    i as f32 * 0.3,
+                    i as f32 * 0.4,
+                ]
+            })
             .collect();
         let mut index = IvfPqIndex::new(4, 4, 2, 4, DistanceMetric::L2);
         index.train(&vectors);
@@ -2949,11 +2963,26 @@ mod tests {
     #[test]
     fn test_udf_parse_metric() {
         assert_eq!(VectorSearchUdf::parse_metric("l2"), DistanceMetric::L2);
-        assert_eq!(VectorSearchUdf::parse_metric("cosine"), DistanceMetric::Cosine);
-        assert_eq!(VectorSearchUdf::parse_metric("dot"), DistanceMetric::DotProduct);
-        assert_eq!(VectorSearchUdf::parse_metric("dot_product"), DistanceMetric::DotProduct);
-        assert_eq!(VectorSearchUdf::parse_metric("ip"), DistanceMetric::InnerProduct);
-        assert_eq!(VectorSearchUdf::parse_metric("inner_product"), DistanceMetric::InnerProduct);
+        assert_eq!(
+            VectorSearchUdf::parse_metric("cosine"),
+            DistanceMetric::Cosine
+        );
+        assert_eq!(
+            VectorSearchUdf::parse_metric("dot"),
+            DistanceMetric::DotProduct
+        );
+        assert_eq!(
+            VectorSearchUdf::parse_metric("dot_product"),
+            DistanceMetric::DotProduct
+        );
+        assert_eq!(
+            VectorSearchUdf::parse_metric("ip"),
+            DistanceMetric::InnerProduct
+        );
+        assert_eq!(
+            VectorSearchUdf::parse_metric("inner_product"),
+            DistanceMetric::InnerProduct
+        );
         assert_eq!(VectorSearchUdf::parse_metric("unknown"), DistanceMetric::L2);
     }
 

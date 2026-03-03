@@ -277,7 +277,8 @@ impl CardinalityEstimator {
             }
             BinaryOp::NotEq => {
                 // Use statistics-aware estimate for the complement
-                let eq_sel = self.estimate_binary_selectivity(left, &BinaryOp::Eq, right, stats_manager);
+                let eq_sel =
+                    self.estimate_binary_selectivity(left, &BinaryOp::Eq, right, stats_manager);
                 1.0 - eq_sel
             }
             BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => {

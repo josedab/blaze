@@ -154,8 +154,8 @@ pub struct QueryTimeoutConfig {
 impl Default for QueryTimeoutConfig {
     fn default() -> Self {
         Self {
-            max_query_time_secs: 300,         // 5 minutes
-            max_rows: 10_000_000,             // 10M rows
+            max_query_time_secs: 300,             // 5 minutes
+            max_rows: 10_000_000,                 // 10M rows
             max_memory_bytes: 1024 * 1024 * 1024, // 1GB
         }
     }
@@ -232,7 +232,7 @@ impl FlightAction {
                 Ok(FlightAction::PrepareStatement { sql })
             }
             _ => Err(BlazeError::not_implemented(format!(
-                "Unknown Flight action: {}",
+                "Unknown Flight action type: '{}'. Supported actions: 'execute_query', 'prepare_statement'.",
                 action_type
             ))),
         }
@@ -260,7 +260,8 @@ impl FlightHandler {
             self.connection.query(sql)
         } else if let Some(ref table) = ticket.table {
             crate::validate_identifier(table)?;
-            self.connection.query(&format!("SELECT * FROM \"{}\"", table))
+            self.connection
+                .query(&format!("SELECT * FROM \"{}\"", table))
         } else {
             Err(BlazeError::invalid_argument(
                 "Ticket must contain a query or table name",
@@ -366,12 +367,7 @@ impl TableProvider for FlightTableProvider {
         crate::catalog::TableType::External
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         // Use cached data if available
         let cached = self.cached_data.read();
         let batches = match cached.as_ref() {
@@ -815,9 +811,7 @@ impl FlightAuthHandler {
                 }
                 let (username, password) = (parts[0], parts[1]);
                 match credentials.get(username) {
-                    Some(stored_pw)
-                        if stored_pw.as_bytes().ct_eq(password.as_bytes()).into() =>
-                    {
+                    Some(stored_pw) if stored_pw.as_bytes().ct_eq(password.as_bytes()).into() => {
                         let session_token = uuid::Uuid::new_v4().to_string();
                         let now = std::time::Instant::now();
                         let session = AuthSession {
@@ -949,14 +943,10 @@ impl FlightSqlServiceConfig {
     /// Validate the configuration.
     pub fn validate(&self) -> Result<()> {
         if self.port == 0 {
-            return Err(BlazeError::invalid_argument(
-                "Flight SQL port cannot be 0",
-            ));
+            return Err(BlazeError::invalid_argument("Flight SQL port cannot be 0"));
         }
         if self.max_connections == 0 {
-            return Err(BlazeError::invalid_argument(
-                "max_connections cannot be 0",
-            ));
+            return Err(BlazeError::invalid_argument("max_connections cannot be 0"));
         }
         if self.query_timeout.max_query_time_secs == 0 {
             return Err(BlazeError::invalid_argument(
@@ -1074,8 +1064,7 @@ impl FlightSqlService {
 
     /// Execute a SQL query (CommandStatementQuery).
     pub fn execute_query(&self, sql: &str) -> Result<FlightSqlResult> {
-        let span = FlightSqlSpan::new("execute_query")
-            .with_attribute("sql", sql);
+        let span = FlightSqlSpan::new("execute_query").with_attribute("sql", sql);
 
         if self.at_capacity() {
             return Err(BlazeError::execution("Server at capacity"));
@@ -1103,8 +1092,7 @@ impl FlightSqlService {
 
     /// Execute a DML statement (CommandStatementUpdate).
     pub fn execute_update(&self, sql: &str) -> Result<FlightSqlResult> {
-        let span = FlightSqlSpan::new("execute_update")
-            .with_attribute("sql", sql);
+        let span = FlightSqlSpan::new("execute_update").with_attribute("sql", sql);
 
         if self.at_capacity() {
             return Err(BlazeError::execution("Server at capacity"));
@@ -1159,8 +1147,7 @@ impl FlightSqlService {
 
     /// Retrieve data for a ticket (DoGet).
     pub fn do_get(&self, ticket: &FlightTicket) -> Result<Vec<RecordBatch>> {
-        let span = FlightSqlSpan::new("do_get")
-            .with_attribute("ticket", format!("{:?}", ticket));
+        let span = FlightSqlSpan::new("do_get").with_attribute("ticket", format!("{:?}", ticket));
 
         let result = self.handler.do_get(ticket);
         let duration = span.finish();
@@ -1269,8 +1256,7 @@ impl FlightSqlService {
     ///
     /// Accepts Arrow IPC-encoded record batches and registers them as a table.
     pub fn do_put(&self, table_name: &str, data: &[u8]) -> Result<FlightSqlResult> {
-        let span = FlightSqlSpan::new("do_put")
-            .with_attribute("table", table_name);
+        let span = FlightSqlSpan::new("do_put").with_attribute("table", table_name);
 
         let batches = deserialize_batches(data)?;
         if batches.is_empty() {
@@ -1278,7 +1264,9 @@ impl FlightSqlService {
         }
         let num_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
-        self.handler.connection.register_batches(table_name, batches)?;
+        self.handler
+            .connection
+            .register_batches(table_name, batches)?;
 
         let duration = span.finish();
         if duration.as_secs() > 10 {
@@ -1297,11 +1285,7 @@ impl FlightSqlService {
     }
 
     /// Execute a DoPut with a prepared statement handle.
-    pub fn do_put_prepared(
-        &self,
-        handle_id: &str,
-        data: &[u8],
-    ) -> Result<FlightSqlResult> {
+    pub fn do_put_prepared(&self, handle_id: &str, data: &[u8]) -> Result<FlightSqlResult> {
         let _handle = self.statements.get(handle_id).ok_or_else(|| {
             BlazeError::execution(format!("Prepared statement not found: {}", handle_id))
         })?;
@@ -1324,8 +1308,14 @@ impl FlightSqlService {
     pub fn get_sql_info(&self) -> Vec<(String, String)> {
         vec![
             ("FLIGHT_SQL_SERVER_NAME".to_string(), "Blaze".to_string()),
-            ("FLIGHT_SQL_SERVER_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string()),
-            ("FLIGHT_SQL_SERVER_ARROW_VERSION".to_string(), "57".to_string()),
+            (
+                "FLIGHT_SQL_SERVER_VERSION".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            ),
+            (
+                "FLIGHT_SQL_SERVER_ARROW_VERSION".to_string(),
+                "57".to_string(),
+            ),
             ("SQL_DDL_CATALOG".to_string(), "false".to_string()),
             ("SQL_DDL_SCHEMA".to_string(), "false".to_string()),
             ("SQL_DDL_TABLE".to_string(), "true".to_string()),
@@ -1544,12 +1534,12 @@ mod tests {
         provider.set_data(batches);
 
         // Scan
-        let result = provider.scan(None, &[], None).unwrap();
+        let result = provider.scan(None, None).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].num_rows(), 3);
 
         // Scan with limit
-        let result = provider.scan(None, &[], Some(2)).unwrap();
+        let result = provider.scan(None, Some(2)).unwrap();
         let total: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 2);
     }
@@ -1872,8 +1862,7 @@ mod tests {
             max_rows: 1000,
             max_memory_bytes: 512 * 1024 * 1024,
         };
-        let config = FlightSqlServiceConfig::new()
-            .with_query_timeout(timeout);
+        let config = FlightSqlServiceConfig::new().with_query_timeout(timeout);
         let conn = crate::Connection::in_memory().unwrap();
         let service = FlightSqlService::new(conn, config);
         assert_eq!(service.query_timeout().max_query_time_secs, 60);
@@ -1901,12 +1890,11 @@ mod tests {
 
     #[test]
     fn test_config_validate_timeout_zero() {
-        let config = FlightSqlServiceConfig::new()
-            .with_query_timeout(QueryTimeoutConfig {
-                max_query_time_secs: 0,
-                max_rows: 100,
-                max_memory_bytes: 1024,
-            });
+        let config = FlightSqlServiceConfig::new().with_query_timeout(QueryTimeoutConfig {
+            max_query_time_secs: 0,
+            max_rows: 100,
+            max_memory_bytes: 1024,
+        });
         assert!(config.validate().is_err());
     }
 
@@ -1925,7 +1913,9 @@ mod tests {
         }
 
         // Verify the table is queryable
-        let query_result = service.execute_query("SELECT * FROM uploaded_table").unwrap();
+        let query_result = service
+            .execute_query("SELECT * FROM uploaded_table")
+            .unwrap();
         match query_result {
             FlightSqlResult::Query(batches) => {
                 let total: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -1974,8 +1964,7 @@ mod tests {
 
     #[test]
     fn test_flight_sql_span_tracking() {
-        let span = FlightSqlSpan::new("test_op")
-            .with_attribute("key", "value");
+        let span = FlightSqlSpan::new("test_op").with_attribute("key", "value");
         assert_eq!(span.operation(), "test_op");
         std::thread::sleep(std::time::Duration::from_millis(10));
         let duration = span.finish();

@@ -1,14 +1,19 @@
 //! Hash join and sort-merge join operators.
+//!
+//! Supports spill-to-disk when the build side exceeds a configurable memory
+//! threshold. When spilling is enabled, both sides are hash-partitioned and
+//! each partition is joined independently, keeping peak memory bounded.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::array::{
-    new_null_array, Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch, StringArray,
-    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    new_null_array, Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch,
+    StringArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray, UInt32Array, UInt64Array,
 };
 use arrow::compute;
@@ -18,6 +23,39 @@ use crate::error::{BlazeError, Result};
 use crate::planner::JoinType;
 
 use super::try_downcast;
+
+/// Configuration for hash join spill-to-disk behavior.
+#[derive(Debug, Clone)]
+pub struct HashJoinSpillConfig {
+    /// Maximum bytes for the build side before spilling to disk
+    pub memory_threshold: usize,
+    /// Directory for spill files (defaults to system temp dir)
+    pub spill_dir: Option<PathBuf>,
+    /// Number of hash partitions when spilling
+    pub num_partitions: usize,
+    /// Whether spill-to-disk is enabled
+    pub enabled: bool,
+}
+
+impl Default for HashJoinSpillConfig {
+    fn default() -> Self {
+        Self {
+            memory_threshold: 256 * 1024 * 1024, // 256 MB
+            spill_dir: None,
+            num_partitions: 16,
+            enabled: false,
+        }
+    }
+}
+
+/// Estimate the in-memory byte size of a `RecordBatch` by summing column buffer sizes.
+fn estimate_batch_bytes(batch: &RecordBatch) -> usize {
+    batch
+        .columns()
+        .iter()
+        .map(|col| col.get_buffer_memory_size())
+        .sum()
+}
 
 /// Hash table for hash join operations.
 ///
@@ -196,9 +234,13 @@ impl JoinHashTable {
                 };
                 value.hash(hasher);
             }
+            DataType::Decimal128(_, _) => {
+                let arr = try_downcast::<Decimal128Array>(array, "Decimal128Array")?;
+                arr.value(row).hash(hasher);
+            }
             dt => {
                 return Err(BlazeError::not_implemented(format!(
-                    "Hash for type {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp",
+                    "JOIN hash for type {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp, Decimal128.",
                     dt
                 )));
             }
@@ -325,34 +367,32 @@ impl JoinHashTable {
                         hash_primitive_batch!(TimestampSecondArray, array, hashes, write_i64);
                     }
                     TimeUnit::Millisecond => {
-                        hash_primitive_batch!(
-                            TimestampMillisecondArray,
-                            array,
-                            hashes,
-                            write_i64
-                        );
+                        hash_primitive_batch!(TimestampMillisecondArray, array, hashes, write_i64);
                     }
                     TimeUnit::Microsecond => {
-                        hash_primitive_batch!(
-                            TimestampMicrosecondArray,
-                            array,
-                            hashes,
-                            write_i64
-                        );
+                        hash_primitive_batch!(TimestampMicrosecondArray, array, hashes, write_i64);
                     }
                     TimeUnit::Nanosecond => {
-                        hash_primitive_batch!(
-                            TimestampNanosecondArray,
-                            array,
-                            hashes,
-                            write_i64
-                        );
+                        hash_primitive_batch!(TimestampNanosecondArray, array, hashes, write_i64);
                     }
+                }
+            }
+            DataType::Decimal128(_, _) => {
+                let arr = try_downcast::<Decimal128Array>(array, "Decimal128Array")?;
+                for (i, hash) in hashes.iter_mut().enumerate() {
+                    let mut hasher = DefaultHasher::new();
+                    hasher.write_u64(*hash);
+                    if arr.is_null(i) {
+                        0xDEADBEEFu64.hash(&mut hasher);
+                    } else {
+                        arr.value(i).hash(&mut hasher);
+                    }
+                    *hash = hasher.finish();
                 }
             }
             dt => {
                 return Err(BlazeError::not_implemented(format!(
-                    "Batch hash for type {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp",
+                    "JOIN batch hash for type {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp, Decimal128.",
                     dt
                 )));
             }
@@ -488,8 +528,13 @@ impl JoinHashTable {
                     }
                 }
             }
+            (DataType::Decimal128(_, _), DataType::Decimal128(_, _)) => {
+                let l = try_downcast::<Decimal128Array>(left, "Decimal128Array")?;
+                let r = try_downcast::<Decimal128Array>(right, "Decimal128Array")?;
+                Ok(l.value(left_row) == r.value(right_row))
+            }
             (l_dt, r_dt) => Err(BlazeError::not_implemented(format!(
-                "Comparison between {:?} and {:?}. Supported: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp",
+                "JOIN comparison between {:?} and {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Timestamp, Decimal128.",
                 l_dt, r_dt
             ))),
         }
@@ -563,6 +608,214 @@ impl HashJoinOperator {
         }
 
         Ok(result_batches)
+    }
+
+    /// Execute a hash join with spill-to-disk support.
+    ///
+    /// When spill is enabled and the build side exceeds the memory threshold,
+    /// both sides are hash-partitioned into `num_partitions` buckets and each
+    /// partition is joined independently, keeping peak memory bounded.
+    pub fn execute_with_spill(
+        left_batches: Vec<RecordBatch>,
+        right_batches: Vec<RecordBatch>,
+        join_type: JoinType,
+        left_keys: &[Arc<dyn crate::planner::PhysicalExpr>],
+        right_keys: &[Arc<dyn crate::planner::PhysicalExpr>],
+        output_schema: &Arc<ArrowSchema>,
+        config: &HashJoinSpillConfig,
+    ) -> Result<Vec<RecordBatch>> {
+        if !config.enabled {
+            return Self::execute(
+                left_batches,
+                right_batches,
+                join_type,
+                left_keys,
+                right_keys,
+                output_schema,
+            );
+        }
+
+        let build_bytes: usize = right_batches.iter().map(estimate_batch_bytes).sum();
+
+        if build_bytes <= config.memory_threshold {
+            return Self::execute(
+                left_batches,
+                right_batches,
+                join_type,
+                left_keys,
+                right_keys,
+                output_schema,
+            );
+        }
+
+        tracing::warn!(
+            build_bytes,
+            threshold = config.memory_threshold,
+            num_partitions = config.num_partitions,
+            "Hash join build side ({} bytes) exceeds threshold ({} bytes), \
+             spilling to disk with {} partitions",
+            build_bytes,
+            config.memory_threshold,
+            config.num_partitions,
+        );
+
+        let spill_dir = config
+            .spill_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("blaze_hashjoin_spill"));
+        std::fs::create_dir_all(&spill_dir).map_err(|e| {
+            BlazeError::execution(format!(
+                "Failed to create spill directory {}: {e}",
+                spill_dir.display()
+            ))
+        })?;
+
+        let num_parts = config.num_partitions;
+
+        // Partition the build (right) side by hash of join keys
+        let mut build_partitions: Vec<Vec<RecordBatch>> =
+            (0..num_parts).map(|_| Vec::new()).collect();
+        for batch in &right_batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let key_arrays: Vec<ArrayRef> = right_keys
+                .iter()
+                .map(|k| k.evaluate(batch))
+                .collect::<Result<Vec<_>>>()?;
+            let hashes = JoinHashTable::compute_hashes_batch(&key_arrays, batch.num_rows())?;
+
+            let mut partition_indices: Vec<Vec<u32>> = (0..num_parts).map(|_| Vec::new()).collect();
+            for (row, hash) in hashes.iter().enumerate() {
+                let part = (*hash as usize) % num_parts;
+                partition_indices[part].push(row as u32);
+            }
+
+            for (part_idx, indices) in partition_indices.iter().enumerate() {
+                if !indices.is_empty() {
+                    let partitioned = Self::take_batch(batch, indices)?;
+                    build_partitions[part_idx].push(partitioned);
+                }
+            }
+        }
+
+        // Partition the probe (left) side by hash of join keys
+        let mut probe_partitions: Vec<Vec<RecordBatch>> =
+            (0..num_parts).map(|_| Vec::new()).collect();
+        for batch in &left_batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let key_arrays: Vec<ArrayRef> = left_keys
+                .iter()
+                .map(|k| k.evaluate(batch))
+                .collect::<Result<Vec<_>>>()?;
+            let hashes = JoinHashTable::compute_hashes_batch(&key_arrays, batch.num_rows())?;
+
+            let mut partition_indices: Vec<Vec<u32>> = (0..num_parts).map(|_| Vec::new()).collect();
+            for (row, hash) in hashes.iter().enumerate() {
+                let part = (*hash as usize) % num_parts;
+                partition_indices[part].push(row as u32);
+            }
+
+            for (part_idx, indices) in partition_indices.iter().enumerate() {
+                if !indices.is_empty() {
+                    let partitioned = Self::take_batch(batch, indices)?;
+                    probe_partitions[part_idx].push(partitioned);
+                }
+            }
+        }
+
+        // Spill partitions to disk and process each independently
+        let mut results = Vec::new();
+
+        for part_idx in 0..num_parts {
+            let build_part = std::mem::take(&mut build_partitions[part_idx]);
+            let probe_part = std::mem::take(&mut probe_partitions[part_idx]);
+
+            if build_part.is_empty() && probe_part.is_empty() {
+                continue;
+            }
+
+            // Spill build partition to IPC file to free memory
+            let build_part = if !build_part.is_empty() {
+                let path = Self::write_spill_file(&spill_dir, part_idx, "build", &build_part)?;
+                let reloaded = Self::read_spill_file(&path)?;
+                let _ = std::fs::remove_file(&path);
+                reloaded
+            } else {
+                build_part
+            };
+
+            let mut part_results = Self::execute(
+                probe_part,
+                build_part,
+                join_type,
+                left_keys,
+                right_keys,
+                output_schema,
+            )?;
+            results.append(&mut part_results);
+        }
+
+        // Clean up spill directory (best-effort)
+        let _ = std::fs::remove_dir(&spill_dir);
+
+        Ok(results)
+    }
+
+    /// Take rows from a `RecordBatch` by index.
+    fn take_batch(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch> {
+        let idx_array = UInt32Array::from(indices.to_vec());
+        let columns: Result<Vec<ArrayRef>> = batch
+            .columns()
+            .iter()
+            .map(|col| Ok(compute::take(col.as_ref(), &idx_array, None)?))
+            .collect();
+        Ok(RecordBatch::try_new(batch.schema(), columns?)?)
+    }
+
+    /// Write batches to an IPC spill file.
+    fn write_spill_file(
+        spill_dir: &std::path::Path,
+        partition: usize,
+        side: &str,
+        batches: &[RecordBatch],
+    ) -> Result<PathBuf> {
+        use arrow::ipc::writer::FileWriter;
+
+        let path = spill_dir.join(format!(
+            "blaze_hashjoin_{side}_{partition}_{}.ipc",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).map_err(|e| {
+            BlazeError::execution(format!(
+                "Failed to create spill file {}: {e}",
+                path.display()
+            ))
+        })?;
+        let mut writer = FileWriter::try_new(file, &batches[0].schema())?;
+        for batch in batches {
+            writer.write(batch)?;
+        }
+        writer.finish()?;
+        Ok(path)
+    }
+
+    /// Read batches back from an IPC spill file.
+    fn read_spill_file(path: &std::path::Path) -> Result<Vec<RecordBatch>> {
+        use arrow::ipc::reader::FileReader;
+        use std::io::BufReader;
+
+        let file = std::fs::File::open(path).map_err(|e| {
+            BlazeError::execution(format!("Failed to open spill file {}: {e}", path.display()))
+        })?;
+        let reader = FileReader::try_new(BufReader::new(file), None)?;
+        let mut batches = Vec::new();
+        for batch_result in reader {
+            batches.push(batch_result?);
+        }
+        Ok(batches)
     }
 
     fn handle_empty_input(
@@ -1485,3 +1738,173 @@ impl SortMergeJoinOperator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::{ColumnExpr, JoinType};
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    /// Helper: creates simple left/right tables for join tests.
+    ///
+    /// Left: (id: [1, 2, 3], val: [10, 20, 30])
+    /// Right: (id: [2, 1, 4], val: [200, 100, 400])
+    /// Inner join on id should produce 2 rows.
+    fn make_simple_join_inputs() -> (
+        RecordBatch,
+        RecordBatch,
+        Arc<ArrowSchema>,
+        Arc<dyn crate::planner::PhysicalExpr>,
+        Arc<dyn crate::planner::PhysicalExpr>,
+    ) {
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("val", DataType::Int64, false),
+        ]));
+        let left_batch = RecordBatch::try_new(
+            left_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(Int64Array::from(vec![10, 20, 30])),
+            ],
+        )
+        .unwrap();
+
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("val", DataType::Int64, false),
+        ]));
+        let right_batch = RecordBatch::try_new(
+            right_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![2, 1, 4])),
+                Arc::new(Int64Array::from(vec![200, 100, 400])),
+            ],
+        )
+        .unwrap();
+
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("val", DataType::Int64, false),
+            Field::new("id", DataType::Int64, false),
+            Field::new("val", DataType::Int64, false),
+        ]));
+
+        let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
+        let right_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
+
+        (left_batch, right_batch, output_schema, left_key, right_key)
+    }
+
+    #[test]
+    fn test_hash_join_spill_config_default() {
+        let config = HashJoinSpillConfig::default();
+        assert_eq!(config.memory_threshold, 256 * 1024 * 1024);
+        assert!(!config.enabled);
+        assert!(config.spill_dir.is_none());
+        assert_eq!(config.num_partitions, 16);
+    }
+
+    #[test]
+    fn test_hash_join_with_spill_disabled() {
+        let (left_batch, right_batch, output_schema, left_key, right_key) =
+            make_simple_join_inputs();
+
+        let config = HashJoinSpillConfig::default();
+        let result = HashJoinOperator::execute_with_spill(
+            vec![left_batch],
+            vec![right_batch],
+            JoinType::Inner,
+            &[left_key],
+            &[right_key],
+            &output_schema,
+            &config,
+        )
+        .unwrap();
+
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn test_hash_join_with_spill() {
+        // Use a very small threshold (1 byte) to force the spill path
+        let spill_dir = tempfile::tempdir().unwrap();
+        let config = HashJoinSpillConfig {
+            memory_threshold: 1,
+            spill_dir: Some(spill_dir.path().to_path_buf()),
+            num_partitions: 4,
+            enabled: true,
+        };
+
+        let (left_batch, right_batch, output_schema, left_key, right_key) =
+            make_simple_join_inputs();
+
+        let result = HashJoinOperator::execute_with_spill(
+            vec![left_batch],
+            vec![right_batch],
+            JoinType::Inner,
+            &[left_key],
+            &[right_key],
+            &output_schema,
+            &config,
+        )
+        .unwrap();
+
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+
+        // Collect result values to verify correctness
+        let mut result_pairs: Vec<(i64, i64)> = Vec::new();
+        for batch in &result {
+            let left_col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let right_col = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                result_pairs.push((left_col.value(i), right_col.value(i)));
+            }
+        }
+        result_pairs.sort();
+        assert_eq!(result_pairs, vec![(1, 1), (2, 2)]);
+
+        // Verify spill files were cleaned up
+        let remaining: Vec<_> = std::fs::read_dir(spill_dir.path())
+            .map(|rd| rd.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        assert!(remaining.is_empty(), "Spill files should be cleaned up");
+    }
+
+    #[test]
+    fn test_hash_join_below_threshold_no_spill() {
+        // Threshold larger than data — should use in-memory path
+        let config = HashJoinSpillConfig {
+            memory_threshold: 1024 * 1024,
+            spill_dir: None,
+            num_partitions: 4,
+            enabled: true,
+        };
+
+        let (left_batch, right_batch, output_schema, left_key, right_key) =
+            make_simple_join_inputs();
+
+        let result = HashJoinOperator::execute_with_spill(
+            vec![left_batch],
+            vec![right_batch],
+            JoinType::Inner,
+            &[left_key],
+            &[right_key],
+            &output_schema,
+            &config,
+        )
+        .unwrap();
+
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+}

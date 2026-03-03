@@ -715,7 +715,7 @@ pub fn read_csv_url_tvf() -> TableFunction {
             .map_err(|e| BlazeError::execution(format!("Failed to flush temp file: {}", e)))?;
 
         let table = CsvTable::open(tmp.path())?;
-        table.scan(None, &[], None)
+        table.scan(None, None)
     })
 }
 
@@ -755,7 +755,7 @@ pub fn read_parquet_url_tvf() -> TableFunction {
             .map_err(|e| BlazeError::execution(format!("Failed to flush temp file: {}", e)))?;
 
         let table = ParquetTable::open(tmp.path())?;
-        table.scan(None, &[], None)
+        table.scan(None, None)
     })
 }
 

@@ -332,12 +332,17 @@ mod tests {
         let output = format_batches(&[batch], OutputFormat::Table).unwrap();
         // Table format should contain column headers and data
         assert!(output.contains("id"), "Table should contain 'id' header");
-        assert!(output.contains("name"), "Table should contain 'name' header");
+        assert!(
+            output.contains("name"),
+            "Table should contain 'name' header"
+        );
         assert!(output.contains("Alice"), "Table should contain data");
         assert!(output.contains("Bob"), "Table should contain data");
         // Table format uses borders
-        assert!(output.contains("+") || output.contains("|"),
-            "Table should have borders or separators");
+        assert!(
+            output.contains("+") || output.contains("|"),
+            "Table should have borders or separators"
+        );
     }
 
     #[test]
@@ -359,7 +364,10 @@ mod tests {
     #[test]
     fn test_format_empty_batches() {
         let result = format_batches(&[], OutputFormat::Csv).unwrap();
-        assert!(result.is_empty(), "Empty batch list should produce empty output");
+        assert!(
+            result.is_empty(),
+            "Empty batch list should produce empty output"
+        );
 
         let result = format_batches(&[], OutputFormat::Json).unwrap();
         assert!(result.is_empty());
@@ -380,16 +388,25 @@ mod tests {
     #[test]
     fn test_format_parsing_aliases() {
         assert_eq!(OutputFormat::from_str("jsonl").unwrap(), OutputFormat::Json);
-        assert_eq!(OutputFormat::from_str("ndjson").unwrap(), OutputFormat::Json);
+        assert_eq!(
+            OutputFormat::from_str("ndjson").unwrap(),
+            OutputFormat::Json
+        );
         assert_eq!(OutputFormat::from_str("ipc").unwrap(), OutputFormat::Arrow);
     }
 
     #[test]
     fn test_format_parsing_case_insensitive() {
-        assert_eq!(OutputFormat::from_str("TABLE").unwrap(), OutputFormat::Table);
+        assert_eq!(
+            OutputFormat::from_str("TABLE").unwrap(),
+            OutputFormat::Table
+        );
         assert_eq!(OutputFormat::from_str("Csv").unwrap(), OutputFormat::Csv);
         assert_eq!(OutputFormat::from_str("JSON").unwrap(), OutputFormat::Json);
-        assert_eq!(OutputFormat::from_str("ARROW").unwrap(), OutputFormat::Arrow);
+        assert_eq!(
+            OutputFormat::from_str("ARROW").unwrap(),
+            OutputFormat::Arrow
+        );
     }
 
     #[test]
@@ -415,6 +432,10 @@ mod tests {
         let output = format_batches(&[batch1, batch2], OutputFormat::Csv).unwrap();
         // Should contain header only once + 6 data rows
         let lines: Vec<&str> = output.lines().collect();
-        assert!(lines.len() >= 7, "Should have header + 6 data rows, got {}", lines.len());
+        assert!(
+            lines.len() >= 7,
+            "Should have header + 6 data rows, got {}",
+            lines.len()
+        );
     }
 }

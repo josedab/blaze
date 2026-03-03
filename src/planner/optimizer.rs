@@ -1976,9 +1976,13 @@ mod tests {
     #[test]
     fn test_constant_folding_string_concat() {
         let expr = LogicalExpr::BinaryExpr {
-            left: Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some("hello".to_string())))),
+            left: Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some(
+                "hello".to_string(),
+            )))),
             op: BinaryOp::Concat,
-            right: Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some(" world".to_string())))),
+            right: Box::new(LogicalExpr::Literal(ScalarValue::Utf8(Some(
+                " world".to_string(),
+            )))),
         };
         let rule = ConstantFolding;
         let folded = rule.fold_expr(&expr);

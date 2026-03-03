@@ -587,11 +587,32 @@ impl PhysicalPlanner {
                 Ok(Arc::new(BetweenExpr::new(expr_phys, low_phys, high_phys, *negated)))
             }
 
-            LogicalExpr::Like { negated, expr, pattern, escape: _ } => {
+            LogicalExpr::Like { negated, expr, pattern, escape, case_insensitive } => {
                 let expr_phys = self.create_physical_expr(expr, schema)?;
                 let pattern_phys = self.create_physical_expr(pattern, schema)?;
-                // TODO: Handle escape character and case sensitivity
-                Ok(Arc::new(LikeExpr::new(expr_phys, pattern_phys, *negated, false)))
+
+                if let Some(escape_expr) = escape {
+                    // Extract escape character from the literal expression
+                    if let LogicalExpr::Literal(ScalarValue::Utf8(Some(escape_str))) = escape_expr.as_ref() {
+                        let escape_char = escape_str.chars().next().ok_or_else(|| {
+                            BlazeError::analysis("ESCAPE character must be a single character")
+                        })?;
+                        if escape_str.len() != escape_char.len_utf8() {
+                            return Err(BlazeError::analysis(
+                                "ESCAPE character must be a single character",
+                            ));
+                        }
+                        Ok(Arc::new(LikeExpr::with_escape(
+                            expr_phys, pattern_phys, *negated, *case_insensitive, escape_char,
+                        )))
+                    } else {
+                        Err(BlazeError::not_implemented(
+                            "LIKE ESCAPE requires a string literal escape character",
+                        ))
+                    }
+                } else {
+                    Ok(Arc::new(LikeExpr::new(expr_phys, pattern_phys, *negated, *case_insensitive)))
+                }
             }
 
             LogicalExpr::InList { expr, list, negated } => {
@@ -610,7 +631,9 @@ impl PhysicalPlanner {
             }
 
             LogicalExpr::Window(_) => {
-                Err(BlazeError::not_implemented("Window expression in physical plan"))
+                Err(BlazeError::not_implemented(
+                    "Window expressions must be used in a window function context (e.g., ROW_NUMBER() OVER ...), not as standalone expressions."
+                ))
             }
 
             LogicalExpr::ScalarSubquery(subquery_plan) => {
@@ -1380,6 +1403,7 @@ mod tests {
                 "A%".to_string(),
             )))),
             escape: None,
+            case_insensitive: false,
         };
         let physical = planner.create_physical_expr(&expr, &schema).unwrap();
 

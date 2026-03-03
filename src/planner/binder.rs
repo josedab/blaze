@@ -176,10 +176,14 @@ impl Binder {
         let file_path = match copy.target {
             sql::parser::CopyTarget::File(filename) => filename,
             sql::parser::CopyTarget::Stdout => {
-                return Err(BlazeError::not_implemented("COPY TO/FROM STDOUT not supported"))
+                return Err(BlazeError::not_implemented(
+                    "COPY TO/FROM STDOUT is not supported. Use file paths instead: COPY ... TO 'file.csv'"
+                ))
             }
             sql::parser::CopyTarget::Stdin => {
-                return Err(BlazeError::not_implemented("COPY TO/FROM STDIN not supported"))
+                return Err(BlazeError::not_implemented(
+                    "COPY TO/FROM STDIN is not supported. Use file paths instead: COPY ... FROM 'file.csv'"
+                ))
             }
         };
 
@@ -214,11 +218,7 @@ impl Binder {
 
         if copy.direction == sql::parser::CopyDirection::From {
             // COPY FROM: import data from file into table
-            let table_name = copy
-                .table_name
-                .last()
-                .cloned()
-                .unwrap_or_default();
+            let table_name = copy.table_name.last().cloned().unwrap_or_default();
 
             return Ok(LogicalPlan::CopyFrom {
                 table_name,
@@ -680,7 +680,9 @@ impl Binder {
                     if let Some(schema_provider) = catalog.schema(&resolved.schema) {
                         if let Some(table_provider) = schema_provider.table(&resolved.table) {
                             if table_provider.table_type() == TableType::View {
-                                if let Some(view) = table_provider.as_any().downcast_ref::<ViewTable>() {
+                                if let Some(view) =
+                                    table_provider.as_any().downcast_ref::<ViewTable>()
+                                {
                                     let view_sql = view.view_sql();
                                     // Parse the CREATE VIEW SQL to extract the query
                                     let view_query_sql = Self::extract_view_query(view_sql)?;
@@ -690,7 +692,11 @@ impl Binder {
                                     })?;
                                     let view_plan = match query_stmt {
                                         Statement::Query(q) => self.bind_query(*q, ctx)?,
-                                        _ => return Err(BlazeError::internal("View SQL is not a query")),
+                                        _ => {
+                                            return Err(BlazeError::internal(
+                                                "View SQL is not a query",
+                                            ))
+                                        }
                                     };
                                     let view_alias = alias
                                         .as_ref()
@@ -1022,6 +1028,7 @@ impl Binder {
                 pattern,
                 escape,
                 negated,
+                case_insensitive,
             } => {
                 let bound_expr = self.bind_expr(*expr, ctx)?;
                 let bound_pattern = self.bind_expr(*pattern, ctx)?;
@@ -1032,6 +1039,7 @@ impl Binder {
                     expr: Box::new(bound_expr),
                     pattern: Box::new(bound_pattern),
                     escape: bound_escape.map(Box::new),
+                    case_insensitive,
                 })
             }
             sql::parser::Expr::Subquery(query) => {
@@ -1091,8 +1099,37 @@ impl Binder {
                     frame: bound_frame,
                 })))
             }
-            sql::parser::Expr::Array(_) | sql::parser::Expr::Tuple(_) => {
-                Err(BlazeError::not_implemented("Array and Tuple expressions"))
+            sql::parser::Expr::Array(elements) => {
+                if elements.is_empty() {
+                    return Ok(LogicalExpr::Literal(ScalarValue::Utf8(Some(
+                        "[]".to_string(),
+                    ))));
+                }
+                let mut values = Vec::new();
+                for elem in elements {
+                    let bound = self.bind_expr(elem, ctx)?;
+                    values.push(bound);
+                }
+                Ok(LogicalExpr::ScalarFunction {
+                    name: "ARRAY".to_string(),
+                    args: values,
+                })
+            }
+            sql::parser::Expr::Tuple(elements) => {
+                if elements.is_empty() {
+                    return Ok(LogicalExpr::Literal(ScalarValue::Utf8(Some(
+                        "()".to_string(),
+                    ))));
+                }
+                let mut values = Vec::new();
+                for elem in elements {
+                    let bound = self.bind_expr(elem, ctx)?;
+                    values.push(bound);
+                }
+                Ok(LogicalExpr::ScalarFunction {
+                    name: "TUPLE".to_string(),
+                    args: values,
+                })
             }
         }
     }
@@ -1155,7 +1192,9 @@ impl Binder {
             sql::parser::Literal::Float(f) => Ok(ScalarValue::Float64(Some(f))),
             sql::parser::Literal::String(s) => Ok(ScalarValue::Utf8(Some(s))),
             sql::parser::Literal::Interval { .. } => {
-                Err(BlazeError::not_implemented("Interval literals"))
+                Err(BlazeError::not_implemented(
+                    "Interval literals are not yet supported. Use integer arithmetic on dates/timestamps instead."
+                ))
             }
         }
     }
@@ -1858,8 +1897,7 @@ mod tests {
                 ("name", crate::types::DataType::Utf8),
             ],
         );
-        let stmt =
-            sql::parser::Parser::parse_one("INSERT INTO users VALUES (1, 'Alice')").unwrap();
+        let stmt = sql::parser::Parser::parse_one("INSERT INTO users VALUES (1, 'Alice')").unwrap();
         let plan = binder.bind(stmt).unwrap();
         assert!(matches!(plan, LogicalPlan::Insert { .. }));
         if let LogicalPlan::Insert { table_ref, .. } = &plan {
@@ -1871,8 +1909,7 @@ mod tests {
     fn test_bind_insert_into_nonexistent_table() {
         // INSERT should still bind (table resolution happens at execution), but we can verify it creates the plan
         let binder = create_binder();
-        let stmt =
-            sql::parser::Parser::parse_one("INSERT INTO no_table VALUES (1, 'x')").unwrap();
+        let stmt = sql::parser::Parser::parse_one("INSERT INTO no_table VALUES (1, 'x')").unwrap();
         let plan = binder.bind(stmt).unwrap();
         assert!(matches!(plan, LogicalPlan::Insert { .. }));
     }
@@ -1906,10 +1943,7 @@ mod tests {
 
     #[test]
     fn test_bind_update_no_where() {
-        let binder = create_binder_with_table(
-            "users",
-            vec![("id", crate::types::DataType::Int64)],
-        );
+        let binder = create_binder_with_table("users", vec![("id", crate::types::DataType::Int64)]);
         let stmt = sql::parser::Parser::parse_one("UPDATE users SET id = 0").unwrap();
         let plan = binder.bind(stmt).unwrap();
         if let LogicalPlan::Update { predicate, .. } = &plan {
@@ -1921,10 +1955,7 @@ mod tests {
 
     #[test]
     fn test_bind_delete() {
-        let binder = create_binder_with_table(
-            "users",
-            vec![("id", crate::types::DataType::Int64)],
-        );
+        let binder = create_binder_with_table("users", vec![("id", crate::types::DataType::Int64)]);
         let stmt = sql::parser::Parser::parse_one("DELETE FROM users WHERE id = 1").unwrap();
         let plan = binder.bind(stmt).unwrap();
         assert!(matches!(plan, LogicalPlan::Delete { .. }));
@@ -1941,10 +1972,7 @@ mod tests {
 
     #[test]
     fn test_bind_delete_no_where() {
-        let binder = create_binder_with_table(
-            "users",
-            vec![("id", crate::types::DataType::Int64)],
-        );
+        let binder = create_binder_with_table("users", vec![("id", crate::types::DataType::Int64)]);
         let stmt = sql::parser::Parser::parse_one("DELETE FROM users").unwrap();
         let plan = binder.bind(stmt).unwrap();
         if let LogicalPlan::Delete { predicate, .. } = &plan {
@@ -1956,12 +1984,8 @@ mod tests {
 
     #[test]
     fn test_bind_copy_to_csv() {
-        let binder = create_binder_with_table(
-            "users",
-            vec![("id", crate::types::DataType::Int64)],
-        );
-        let stmt =
-            sql::parser::Parser::parse_one("COPY users TO '/tmp/out.csv'").unwrap();
+        let binder = create_binder_with_table("users", vec![("id", crate::types::DataType::Int64)]);
+        let stmt = sql::parser::Parser::parse_one("COPY users TO '/tmp/out.csv'").unwrap();
         let plan = binder.bind(stmt).unwrap();
         assert!(matches!(plan, LogicalPlan::Copy { .. }));
         if let LogicalPlan::Copy { target, .. } = &plan {
@@ -1971,12 +1995,8 @@ mod tests {
 
     #[test]
     fn test_bind_copy_to_parquet_extension() {
-        let binder = create_binder_with_table(
-            "data",
-            vec![("x", crate::types::DataType::Int64)],
-        );
-        let stmt =
-            sql::parser::Parser::parse_one("COPY data TO '/tmp/out.parquet'").unwrap();
+        let binder = create_binder_with_table("data", vec![("x", crate::types::DataType::Int64)]);
+        let stmt = sql::parser::Parser::parse_one("COPY data TO '/tmp/out.parquet'").unwrap();
         let plan = binder.bind(stmt).unwrap();
         assert!(matches!(plan, LogicalPlan::Copy { .. }));
     }
@@ -1984,8 +2004,7 @@ mod tests {
     #[test]
     fn test_bind_copy_nonexistent_table() {
         let binder = create_binder();
-        let stmt =
-            sql::parser::Parser::parse_one("COPY no_table TO '/tmp/out.csv'").unwrap();
+        let stmt = sql::parser::Parser::parse_one("COPY no_table TO '/tmp/out.csv'").unwrap();
         let err = binder.bind(stmt).unwrap_err();
         assert!(err.to_string().contains("not found"));
     }

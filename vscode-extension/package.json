@@ -1,0 +1,55 @@
+{
+  "name": "blaze-sql",
+  "displayName": "Blaze SQL",
+  "description": "SQL language support for the Blaze query engine",
+  "version": "0.1.0",
+  "publisher": "blaze-db",
+  "repository": "https://github.com/blaze-db/blaze",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Programming Languages", "Linters", "Formatters"],
+  "activationEvents": ["onLanguage:sql", "onLanguage:blaze-sql"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [{
+      "id": "blaze-sql",
+      "aliases": ["Blaze SQL", "SQL"],
+      "extensions": [".sql", ".bsql"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "blaze-sql",
+      "scopeName": "source.sql.blaze",
+      "path": "./syntaxes/blaze-sql.tmLanguage.json"
+    }],
+    "configuration": {
+      "type": "object",
+      "title": "Blaze SQL",
+      "properties": {
+        "blaze-sql.serverPath": {
+          "type": "string",
+          "default": "blaze",
+          "description": "Path to the Blaze binary for the LSP server"
+        },
+        "blaze-sql.serverArgs": {
+          "type": "array",
+          "default": ["--lsp"],
+          "description": "Arguments to pass to the Blaze LSP server"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}

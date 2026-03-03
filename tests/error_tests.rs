@@ -204,7 +204,10 @@ fn test_where_type_mismatch() {
         Ok(batches) => {
             // Implicit casting may produce zero results
             let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            assert_eq!(total_rows, 0, "Type mismatch comparison should yield no rows");
+            assert_eq!(
+                total_rows, 0,
+                "Type mismatch comparison should yield no rows"
+            );
         }
     }
 }

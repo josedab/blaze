@@ -69,8 +69,10 @@ impl JoinOrderOptimizer {
                 schema,
             } => {
                 // First, recursively optimize children
-                let optimized_left = self.optimize_plan(left, cost_model, estimator, stats_manager)?;
-                let optimized_right = self.optimize_plan(right, cost_model, estimator, stats_manager)?;
+                let optimized_left =
+                    self.optimize_plan(left, cost_model, estimator, stats_manager)?;
+                let optimized_right =
+                    self.optimize_plan(right, cost_model, estimator, stats_manager)?;
 
                 // Extract all base relations and join conditions
                 let mut relations = Vec::new();
@@ -88,11 +90,25 @@ impl JoinOrderOptimizer {
 
                 // If we have multiple relations, optimize join order
                 if relations.len() > 2 && relations.len() <= self.max_relations_exhaustive {
-                    self.optimize_join_order(relations, join_conditions, schema.clone(), cost_model, estimator, stats_manager)
+                    self.optimize_join_order(
+                        relations,
+                        join_conditions,
+                        schema.clone(),
+                        cost_model,
+                        estimator,
+                        stats_manager,
+                    )
                 } else if relations.len() > self.max_relations_exhaustive
                     && self.use_greedy_fallback
                 {
-                    self.greedy_join_order(relations, join_conditions, schema.clone(), cost_model, estimator, stats_manager)
+                    self.greedy_join_order(
+                        relations,
+                        join_conditions,
+                        schema.clone(),
+                        cost_model,
+                        estimator,
+                        stats_manager,
+                    )
                 } else {
                     // Keep original order
                     Ok(LogicalPlan::Join {
@@ -106,7 +122,8 @@ impl JoinOrderOptimizer {
                 }
             }
             LogicalPlan::Filter { input, predicate } => {
-                let optimized_input = self.optimize_plan(input, cost_model, estimator, stats_manager)?;
+                let optimized_input =
+                    self.optimize_plan(input, cost_model, estimator, stats_manager)?;
                 Ok(LogicalPlan::Filter {
                     input: Arc::new(optimized_input),
                     predicate: predicate.clone(),
@@ -117,7 +134,8 @@ impl JoinOrderOptimizer {
                 exprs,
                 schema,
             } => {
-                let optimized_input = self.optimize_plan(input, cost_model, estimator, stats_manager)?;
+                let optimized_input =
+                    self.optimize_plan(input, cost_model, estimator, stats_manager)?;
                 Ok(LogicalPlan::Projection {
                     input: Arc::new(optimized_input),
                     exprs: exprs.clone(),
@@ -130,7 +148,8 @@ impl JoinOrderOptimizer {
                 aggr_exprs,
                 schema,
             } => {
-                let optimized_input = self.optimize_plan(input, cost_model, estimator, stats_manager)?;
+                let optimized_input =
+                    self.optimize_plan(input, cost_model, estimator, stats_manager)?;
                 Ok(LogicalPlan::Aggregate {
                     input: Arc::new(optimized_input),
                     group_by: group_by.clone(),
@@ -139,14 +158,16 @@ impl JoinOrderOptimizer {
                 })
             }
             LogicalPlan::Sort { input, exprs } => {
-                let optimized_input = self.optimize_plan(input, cost_model, estimator, stats_manager)?;
+                let optimized_input =
+                    self.optimize_plan(input, cost_model, estimator, stats_manager)?;
                 Ok(LogicalPlan::Sort {
                     input: Arc::new(optimized_input),
                     exprs: exprs.clone(),
                 })
             }
             LogicalPlan::Limit { input, skip, fetch } => {
-                let optimized_input = self.optimize_plan(input, cost_model, estimator, stats_manager)?;
+                let optimized_input =
+                    self.optimize_plan(input, cost_model, estimator, stats_manager)?;
                 Ok(LogicalPlan::Limit {
                     input: Arc::new(optimized_input),
                     skip: *skip,
@@ -158,7 +179,8 @@ impl JoinOrderOptimizer {
                 alias,
                 schema,
             } => {
-                let optimized_input = self.optimize_plan(input, cost_model, estimator, stats_manager)?;
+                let optimized_input =
+                    self.optimize_plan(input, cost_model, estimator, stats_manager)?;
                 Ok(LogicalPlan::SubqueryAlias {
                     input: Arc::new(optimized_input),
                     alias: alias.clone(),
@@ -429,7 +451,11 @@ impl JoinOrderOptimizer {
                         (Some(est), Some(sm)) => est.estimate_plan(rel, sm).unwrap_or(1000),
                         _ => 1000,
                     };
-                    let cost = cost_model.hash_join_cost(result_card, rel_card, result_card * rel_card / result_card.max(rel_card).max(1));
+                    let cost = cost_model.hash_join_cost(
+                        result_card,
+                        rel_card,
+                        result_card * rel_card / result_card.max(rel_card).max(1),
+                    );
                     if cost.total() < best_cost {
                         best_cost = cost.total();
                         best_idx = i;
@@ -906,7 +932,8 @@ mod tests {
 
         let schema = Schema::new(vec![Field::new("id", DataType::Int32, false)]);
 
-        let result = optimizer.greedy_join_order(relations, conditions, schema, &cost_model, None, None);
+        let result =
+            optimizer.greedy_join_order(relations, conditions, schema, &cost_model, None, None);
         assert!(result.is_ok());
 
         // Result should be a join

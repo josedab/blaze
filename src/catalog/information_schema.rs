@@ -57,12 +57,7 @@ impl TableProvider for InformationSchemaTables {
         TableType::View
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         let mut catalogs = Vec::new();
         let mut schemas = Vec::new();
         let mut names = Vec::new();
@@ -112,9 +107,9 @@ impl TableProvider for InformationSchemaTables {
         .map_err(|e| crate::error::BlazeError::execution(e.to_string()))?;
 
         let batch = if let Some(indices) = projection {
-            batch.project(indices).map_err(|e| {
-                crate::error::BlazeError::execution(e.to_string())
-            })?
+            batch
+                .project(indices)
+                .map_err(|e| crate::error::BlazeError::execution(e.to_string()))?
         } else {
             batch
         };
@@ -161,12 +156,7 @@ impl TableProvider for InformationSchemaColumns {
         TableType::View
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         let mut catalogs = Vec::new();
         let mut schemas = Vec::new();
         let mut table_names = Vec::new();
@@ -234,9 +224,9 @@ impl TableProvider for InformationSchemaColumns {
         .map_err(|e| crate::error::BlazeError::execution(e.to_string()))?;
 
         let batch = if let Some(indices) = projection {
-            batch.project(indices).map_err(|e| {
-                crate::error::BlazeError::execution(e.to_string())
-            })?
+            batch
+                .project(indices)
+                .map_err(|e| crate::error::BlazeError::execution(e.to_string()))?
         } else {
             batch
         };

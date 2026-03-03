@@ -649,7 +649,10 @@ impl CodegenBackend {
                             stack.push(Arc::new(result) as ArrayRef);
                         }
                         _ => {
-                            return Err(BlazeError::not_implemented(format!("IR op: {:?}", op)));
+                            return Err(BlazeError::not_implemented(format!(
+                                "JIT compilation for IR operation {:?} is not supported. Falling back to interpreted execution.",
+                                op
+                            )));
                         }
                     }
                 }

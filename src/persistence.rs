@@ -142,8 +142,6 @@ impl WalEncryption {
     }
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Write-Ahead Log
 // ---------------------------------------------------------------------------
@@ -539,21 +537,20 @@ impl WriteAheadLog {
 
                 let assignments = data["assignments"]
                     .as_array()
-                    .ok_or_else(|| {
-                        BlazeError::execution("Missing 'assignments' in UPDATE_ROWS")
-                    })?
+                    .ok_or_else(|| BlazeError::execution("Missing 'assignments' in UPDATE_ROWS"))?
                     .iter()
                     .filter_map(|v| {
                         let arr = v.as_array()?;
-                        Some((arr.first()?.as_str()?.to_string(), arr.get(1)?.as_str()?.to_string()))
+                        Some((
+                            arr.first()?.as_str()?.to_string(),
+                            arr.get(1)?.as_str()?.to_string(),
+                        ))
                     })
                     .collect();
 
-                let rows_affected = data["rows_affected"]
-                    .as_u64()
-                    .ok_or_else(|| {
-                        BlazeError::execution("Missing 'rows_affected' in UPDATE_ROWS")
-                    })? as usize;
+                let rows_affected = data["rows_affected"].as_u64().ok_or_else(|| {
+                    BlazeError::execution("Missing 'rows_affected' in UPDATE_ROWS")
+                })? as usize;
 
                 WalEntry::UpdateRows {
                     table,
@@ -574,11 +571,9 @@ impl WriteAheadLog {
 
                 let predicate = data["predicate"].as_str().map(|s| s.to_string());
 
-                let rows_affected = data["rows_affected"]
-                    .as_u64()
-                    .ok_or_else(|| {
-                        BlazeError::execution("Missing 'rows_affected' in DELETE_ROWS")
-                    })? as usize;
+                let rows_affected = data["rows_affected"].as_u64().ok_or_else(|| {
+                    BlazeError::execution("Missing 'rows_affected' in DELETE_ROWS")
+                })? as usize;
 
                 WalEntry::DeleteRows {
                     table,
@@ -929,8 +924,11 @@ impl CompressionCodec {
                 // Treat input as length-prefixed values (4-byte LE length + bytes)
                 let mut cursor = 0;
                 while cursor + 4 <= data.len() {
-                    let val_len =
-                        u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for u32"))?) as usize;
+                    let val_len = u32::from_le_bytes(
+                        data[cursor..cursor + 4]
+                            .try_into()
+                            .map_err(|_| BlazeError::execution("Invalid slice length for u32"))?,
+                    ) as usize;
                     cursor += 4;
                     if cursor + val_len > data.len() {
                         break;
@@ -987,12 +985,20 @@ impl CompressionCodec {
                 let mut out = Vec::new();
                 let num_values = data.len() / 4;
                 // Write first value as-is
-                let first = i32::from_le_bytes(data[0..4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for i32"))?);
+                let first = i32::from_le_bytes(
+                    data[0..4]
+                        .try_into()
+                        .map_err(|_| BlazeError::execution("Invalid slice length for i32"))?,
+                );
                 out.extend_from_slice(&first.to_le_bytes());
                 let mut prev = first;
                 for i in 1..num_values {
                     let offset = i * 4;
-                    let val = i32::from_le_bytes(data[offset..offset + 4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for i32"))?);
+                    let val = i32::from_le_bytes(
+                        data[offset..offset + 4]
+                            .try_into()
+                            .map_err(|_| BlazeError::execution("Invalid slice length for i32"))?,
+                    );
                     let delta = val.wrapping_sub(prev);
                     out.extend_from_slice(&delta.to_le_bytes());
                     prev = val;
@@ -1018,15 +1024,22 @@ impl CompressionCodec {
                 if data.len() < 4 {
                     return Err(BlazeError::execution("Invalid dictionary compressed data"));
                 }
-                let num_entries = u32::from_le_bytes(data[0..4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for u32"))?) as usize;
+                let num_entries = u32::from_le_bytes(
+                    data[0..4]
+                        .try_into()
+                        .map_err(|_| BlazeError::execution("Invalid slice length for u32"))?,
+                ) as usize;
                 let mut cursor = 4;
                 let mut dict: Vec<Vec<u8>> = Vec::with_capacity(num_entries);
                 for _ in 0..num_entries {
                     if cursor + 4 > data.len() {
                         return Err(BlazeError::execution("Truncated dictionary data"));
                     }
-                    let entry_len =
-                        u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for u32"))?) as usize;
+                    let entry_len = u32::from_le_bytes(
+                        data[cursor..cursor + 4]
+                            .try_into()
+                            .map_err(|_| BlazeError::execution("Invalid slice length for u32"))?,
+                    ) as usize;
                     cursor += 4;
                     if cursor + entry_len > data.len() {
                         return Err(BlazeError::execution("Truncated dictionary entry"));
@@ -1036,8 +1049,11 @@ impl CompressionCodec {
                 }
                 let mut out = Vec::with_capacity(uncompressed_size);
                 while cursor + 4 <= data.len() {
-                    let idx =
-                        u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for u32"))?) as usize;
+                    let idx = u32::from_le_bytes(
+                        data[cursor..cursor + 4]
+                            .try_into()
+                            .map_err(|_| BlazeError::execution("Invalid slice length for u32"))?,
+                    ) as usize;
                     cursor += 4;
                     if idx >= dict.len() {
                         return Err(BlazeError::execution("Invalid dictionary index"));
@@ -1056,8 +1072,11 @@ impl CompressionCodec {
                 while cursor + 5 <= data.len() {
                     let value = data[cursor];
                     cursor += 1;
-                    let count =
-                        u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for u32"))?) as usize;
+                    let count = u32::from_le_bytes(
+                        data[cursor..cursor + 4]
+                            .try_into()
+                            .map_err(|_| BlazeError::execution("Invalid slice length for u32"))?,
+                    ) as usize;
                     cursor += 4;
                     out.extend(std::iter::repeat_n(value, count));
                 }
@@ -1069,12 +1088,20 @@ impl CompressionCodec {
                 }
                 let mut out = Vec::with_capacity(uncompressed_size);
                 let num_values = data.len() / 4;
-                let first = i32::from_le_bytes(data[0..4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for i32"))?);
+                let first = i32::from_le_bytes(
+                    data[0..4]
+                        .try_into()
+                        .map_err(|_| BlazeError::execution("Invalid slice length for i32"))?,
+                );
                 out.extend_from_slice(&first.to_le_bytes());
                 let mut prev = first;
                 for i in 1..num_values {
                     let offset = i * 4;
-                    let delta = i32::from_le_bytes(data[offset..offset + 4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for i32"))?);
+                    let delta = i32::from_le_bytes(
+                        data[offset..offset + 4]
+                            .try_into()
+                            .map_err(|_| BlazeError::execution("Invalid slice length for i32"))?,
+                    );
                     let val = prev.wrapping_add(delta);
                     out.extend_from_slice(&val.to_le_bytes());
                     prev = val;
@@ -1085,7 +1112,11 @@ impl CompressionCodec {
                 if data.len() < 4 {
                     return Err(BlazeError::execution("Invalid snappy compressed data"));
                 }
-                let original_len = u32::from_le_bytes(data[0..4].try_into().map_err(|_| BlazeError::execution("Invalid slice length for u32"))?) as usize;
+                let original_len = u32::from_le_bytes(
+                    data[0..4]
+                        .try_into()
+                        .map_err(|_| BlazeError::execution("Invalid slice length for u32"))?,
+                ) as usize;
                 if data.len() < 4 + original_len {
                     return Err(BlazeError::execution("Truncated snappy data"));
                 }
@@ -1661,7 +1692,9 @@ impl IndexManager {
         }
         let idx = BTreeIndex::new(column);
         self.indexes.insert(key.clone(), idx);
-        self.indexes.get_mut(&key).ok_or_else(|| BlazeError::execution("Index unexpectedly missing after insert"))
+        self.indexes
+            .get_mut(&key)
+            .ok_or_else(|| BlazeError::execution("Index unexpectedly missing after insert"))
     }
 
     /// Drop the index on `table_name.column_name`.
@@ -2708,17 +2741,41 @@ impl DatabaseFileHeader {
                 "Invalid database file: bad magic bytes",
             ));
         }
-        let version = u32::from_le_bytes(data[4..8].try_into().map_err(|_| BlazeError::execution("Invalid header slice for version"))?);
+        let version = u32::from_le_bytes(
+            data[4..8]
+                .try_into()
+                .map_err(|_| BlazeError::execution("Invalid header slice for version"))?,
+        );
         if version > BLAZE_DB_FORMAT_VERSION {
             return Err(BlazeError::execution(format!(
                 "Unsupported format version {version} (max supported: {BLAZE_DB_FORMAT_VERSION})"
             )));
         }
-        let page_size = u32::from_le_bytes(data[8..12].try_into().map_err(|_| BlazeError::execution("Invalid header slice for page_size"))?);
-        let page_count = u64::from_le_bytes(data[12..20].try_into().map_err(|_| BlazeError::execution("Invalid header slice for page_count"))?);
-        let flushed_lsn = u64::from_le_bytes(data[20..28].try_into().map_err(|_| BlazeError::execution("Invalid header slice for flushed_lsn"))?);
-        let created_at = u64::from_le_bytes(data[28..36].try_into().map_err(|_| BlazeError::execution("Invalid header slice for created_at"))?);
-        let flags = u32::from_le_bytes(data[36..40].try_into().map_err(|_| BlazeError::execution("Invalid header slice for flags"))?);
+        let page_size = u32::from_le_bytes(
+            data[8..12]
+                .try_into()
+                .map_err(|_| BlazeError::execution("Invalid header slice for page_size"))?,
+        );
+        let page_count = u64::from_le_bytes(
+            data[12..20]
+                .try_into()
+                .map_err(|_| BlazeError::execution("Invalid header slice for page_count"))?,
+        );
+        let flushed_lsn = u64::from_le_bytes(
+            data[20..28]
+                .try_into()
+                .map_err(|_| BlazeError::execution("Invalid header slice for flushed_lsn"))?,
+        );
+        let created_at = u64::from_le_bytes(
+            data[28..36]
+                .try_into()
+                .map_err(|_| BlazeError::execution("Invalid header slice for created_at"))?,
+        );
+        let flags = u32::from_le_bytes(
+            data[36..40]
+                .try_into()
+                .map_err(|_| BlazeError::execution("Invalid header slice for flags"))?,
+        );
         Ok(Self {
             magic,
             version,
@@ -3115,8 +3172,7 @@ impl MvccManager {
 
     /// Get the current low watermark
     pub fn low_watermark(&self) -> TxnId {
-        self.low_watermark
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.low_watermark.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Get active transaction count
@@ -3134,10 +3190,7 @@ impl MvccManager {
             .filter(|(_, s)| **s == TxnState::Active)
             .map(|(id, _)| *id)
             .min()
-            .unwrap_or(
-                self.next_txn_id
-                    .load(std::sync::atomic::Ordering::SeqCst),
-            );
+            .unwrap_or(self.next_txn_id.load(std::sync::atomic::Ordering::SeqCst));
         self.low_watermark
             .store(min_active, std::sync::atomic::Ordering::SeqCst);
     }

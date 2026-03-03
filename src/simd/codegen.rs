@@ -404,7 +404,10 @@ impl CodeGenerator {
             VectorOp::Xor => OpCode::Xor,
             VectorOp::Min => OpCode::Min,
             VectorOp::Max => OpCode::Max,
-            _ => return Err(BlazeError::not_implemented(format!("Op {:?}", op))),
+            _ => return Err(BlazeError::not_implemented(format!(
+                "SIMD codegen for operation {:?} is not supported. Supported: Add, Sub, Mul, Div, And, Or, Xor, Min, Max.",
+                op
+            ))),
         };
 
         code.add_instruction(
@@ -644,7 +647,10 @@ impl CodeGenerator {
             VectorOp::Eq => Ok(OpCode::CmpEq),
             VectorOp::Lt => Ok(OpCode::CmpLt),
             VectorOp::Gt => Ok(OpCode::CmpGt),
-            _ => Err(BlazeError::not_implemented(format!("Op {:?}", op))),
+            _ => Err(BlazeError::not_implemented(format!(
+                "SIMD codegen for comparison operation {:?} is not supported. Supported: Eq, Lt, Gt, Add, Sub, Mul, Div, And, Or, Xor, Min, Max.",
+                op
+            ))),
         }
     }
 }

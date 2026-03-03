@@ -504,9 +504,7 @@ impl WasmConnection {
 
     /// Save a table to IndexedDB persistence.
     pub fn persist_table(&self, table_name: &str) -> Result<()> {
-        let batches = self
-            .inner
-            .query(&format!("SELECT * FROM {}", table_name))?;
+        let batches = self.inner.query(&format!("SELECT * FROM {}", table_name))?;
         let data = serialization::ArrowIpcSerializer::serialize(&batches)?;
         let store = indexeddb::IndexedDbStore::new(indexeddb::IndexedDbConfig::default());
         let now = std::time::SystemTime::now()
@@ -592,8 +590,7 @@ pub struct WasmPreparedStatement {
 impl WasmPreparedStatement {
     /// Execute the prepared statement with the given parameters.
     pub fn execute(&self, params: Vec<WasmParam>) -> Result<WasmQueryResult> {
-        let scalar_params: Vec<ScalarValue> =
-            params.into_iter().map(|p| p.into_scalar()).collect();
+        let scalar_params: Vec<ScalarValue> = params.into_iter().map(|p| p.into_scalar()).collect();
         let batches = self.inner.execute(&scalar_params)?;
 
         let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -605,8 +602,7 @@ impl WasmPreparedStatement {
         let json = JsonSerializer::serialize(&batches, false)?;
         let data = json.into_bytes();
 
-        let mut result =
-            WasmQueryResult::new(data, ResultFormat::Json, row_count, column_count);
+        let mut result = WasmQueryResult::new(data, ResultFormat::Json, row_count, column_count);
         if let Some(s) = schema {
             result = result.with_schema(s);
         }
@@ -695,23 +691,16 @@ impl WasmStreamingResult {
         }
 
         let row_count: usize = chunk_batches.iter().map(|b| b.num_rows()).sum();
-        let col_count = chunk_batches
-            .first()
-            .map(|b| b.num_columns())
-            .unwrap_or(0);
+        let col_count = chunk_batches.first().map(|b| b.num_columns()).unwrap_or(0);
 
         let data = match self.format {
             ResultFormat::Json => {
-                let json =
-                    serialization::JsonSerializer::serialize(&chunk_batches, false)?;
+                let json = serialization::JsonSerializer::serialize(&chunk_batches, false)?;
                 json.into_bytes()
             }
-            ResultFormat::ArrowIpc => {
-                serialization::ArrowIpcSerializer::serialize(&chunk_batches)?
-            }
+            ResultFormat::ArrowIpc => serialization::ArrowIpcSerializer::serialize(&chunk_batches)?,
             _ => {
-                let json =
-                    serialization::JsonSerializer::serialize(&chunk_batches, false)?;
+                let json = serialization::JsonSerializer::serialize(&chunk_batches, false)?;
                 json.into_bytes()
             }
         };
@@ -837,8 +826,11 @@ mod tests {
         let conn = WasmConnection::new().unwrap();
         conn.execute("CREATE TABLE s (id INT, name VARCHAR)")
             .unwrap();
-        conn.load_json("s", r#"[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]"#)
-            .unwrap();
+        conn.load_json(
+            "s",
+            r#"[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]"#,
+        )
+        .unwrap();
 
         let mut stream = conn.query_streaming("SELECT * FROM s", 2).unwrap();
         assert_eq!(stream.total_rows(), 3);

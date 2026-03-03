@@ -460,13 +460,7 @@ impl UdfCatalog {
     pub fn list_by_kind(&self, kind: UdfKind) -> Vec<UdfCatalogEntry> {
         self.entries
             .read()
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|e| e.kind == kind)
-                    .cloned()
-                    .collect()
-            })
+            .map(|entries| entries.iter().filter(|e| e.kind == kind).cloned().collect())
             .unwrap_or_default()
     }
 
@@ -786,7 +780,9 @@ mod tests {
             |args: &[ArrayRef]| {
                 let a = args[0].as_any().downcast_ref::<Int64Array>().unwrap();
                 let b = args[1].as_any().downcast_ref::<Int64Array>().unwrap();
-                let result: Int64Array = a.iter().zip(b.iter())
+                let result: Int64Array = a
+                    .iter()
+                    .zip(b.iter())
                     .map(|(a, b)| match (a, b) {
                         (Some(a), Some(b)) => Some(a + b),
                         _ => None,
@@ -825,7 +821,11 @@ mod tests {
         let result = udf.execute(&[input]);
         assert!(result.is_err(), "Should error with wrong type");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Int64"), "Error should mention expected type: {}", msg);
+        assert!(
+            msg.contains("Int64"),
+            "Error should mention expected type: {}",
+            msg
+        );
     }
 
     #[test]
@@ -859,26 +859,22 @@ mod tests {
             "needs_one",
             vec![DataType::Int64],
             DataType::Int64,
-            |_args: &[ArrayRef]| {
-                Ok(Arc::new(Int64Array::from(vec![0])) as ArrayRef)
-            },
+            |_args: &[ArrayRef]| Ok(Arc::new(Int64Array::from(vec![0])) as ArrayRef),
         );
 
         let result = udf.execute(&[]);
-        assert!(result.is_err(), "Should error with zero args when one expected");
+        assert!(
+            result.is_err(),
+            "Should error with zero args when one expected"
+        );
     }
 
     #[test]
     fn test_scalar_udf_variadic_empty_args() {
         // UDF with no declared arg types (variadic)
-        let udf = ScalarUdf::new(
-            "noop",
-            vec![],
-            DataType::Int64,
-            |_args: &[ArrayRef]| {
-                Ok(Arc::new(Int64Array::from(vec![42])) as ArrayRef)
-            },
-        );
+        let udf = ScalarUdf::new("noop", vec![], DataType::Int64, |_args: &[ArrayRef]| {
+            Ok(Arc::new(Int64Array::from(vec![42])) as ArrayRef)
+        });
 
         // Should succeed with any number of args when arg_types is empty
         let result = udf.execute(&[]);
@@ -912,14 +908,20 @@ mod tests {
     fn test_udf_deregister_nonexistent() {
         let registry = UdfRegistry::new();
         let removed = registry.deregister_scalar("nonexistent").unwrap();
-        assert!(!removed, "Deregistering nonexistent UDF should return false");
+        assert!(
+            !removed,
+            "Deregistering nonexistent UDF should return false"
+        );
     }
 
     #[test]
     fn test_udaf_deregister_nonexistent() {
         let registry = UdfRegistry::new();
         let removed = registry.deregister_aggregate("nonexistent").unwrap();
-        assert!(!removed, "Deregistering nonexistent UDAF should return false");
+        assert!(
+            !removed,
+            "Deregistering nonexistent UDAF should return false"
+        );
     }
 
     #[test]
@@ -931,12 +933,9 @@ mod tests {
 
     #[test]
     fn test_scalar_udf_debug() {
-        let udf = ScalarUdf::new(
-            "test_fn",
-            vec![DataType::Int64],
-            DataType::Int64,
-            |_| Ok(Arc::new(Int64Array::from(vec![0])) as ArrayRef),
-        );
+        let udf = ScalarUdf::new("test_fn", vec![DataType::Int64], DataType::Int64, |_| {
+            Ok(Arc::new(Int64Array::from(vec![0])) as ArrayRef)
+        });
         let debug = format!("{:?}", udf);
         assert!(debug.contains("test_fn"));
         assert!(debug.contains("ScalarUdf"));

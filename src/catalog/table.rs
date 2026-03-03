@@ -68,18 +68,12 @@ pub trait TableProvider: Debug + Send + Sync {
         None
     }
 
-    /// Scan the table, optionally projecting columns and applying filters.
+    /// Scan the table, optionally projecting columns.
     ///
     /// # Arguments
     /// * `projection` - Optional list of column indices to project
-    /// * `filters` - Filters to push down (not implemented yet)
     /// * `limit` - Optional row limit
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        filters: &[()], // TODO: Replace with actual filter type
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>>;
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>>;
 
     /// Check if this table supports filter pushdown.
     fn supports_filter_pushdown(&self) -> bool {
@@ -103,27 +97,27 @@ pub trait TableProvider: Debug + Send + Sync {
     ) -> Result<Vec<RecordBatch>> {
         // Default: ignore filters and fall back to basic scan
         let _ = filters;
-        self.scan(projection, &[], limit)
+        self.scan(projection, limit)
     }
 
     /// Insert data into the table.
     fn insert(&self, _batches: Vec<RecordBatch>) -> Result<usize> {
         Err(crate::error::BlazeError::not_implemented(
-            "Insert not supported for this table type",
+            "Insert is not supported for this table type. Use in-memory tables for DML operations.",
         ))
     }
 
     /// Delete data from the table.
     fn delete(&self, _predicate: Option<&()>) -> Result<usize> {
         Err(crate::error::BlazeError::not_implemented(
-            "Delete not supported for this table type",
+            "Delete is not supported for this table type. Use in-memory tables for DML operations.",
         ))
     }
 
     /// Update data in the table.
     fn update(&self, _assignments: &[()], _predicate: Option<&()>) -> Result<usize> {
         Err(crate::error::BlazeError::not_implemented(
-            "Update not supported for this table type",
+            "Update is not supported for this table type. Use in-memory tables for DML operations.",
         ))
     }
 }

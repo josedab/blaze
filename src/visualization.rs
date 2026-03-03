@@ -849,7 +849,8 @@ impl ChartRenderer {
             let _ = writeln!(
                 svg,
                 r#"  <text x="{}" y="20" font-size="16" font-weight="bold" text-anchor="middle">{}</text>"#,
-                chart_width / 2, title
+                chart_width / 2,
+                title
             );
         }
 
@@ -865,7 +866,8 @@ impl ChartRenderer {
             let _ = writeln!(
                 svg,
                 r#"  <text x="130" y="{}" font-size="12" text-anchor="end" dominant-baseline="middle">{}</text>"#,
-                y + bar_height / 2, label
+                y + bar_height / 2,
+                label
             );
             let _ = writeln!(
                 svg,

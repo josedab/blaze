@@ -83,7 +83,8 @@ pub struct BufferPool {
 impl BufferPool {
     /// Create a new buffer pool with the given page capacity.
     pub fn new(capacity: usize) -> Self {
-        let cap = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN));
+        let cap = NonZeroUsize::new(capacity)
+            .unwrap_or(NonZeroUsize::new(1).unwrap_or(NonZeroUsize::MIN));
         Self {
             cache: Mutex::new(LruCache::new(cap)),
             capacity,
@@ -378,9 +379,11 @@ impl PersistentTable {
         let wal_path = path.join(&config.wal_dir).join("wal.log");
 
         fs::create_dir_all(&data_dir)?;
-        fs::create_dir_all(wal_path.parent().ok_or_else(|| {
-            BlazeError::execution("WAL path has no parent directory")
-        })?)?;
+        fs::create_dir_all(
+            wal_path
+                .parent()
+                .ok_or_else(|| BlazeError::execution("WAL path has no parent directory"))?,
+        )?;
 
         // Persist the schema as JSON for later reopening.
         let schema_path = path.join("schema.json");
@@ -487,9 +490,10 @@ impl PersistentTable {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        self.wal.lock().map_err(|e| {
-            BlazeError::execution(format!("Failed to acquire WAL lock: {e}"))
-        })?.checkpoint(&table_name)?;
+        self.wal
+            .lock()
+            .map_err(|e| BlazeError::execution(format!("Failed to acquire WAL lock: {e}")))?
+            .checkpoint(&table_name)?;
 
         Ok(())
     }
@@ -596,12 +600,7 @@ impl TableProvider for PersistentTable {
         })
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         let batches = self.batches.read();
         let mut result = Vec::new();
         let mut rows_collected = 0;
@@ -731,9 +730,7 @@ impl TableProvider for PersistentTable {
             let encoded = Self::encode_batch(batch)?;
             self.wal
                 .lock()
-                .map_err(|e| {
-                    BlazeError::execution(format!("Failed to acquire WAL lock: {e}"))
-                })?
+                .map_err(|e| BlazeError::execution(format!("Failed to acquire WAL lock: {e}")))?
                 .append(WalOperation::Insert, &table_name, Some(encoded))?;
             count += batch.num_rows();
         }
@@ -798,7 +795,7 @@ mod tests {
         // Reopen and verify data survived.
         {
             let table = PersistentTable::open(&table_path).unwrap();
-            let results = table.scan(None, &[], None).unwrap();
+            let results = table.scan(None, None).unwrap();
             let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
             assert_eq!(total_rows, 3);
 
@@ -828,7 +825,7 @@ mod tests {
         // Reopen — WAL replay should recover the data.
         {
             let table = PersistentTable::open(&table_path).unwrap();
-            let results = table.scan(None, &[], None).unwrap();
+            let results = table.scan(None, None).unwrap();
             let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
             assert_eq!(total_rows, 2);
 
@@ -890,17 +887,17 @@ mod tests {
         table.insert(vec![batch]).unwrap();
 
         // Projection: only column 0 ("id").
-        let projected = table.scan(Some(&[0]), &[], None).unwrap();
+        let projected = table.scan(Some(&[0]), None).unwrap();
         assert_eq!(projected[0].num_columns(), 1);
         assert_eq!(projected[0].num_rows(), 5);
 
         // Limit: first 3 rows.
-        let limited = table.scan(None, &[], Some(3)).unwrap();
+        let limited = table.scan(None, Some(3)).unwrap();
         let total: usize = limited.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 3);
 
         // Projection + limit combined.
-        let both = table.scan(Some(&[1]), &[], Some(2)).unwrap();
+        let both = table.scan(Some(&[1]), Some(2)).unwrap();
         let total: usize = both.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 2);
         assert_eq!(both[0].num_columns(), 1);

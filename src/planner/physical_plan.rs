@@ -709,9 +709,9 @@ impl ExecutionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
-    use crate::planner::physical_expr::ColumnExpr;
     use crate::planner::logical_expr::AggregateFunc;
+    use crate::planner::physical_expr::ColumnExpr;
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
 
     fn test_schema() -> Arc<ArrowSchema> {
         Arc::new(ArrowSchema::new(vec![
@@ -750,9 +750,11 @@ mod tests {
 
     #[test]
     fn test_projection_schema() {
-        let schema = Arc::new(ArrowSchema::new(vec![
-            ArrowField::new("x", ArrowDataType::Int64, false),
-        ]));
+        let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+            "x",
+            ArrowDataType::Int64,
+            false,
+        )]));
         let plan = PhysicalPlan::Projection {
             exprs: vec![Arc::new(ColumnExpr::new("id", 0))],
             schema: schema.clone(),
@@ -764,7 +766,11 @@ mod tests {
     #[test]
     fn test_sort_schema_inherits_input() {
         let plan = PhysicalPlan::Sort {
-            exprs: vec![SortExpr::new(Arc::new(ColumnExpr::new("id", 0)), true, false)],
+            exprs: vec![SortExpr::new(
+                Arc::new(ColumnExpr::new("id", 0)),
+                true,
+                false,
+            )],
             input: Box::new(scan_plan()),
         };
         assert_eq!(plan.schema().fields().len(), 2);
@@ -916,7 +922,11 @@ mod tests {
             skip: 5,
             fetch: Some(10),
             input: Box::new(PhysicalPlan::Sort {
-                exprs: vec![SortExpr::new(Arc::new(ColumnExpr::new("id", 0)), true, false)],
+                exprs: vec![SortExpr::new(
+                    Arc::new(ColumnExpr::new("id", 0)),
+                    true,
+                    false,
+                )],
                 input: Box::new(scan_plan()),
             }),
         };
@@ -973,13 +983,7 @@ mod tests {
 
     #[test]
     fn test_window_expr_name_no_alias() {
-        let expr = WindowExpr::new(
-            WindowFunction::Rank,
-            vec![],
-            vec![],
-            vec![],
-            None,
-        );
+        let expr = WindowExpr::new(WindowFunction::Rank, vec![], vec![], vec![], None);
         assert_eq!(expr.name(), "RANK");
     }
 

@@ -82,8 +82,14 @@ fn test_row_number_with_partition_by() {
     let rn_values: Vec<i64> = (0..rn.len()).map(|i| rn.value(i)).collect();
     // active=true has 3 users, active=false has 2
     let max_rn = *rn_values.iter().max().unwrap_or(&0);
-    assert!(max_rn <= 3, "Max row number in any partition should be <= 3");
-    assert!(rn_values.iter().all(|&v| v >= 1), "All row numbers should be >= 1");
+    assert!(
+        max_rn <= 3,
+        "Max row number in any partition should be <= 3"
+    );
+    assert!(
+        rn_values.iter().all(|&v| v >= 1),
+        "All row numbers should be >= 1"
+    );
 }
 
 #[test]
@@ -102,7 +108,10 @@ fn test_lag_function() {
     let null_count = (0..prev_age.len()).filter(|&i| prev_age.is_null(i)).count();
     assert_eq!(null_count, 1, "Exactly one row should have NULL LAG value");
     let non_null_count = prev_age.len() - null_count;
-    assert_eq!(non_null_count, 4, "4 of 5 rows should have non-null LAG values");
+    assert_eq!(
+        non_null_count, 4,
+        "4 of 5 rows should have non-null LAG values"
+    );
 }
 
 #[test]
@@ -121,7 +130,10 @@ fn test_lead_function() {
     let null_count = (0..next_age.len()).filter(|&i| next_age.is_null(i)).count();
     assert_eq!(null_count, 1, "Exactly one row should have NULL LEAD value");
     let non_null_count = next_age.len() - null_count;
-    assert_eq!(non_null_count, 4, "4 of 5 rows should have non-null LEAD values");
+    assert_eq!(
+        non_null_count, 4,
+        "4 of 5 rows should have non-null LEAD values"
+    );
 }
 
 #[test]
@@ -144,9 +156,7 @@ fn test_window_aggregate_sum() {
 fn test_window_aggregate_count() {
     let conn = create_test_connection();
     let results = conn
-        .query(
-            "SELECT *, COUNT(*) OVER (PARTITION BY user_id) AS cnt FROM orders",
-        )
+        .query("SELECT *, COUNT(*) OVER (PARTITION BY user_id) AS cnt FROM orders")
         .unwrap();
     assert!(!results.is_empty(), "Should return results");
     let batch = &results[0];

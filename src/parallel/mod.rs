@@ -190,9 +190,7 @@ impl ParallelExecutor {
             PhysicalPlan::HashAggregate { input, .. } => {
                 self.execute_parallel_aggregate(plan, input, partitions)
             }
-            PhysicalPlan::Sort { input, .. } => {
-                self.execute_parallel_sort(plan, input, partitions)
-            }
+            PhysicalPlan::Sort { input, .. } => self.execute_parallel_sort(plan, input, partitions),
             PhysicalPlan::HashJoin { left, right, .. } => {
                 self.execute_parallel_join(plan, left, right, partitions)
             }
@@ -370,12 +368,15 @@ impl ParallelExecutor {
         {
             let merge_plan = PhysicalPlan::HashAggregate {
                 group_by: group_by.clone(),
-                aggr_exprs: aggr_exprs.iter().map(|e| crate::planner::AggregateExpr {
-                    func: e.func,
-                    args: e.args.clone(),
-                    distinct: e.distinct,
-                    alias: e.alias.clone(),
-                }).collect(),
+                aggr_exprs: aggr_exprs
+                    .iter()
+                    .map(|e| crate::planner::AggregateExpr {
+                        func: e.func,
+                        args: e.args.clone(),
+                        distinct: e.distinct,
+                        alias: e.alias.clone(),
+                    })
+                    .collect(),
                 schema: schema.clone(),
                 input: Box::new(merge_input),
             };
@@ -444,11 +445,14 @@ impl ParallelExecutor {
         };
         if let PhysicalPlan::Sort { exprs, .. } = plan {
             let merge_plan = PhysicalPlan::Sort {
-                exprs: exprs.iter().map(|e| crate::planner::SortExpr {
-                    expr: e.expr.clone(),
-                    ascending: e.ascending,
-                    nulls_first: e.nulls_first,
-                }).collect(),
+                exprs: exprs
+                    .iter()
+                    .map(|e| crate::planner::SortExpr {
+                        expr: e.expr.clone(),
+                        ascending: e.ascending,
+                        nulls_first: e.nulls_first,
+                    })
+                    .collect(),
                 input: Box::new(merge_input),
             };
             let final_ctx = ExecutionContext::new();
@@ -620,9 +624,7 @@ impl ParallelExecutor {
                 predicate: predicate.clone(),
                 input: Box::new(values_node),
             },
-            PhysicalPlan::Projection {
-                exprs, schema, ..
-            } => PhysicalPlan::Projection {
+            PhysicalPlan::Projection { exprs, schema, .. } => PhysicalPlan::Projection {
                 exprs: exprs.clone(),
                 schema: schema.clone(),
                 input: Box::new(values_node),
@@ -634,21 +636,27 @@ impl ParallelExecutor {
                 ..
             } => PhysicalPlan::HashAggregate {
                 group_by: group_by.clone(),
-                aggr_exprs: aggr_exprs.iter().map(|e| crate::planner::AggregateExpr {
-                    func: e.func,
-                    args: e.args.clone(),
-                    distinct: e.distinct,
-                    alias: e.alias.clone(),
-                }).collect(),
+                aggr_exprs: aggr_exprs
+                    .iter()
+                    .map(|e| crate::planner::AggregateExpr {
+                        func: e.func,
+                        args: e.args.clone(),
+                        distinct: e.distinct,
+                        alias: e.alias.clone(),
+                    })
+                    .collect(),
                 schema: schema.clone(),
                 input: Box::new(values_node),
             },
             PhysicalPlan::Sort { exprs, .. } => PhysicalPlan::Sort {
-                exprs: exprs.iter().map(|e| crate::planner::SortExpr {
-                    expr: e.expr.clone(),
-                    ascending: e.ascending,
-                    nulls_first: e.nulls_first,
-                }).collect(),
+                exprs: exprs
+                    .iter()
+                    .map(|e| crate::planner::SortExpr {
+                        expr: e.expr.clone(),
+                        ascending: e.ascending,
+                        nulls_first: e.nulls_first,
+                    })
+                    .collect(),
                 input: Box::new(values_node),
             },
             _ => values_node,
@@ -807,13 +815,11 @@ mod tests {
 
     #[test]
     fn test_parallel_execute_sort() {
+        use crate::planner::{ColumnExpr, SortExpr};
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType, Field, Schema};
-        use crate::planner::{ColumnExpr, SortExpr};
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -855,14 +861,12 @@ mod tests {
 
     #[test]
     fn test_parallel_execute_filter() {
+        use crate::planner::{BinaryExpr, ColumnExpr, LiteralExpr};
+        use crate::types::ScalarValue;
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType, Field, Schema};
-        use crate::planner::{ColumnExpr, LiteralExpr, BinaryExpr};
-        use crate::types::ScalarValue;
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -900,9 +904,7 @@ mod tests {
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType, Field, Schema};
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -927,9 +929,7 @@ mod tests {
     fn test_parallel_execute_empty_input() {
         use arrow::datatypes::{DataType, Field, Schema};
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
         let plan = PhysicalPlan::Values {
             schema: schema.clone(),
@@ -948,9 +948,7 @@ mod tests {
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType, Field, Schema};
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -973,10 +971,10 @@ mod tests {
 
     #[test]
     fn test_execute_parallel_tasks_actually_parallel() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::{Duration, Instant};
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
 
         let config = ExecutionConfig::new().with_parallelism(4);
         let executor = ParallelExecutor::new(config);
@@ -984,22 +982,23 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let schema_clone = schema.clone();
 
         let start = Instant::now();
-        let results = executor.execute_parallel_tasks(4, move |partition_id| {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-            // Small sleep to verify parallelism (total would be 400ms if serial)
-            std::thread::sleep(Duration::from_millis(50));
-            let batch = RecordBatch::try_new(
-                schema_clone.clone(),
-                vec![Arc::new(Int64Array::from(vec![partition_id as i64]))],
-            ).unwrap();
-            Ok(vec![batch])
-        }).unwrap();
+        let results = executor
+            .execute_parallel_tasks(4, move |partition_id| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                // Small sleep to verify parallelism (total would be 400ms if serial)
+                std::thread::sleep(Duration::from_millis(50));
+                let batch = RecordBatch::try_new(
+                    schema_clone.clone(),
+                    vec![Arc::new(Int64Array::from(vec![partition_id as i64]))],
+                )
+                .unwrap();
+                Ok(vec![batch])
+            })
+            .unwrap();
         let elapsed = start.elapsed();
 
         // All 4 tasks executed
@@ -1029,18 +1028,19 @@ mod tests {
         let config = ExecutionConfig::new().with_parallelism(4);
         let executor = ParallelExecutor::new(config);
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("val", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Int64, false)]));
         let schema_clone = schema.clone();
 
-        let results = executor.execute_parallel_tasks(4, move |partition_id| {
-            let batch = RecordBatch::try_new(
-                schema_clone.clone(),
-                vec![Arc::new(Int64Array::from(vec![(partition_id * 10) as i64]))],
-            ).unwrap();
-            Ok(vec![batch])
-        }).unwrap();
+        let results = executor
+            .execute_parallel_tasks(4, move |partition_id| {
+                let batch = RecordBatch::try_new(
+                    schema_clone.clone(),
+                    vec![Arc::new(Int64Array::from(vec![(partition_id * 10) as i64]))],
+                )
+                .unwrap();
+                Ok(vec![batch])
+            })
+            .unwrap();
 
         assert_eq!(results.len(), 4);
         // Results should be in partition order
@@ -1056,28 +1056,29 @@ mod tests {
 
     #[test]
     fn test_parallel_scan_pipeline_filter() {
+        use crate::planner::{BinaryExpr, ColumnExpr, LiteralExpr};
+        use crate::types::ScalarValue;
         use arrow::array::Int64Array;
         use arrow::datatypes::{DataType, Field, Schema};
-        use crate::planner::{ColumnExpr, LiteralExpr, BinaryExpr};
-        use crate::types::ScalarValue;
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
         // Multiple batches simulate a multi-batch table scan
         let batch1 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4]))],
-        ).unwrap();
+        )
+        .unwrap();
         let batch2 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![5, 6, 7, 8]))],
-        ).unwrap();
+        )
+        .unwrap();
         let batch3 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![9, 10, 11, 12]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Filter: id > 6
         let predicate: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(BinaryExpr::new(

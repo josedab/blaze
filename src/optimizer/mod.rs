@@ -27,7 +27,9 @@ pub mod statistics;
 pub use cardinality::{CardinalityEstimator, CardinalityFeedback};
 pub use cost_model::{Cost, CostModel, DEFAULT_CPU_COST, DEFAULT_IO_COST};
 pub use join_ordering::JoinOrderOptimizer;
-pub use statistics::{ColumnStatistics, Histogram, HistogramBucket, StatisticsManager, TableStatistics};
+pub use statistics::{
+    ColumnStatistics, Histogram, HistogramBucket, StatisticsManager, TableStatistics,
+};
 
 use crate::error::Result;
 use crate::planner::LogicalPlan;
@@ -84,7 +86,8 @@ impl CostBasedOptimizer {
         plan: &LogicalPlan,
         stats_manager: &StatisticsManager,
     ) -> Result<Cost> {
-        self.cost_model.estimate_with_stats(plan, &self.cardinality_estimator, stats_manager)
+        self.cost_model
+            .estimate_with_stats(plan, &self.cardinality_estimator, stats_manager)
     }
 
     /// Get the cost model.

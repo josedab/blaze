@@ -913,14 +913,18 @@ fn tpch_benchmarks(c: &mut Criterion) {
         });
 
         // Q17: Small Quantity Order Revenue (scan + filter + aggregate)
-        group.bench_with_input(BenchmarkId::new("Q17_small_qty_revenue", sf), &sf, |b, _| {
-            b.iter(|| black_box(conn.query(TPCH_Q17).unwrap()))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("Q17_small_qty_revenue", sf),
+            &sf,
+            |b, _| b.iter(|| black_box(conn.query(TPCH_Q17).unwrap())),
+        );
 
         // Q18: Large Volume Customer (multi-join + aggregate + sort + limit)
-        group.bench_with_input(BenchmarkId::new("Q18_large_volume_customer", sf), &sf, |b, _| {
-            b.iter(|| black_box(conn.query(TPCH_Q18).unwrap()))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("Q18_large_volume_customer", sf),
+            &sf,
+            |b, _| b.iter(|| black_box(conn.query(TPCH_Q18).unwrap())),
+        );
 
         // Q20: Potential Part Promotion (join + sort + limit)
         group.bench_with_input(BenchmarkId::new("Q20_part_promotion", sf), &sf, |b, _| {

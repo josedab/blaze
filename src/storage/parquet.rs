@@ -748,12 +748,7 @@ impl TableProvider for ParquetTable {
         self.statistics.clone()
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         self.scan_internal(projection, &[], limit)
     }
 
@@ -839,7 +834,7 @@ mod tests {
         let table = ParquetTable::open(temp_file.path()).unwrap();
         assert_eq!(table.schema().len(), 2);
 
-        let batches = table.scan(None, &[], None).unwrap();
+        let batches = table.scan(None, None).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
     }
@@ -852,7 +847,7 @@ mod tests {
         write_parquet(temp_file.path(), &[batch]).unwrap();
 
         let table = ParquetTable::open(temp_file.path()).unwrap();
-        let batches = table.scan(Some(&[0]), &[], None).unwrap();
+        let batches = table.scan(Some(&[0]), None).unwrap();
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_columns(), 1);
@@ -866,7 +861,7 @@ mod tests {
         write_parquet(temp_file.path(), &[batch]).unwrap();
 
         let table = ParquetTable::open(temp_file.path()).unwrap();
-        let batches = table.scan(None, &[], Some(3)).unwrap();
+        let batches = table.scan(None, Some(3)).unwrap();
 
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3);

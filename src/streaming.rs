@@ -2348,10 +2348,7 @@ impl ChangeLog {
 
     /// Current LSN (the most recent event's LSN).
     pub fn current_lsn(&self) -> Lsn {
-        self.events
-            .last()
-            .map(|e| e.lsn)
-            .unwrap_or(Lsn::new(0))
+        self.events.last().map(|e| e.lsn).unwrap_or(Lsn::new(0))
     }
 
     /// Table name.
@@ -3984,7 +3981,7 @@ impl FileConnector {
         match self.format {
             FileFormat::Csv => {
                 let table = crate::storage::CsvTable::open(&self.path)?;
-                self.batches = table.scan(None, &[], None)?;
+                self.batches = table.scan(None, None)?;
             }
             FileFormat::Json | FileFormat::NdJson => {
                 // JSON loading via storage module

@@ -202,7 +202,7 @@ impl PhysicalExpr for BinaryExpr {
             }
             "plus" | "minus" | "multiply" | "divide" => self.evaluate_arithmetic(&left, &right),
             _ => Err(BlazeError::not_implemented(format!(
-                "Operator: {}",
+                "Binary operator '{}' is not supported. Supported: eq, neq, lt, lteq, gt, gteq, and, or, plus, minus, multiply, divide.",
                 self.op
             ))),
         }
@@ -659,6 +659,7 @@ pub struct LikeExpr {
     pattern: Arc<dyn PhysicalExpr>,
     negated: bool,
     case_insensitive: bool,
+    escape_char: Option<char>,
 }
 
 impl LikeExpr {
@@ -673,7 +674,69 @@ impl LikeExpr {
             pattern,
             negated,
             case_insensitive,
+            escape_char: None,
         }
+    }
+
+    pub fn with_escape(
+        expr: Arc<dyn PhysicalExpr>,
+        pattern: Arc<dyn PhysicalExpr>,
+        negated: bool,
+        case_insensitive: bool,
+        escape_char: char,
+    ) -> Self {
+        Self {
+            expr,
+            pattern,
+            negated,
+            case_insensitive,
+            escape_char: Some(escape_char),
+        }
+    }
+
+    /// Convert a SQL LIKE pattern with a custom escape character into a regex pattern.
+    fn like_pattern_to_regex(
+        pattern: &str,
+        escape_char: char,
+        case_insensitive: bool,
+    ) -> Result<regex::Regex> {
+        let mut regex_str = String::with_capacity(pattern.len() * 2);
+        if case_insensitive {
+            regex_str.push_str("(?i)");
+        }
+        regex_str.push('^');
+
+        let chars: Vec<char> = pattern.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == escape_char {
+                // Next character is literal (escaped)
+                if i + 1 < chars.len() {
+                    let next = chars[i + 1];
+                    regex_str.push_str(&regex::escape(&next.to_string()));
+                    i += 2;
+                } else {
+                    return Err(BlazeError::execution(
+                        "LIKE pattern ends with escape character",
+                    ));
+                }
+            } else if c == '%' {
+                regex_str.push_str(".*");
+                i += 1;
+            } else if c == '_' {
+                regex_str.push('.');
+                i += 1;
+            } else {
+                regex_str.push_str(&regex::escape(&c.to_string()));
+                i += 1;
+            }
+        }
+        regex_str.push('$');
+
+        regex::Regex::new(&regex_str).map_err(|e| {
+            BlazeError::execution(format!("Failed to compile LIKE pattern as regex: {}", e))
+        })
     }
 }
 
@@ -688,7 +751,6 @@ impl PhysicalExpr for LikeExpr {
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
         use arrow::array::StringArray;
-        use arrow::compute::kernels::comparison::{ilike, like, nilike, nlike};
 
         let value = self.expr.evaluate(batch)?;
         let pattern = self.pattern.evaluate(batch)?;
@@ -702,14 +764,38 @@ impl PhysicalExpr for LikeExpr {
             .downcast_ref::<StringArray>()
             .ok_or_else(|| BlazeError::type_error("LIKE requires string pattern"))?;
 
-        let result = match (self.negated, self.case_insensitive) {
-            (false, false) => like(value_str, pattern_str)?,
-            (false, true) => ilike(value_str, pattern_str)?,
-            (true, false) => nlike(value_str, pattern_str)?,
-            (true, true) => nilike(value_str, pattern_str)?,
-        };
+        if let Some(escape_char) = self.escape_char {
+            // Use regex-based matching for custom escape characters
+            let num_rows = batch.num_rows();
+            let mut builder = BooleanBuilder::with_capacity(num_rows);
 
-        Ok(Arc::new(result))
+            for i in 0..num_rows {
+                if value_str.is_null(i) || pattern_str.is_null(i) {
+                    builder.append_null();
+                } else {
+                    let re = Self::like_pattern_to_regex(
+                        pattern_str.value(i),
+                        escape_char,
+                        self.case_insensitive,
+                    )?;
+                    let matched = re.is_match(value_str.value(i));
+                    builder.append_value(if self.negated { !matched } else { matched });
+                }
+            }
+
+            Ok(Arc::new(builder.finish()))
+        } else {
+            use arrow::compute::kernels::comparison::{ilike, like, nilike, nlike};
+
+            let result = match (self.negated, self.case_insensitive) {
+                (false, false) => like(value_str, pattern_str)?,
+                (false, true) => ilike(value_str, pattern_str)?,
+                (true, false) => nlike(value_str, pattern_str)?,
+                (true, true) => nilike(value_str, pattern_str)?,
+            };
+
+            Ok(Arc::new(result))
+        }
     }
 
     fn name(&self) -> &str {
@@ -2980,7 +3066,7 @@ impl PhysicalExpr for ScalarFunctionExpr {
             }
 
             _ => Err(BlazeError::not_implemented(format!(
-                "Function: {}",
+                "Scalar function '{}' is not supported. Supported functions: UPPER, LOWER, LENGTH, TRIM, LTRIM, RTRIM, SUBSTR, CONCAT, COALESCE, NULLIF, ABS, CEIL, FLOOR, ROUND, POWER, SQRT, MOD, and more.",
                 self.name
             ))),
         }

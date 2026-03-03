@@ -244,10 +244,7 @@ fn validate_identifier(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(BlazeError::invalid_argument("Identifier cannot be empty"));
     }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(BlazeError::invalid_argument(format!(
             "Invalid identifier '{}': only alphanumeric characters and underscores are allowed",
             name
@@ -360,7 +357,7 @@ impl Connection {
         // In practice this is a placeholder; real vector search requires index context.
         let vector_distance_udf = udf::ScalarUdf::new(
             "vector_distance",
-            vec![],  // Dynamic args
+            vec![], // Dynamic args
             types::DataType::Float64,
             |args: &[arrow::array::ArrayRef]| -> crate::error::Result<arrow::array::ArrayRef> {
                 if args.len() < 2 {
@@ -531,10 +528,42 @@ impl Connection {
 
         // Cache the result (unless NO_CACHE hint)
         if use_cache {
-            self.query_cache.put(&clean_sql, result.clone(), &referenced_tables);
+            self.query_cache
+                .put(&clean_sql, result.clone(), &referenced_tables);
         }
 
         Ok(result)
+    }
+
+    /// Returns a streaming iterator over query result batches.
+    ///
+    /// Uses [`executor::PlanStream`] for pull-based streaming execution,
+    /// yielding `RecordBatch`es one at a time for memory-efficient processing
+    /// of large result sets.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use blaze::Connection;
+    ///
+    /// let conn = Connection::in_memory().unwrap();
+    /// conn.execute("CREATE TABLE t (id BIGINT)").unwrap();
+    /// for batch in conn.query_iter("SELECT * FROM t").unwrap() {
+    ///     let batch = batch.unwrap();
+    /// }
+    /// ```
+    pub fn query_iter(&self, sql: &str) -> Result<executor::PlanStream> {
+        let statements = Parser::parse_with_compat(sql, self.config.compat_mode)?;
+        let Some(statement) = statements.into_iter().next() else {
+            return Ok(executor::PlanStream::empty());
+        };
+        let binder = Binder::new(self.catalog_list.clone());
+        let logical_plan = binder.bind(statement)?;
+        let optimized = self.optimizer.optimize(&logical_plan)?;
+        let planner = PhysicalPlanner::new();
+        let physical = planner.create_physical_plan(&optimized)?;
+
+        executor::PlanStream::new(&physical, &self.execution_context)
     }
 
     /// Execute a SQL statement that doesn't return results.
@@ -642,9 +671,8 @@ impl Connection {
                         // Log to WAL for persistence
                         if let Some(ref wal) = self.wal {
                             let mut wal = wal.lock();
-                            let _ = wal.append(&persistence::WalEntry::DropTable {
-                                name: table_name,
-                            });
+                            let _ =
+                                wal.append(&persistence::WalEntry::DropTable { name: table_name });
                             let _ = wal.flush();
                         }
                         Ok(0)
@@ -752,7 +780,11 @@ impl Connection {
                 }
                 Ok(0)
             }
-            sql::Statement::CreateView { name, query, or_replace } => {
+            sql::Statement::CreateView {
+                name,
+                query,
+                or_replace,
+            } => {
                 let view_name = name.last().cloned().unwrap_or_default();
 
                 // Bind the query to determine its schema
@@ -818,7 +850,7 @@ impl Connection {
                     .downcast_ref::<MemoryTable>()
                     .ok_or_else(|| {
                         BlazeError::not_implemented(
-                            "ALTER TABLE is only supported for in-memory tables",
+                            "ALTER TABLE is only supported for in-memory tables. External tables (CSV, Parquet) are read-only.",
                         )
                     })?;
 
@@ -867,8 +899,12 @@ impl Connection {
         let result = self.execute_insert_inner(&table_name, insert);
 
         match &result {
-            Ok(_) => { let _ = self.mvcc_manager.commit_txn(txn_id); }
-            Err(_) => { let _ = self.mvcc_manager.abort_txn(txn_id); }
+            Ok(_) => {
+                let _ = self.mvcc_manager.commit_txn(txn_id);
+            }
+            Err(_) => {
+                let _ = self.mvcc_manager.abort_txn(txn_id);
+            }
         }
 
         result
@@ -891,7 +927,9 @@ impl Connection {
             .as_any()
             .downcast_ref::<MemoryTable>()
             .ok_or_else(|| {
-                BlazeError::not_implemented("INSERT is only supported for in-memory tables")
+                BlazeError::not_implemented(
+                    "INSERT is only supported for in-memory tables. External tables (CSV, Parquet) are read-only.",
+                )
             })?;
 
         let table_schema = table.schema();
@@ -991,8 +1029,12 @@ impl Connection {
         let result = self.execute_update_inner(&table_name, update);
 
         match &result {
-            Ok(_) => { let _ = self.mvcc_manager.commit_txn(txn_id); }
-            Err(_) => { let _ = self.mvcc_manager.abort_txn(txn_id); }
+            Ok(_) => {
+                let _ = self.mvcc_manager.commit_txn(txn_id);
+            }
+            Err(_) => {
+                let _ = self.mvcc_manager.abort_txn(txn_id);
+            }
         }
 
         result
@@ -1013,7 +1055,9 @@ impl Connection {
             .as_any()
             .downcast_ref::<MemoryTable>()
             .ok_or_else(|| {
-                BlazeError::not_implemented("UPDATE is only supported for in-memory tables")
+                BlazeError::not_implemented(
+                    "UPDATE is only supported for in-memory tables. External tables (CSV, Parquet) are read-only.",
+                )
             })?;
 
         // Get current data
@@ -1091,7 +1135,9 @@ impl Connection {
         }
 
         // Track update for materialized view staleness
-        self.mv_manager.track_table(table_name).record_update(&new_batches);
+        self.mv_manager
+            .track_table(table_name)
+            .record_update(&new_batches);
 
         // Replace table data
         memory_table.replace(new_batches);
@@ -1130,8 +1176,12 @@ impl Connection {
         let result = self.execute_delete_inner(&table_name, delete);
 
         match &result {
-            Ok(_) => { let _ = self.mvcc_manager.commit_txn(txn_id); }
-            Err(_) => { let _ = self.mvcc_manager.abort_txn(txn_id); }
+            Ok(_) => {
+                let _ = self.mvcc_manager.commit_txn(txn_id);
+            }
+            Err(_) => {
+                let _ = self.mvcc_manager.abort_txn(txn_id);
+            }
         }
 
         result
@@ -1154,7 +1204,9 @@ impl Connection {
             .as_any()
             .downcast_ref::<MemoryTable>()
             .ok_or_else(|| {
-                BlazeError::not_implemented("DELETE is only supported for in-memory tables")
+                BlazeError::not_implemented(
+                    "DELETE is only supported for in-memory tables. External tables (CSV, Parquet) are read-only.",
+                )
             })?;
 
         // Get current data
@@ -1416,18 +1468,22 @@ impl Connection {
                 expr,
                 pattern,
                 negated,
+                case_insensitive,
                 ..
             } => {
+                let keyword = if *case_insensitive { "ILIKE" } else { "LIKE" };
                 if *negated {
                     format!(
-                        "{} NOT LIKE {}",
+                        "{} NOT {} {}",
                         Self::expr_to_sql(expr),
+                        keyword,
                         Self::expr_to_sql(pattern)
                     )
                 } else {
                     format!(
-                        "{} LIKE {}",
+                        "{} {} {}",
                         Self::expr_to_sql(expr),
+                        keyword,
                         Self::expr_to_sql(pattern)
                     )
                 }
@@ -1564,7 +1620,7 @@ impl Connection {
                 Ok(Arc::new(builder.finish()))
             }
             _ => Err(BlazeError::not_implemented(format!(
-                "UPDATE for data type {:?}",
+                "UPDATE for data type {:?} is not yet supported. Supported types: Int64, Float64, Boolean, Utf8, Date32.",
                 old_values.data_type()
             ))),
         }
@@ -1649,9 +1705,9 @@ impl Connection {
             .catalog_list
             .catalog("default")
             .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
-        let table = catalog.get_table(table_name).ok_or_else(|| {
-            BlazeError::catalog(format!("Table '{}' not found", table_name))
-        })?;
+        let table = catalog
+            .get_table(table_name)
+            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
 
         let schema = table.schema();
         let batches = if let Some(mem) = table.as_any().downcast_ref::<MemoryTable>() {
@@ -2119,9 +2175,10 @@ impl Connection {
     /// This saves the current state of all tables and truncates the WAL,
     /// reducing recovery time on next startup.
     pub fn checkpoint(&self) -> Result<()> {
-        let wal = self.wal.as_ref().ok_or_else(|| {
-            BlazeError::execution("Cannot checkpoint an in-memory connection")
-        })?;
+        let wal = self
+            .wal
+            .as_ref()
+            .ok_or_else(|| BlazeError::execution("Cannot checkpoint an in-memory connection"))?;
 
         // Record checkpoint entry then truncate
         let mut wal = wal.lock();
@@ -2143,15 +2200,17 @@ impl Connection {
             .catalog_list
             .catalog("default")
             .ok_or_else(|| BlazeError::catalog("Default catalog not found"))?;
-        let table = catalog.get_table(table_name).ok_or_else(|| {
-            BlazeError::catalog(format!("Table '{}' not found", table_name))
-        })?;
+        let table = catalog
+            .get_table(table_name)
+            .ok_or_else(|| BlazeError::catalog(format!("Table '{}' not found", table_name)))?;
 
         let memory_table = table
             .as_any()
             .downcast_ref::<MemoryTable>()
             .ok_or_else(|| {
-                BlazeError::not_implemented("Compaction only supported for in-memory tables")
+                BlazeError::not_implemented(
+                    "Compaction is only supported for in-memory tables. External tables (CSV, Parquet) are read-only.",
+                )
             })?;
 
         let batches = memory_table.batches();
@@ -2266,7 +2325,7 @@ impl Connection {
             "csv" => self.register_csv(name, path),
             "parquet" | "pq" => self.register_parquet(name, path),
             _ => Err(BlazeError::not_implemented(format!(
-                "Unsupported file format: .{}",
+                "Unsupported file format: .{}. Supported formats: .csv, .parquet, .pq, .json, .jsonl, .ndjson, .arrow, .ipc.",
                 ext
             ))),
         }
@@ -2665,16 +2724,16 @@ mod tests {
         let conn = Connection::in_memory().unwrap();
         conn.execute("CREATE TABLE cbo_test (id BIGINT, val VARCHAR)")
             .unwrap();
-        conn.execute("INSERT INTO cbo_test VALUES (1, 'a')").unwrap();
-        conn.execute("INSERT INTO cbo_test VALUES (2, 'b')").unwrap();
+        conn.execute("INSERT INTO cbo_test VALUES (1, 'a')")
+            .unwrap();
+        conn.execute("INSERT INTO cbo_test VALUES (2, 'b')")
+            .unwrap();
 
         // Analyze to populate stats
         conn.execute("ANALYZE TABLE cbo_test").unwrap();
 
         // Query should still work correctly with CBO in the pipeline
-        let results = conn
-            .query("SELECT * FROM cbo_test WHERE id = 1")
-            .unwrap();
+        let results = conn.query("SELECT * FROM cbo_test WHERE id = 1").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].num_rows(), 1);
     }
@@ -2726,8 +2785,10 @@ mod tests {
     #[test]
     fn test_cache_hit_miss() {
         let conn = Connection::in_memory().unwrap();
-        conn.execute("CREATE TABLE cache_test (id BIGINT, name VARCHAR)").unwrap();
-        conn.execute("INSERT INTO cache_test VALUES (1, 'alice')").unwrap();
+        conn.execute("CREATE TABLE cache_test (id BIGINT, name VARCHAR)")
+            .unwrap();
+        conn.execute("INSERT INTO cache_test VALUES (1, 'alice')")
+            .unwrap();
 
         // First query: cache miss
         let r1 = conn.query("SELECT * FROM cache_test").unwrap();
@@ -2890,7 +2951,9 @@ mod tests {
             conn.execute("DELETE FROM items WHERE id = 3").unwrap();
 
             // Verify state before closing
-            let results = conn.query("SELECT id, price FROM items ORDER BY id").unwrap();
+            let results = conn
+                .query("SELECT id, price FROM items ORDER BY id")
+                .unwrap();
             let total: usize = results.iter().map(|b| b.num_rows()).sum();
             assert_eq!(total, 2, "Should have 2 rows before close");
         }
@@ -2898,7 +2961,9 @@ mod tests {
         // Phase 2: Reopen and verify WAL replay restored state
         {
             let conn = Connection::open(&db_path).unwrap();
-            let results = conn.query("SELECT id, price FROM items ORDER BY id").unwrap();
+            let results = conn
+                .query("SELECT id, price FROM items ORDER BY id")
+                .unwrap();
             let total: usize = results.iter().map(|b| b.num_rows()).sum();
             assert_eq!(total, 2, "Should have 2 rows after WAL recovery");
         }
@@ -2917,19 +2982,26 @@ mod tests {
     #[test]
     fn test_dml_uses_mvcc_transactions() {
         let conn = Connection::in_memory().unwrap();
-        conn.execute("CREATE TABLE mvcc_test (id BIGINT, val BIGINT)").unwrap();
+        conn.execute("CREATE TABLE mvcc_test (id BIGINT, val BIGINT)")
+            .unwrap();
 
         // Before DML, no committed transactions beyond the 0 baseline
         let before_lsn = conn.mvcc_manager().low_watermark();
 
-        conn.execute("INSERT INTO mvcc_test VALUES (1, 100)").unwrap();
-        conn.execute("UPDATE mvcc_test SET val = 200 WHERE id = 1").unwrap();
-        conn.execute("DELETE FROM mvcc_test WHERE id = 999").unwrap();
+        conn.execute("INSERT INTO mvcc_test VALUES (1, 100)")
+            .unwrap();
+        conn.execute("UPDATE mvcc_test SET val = 200 WHERE id = 1")
+            .unwrap();
+        conn.execute("DELETE FROM mvcc_test WHERE id = 999")
+            .unwrap();
 
         // After DML, MVCC should have advanced (3 committed transactions)
         // Low watermark should be >= before since all txns committed
         let after_lsn = conn.mvcc_manager().low_watermark();
-        assert!(after_lsn >= before_lsn, "MVCC watermark should advance after DML");
+        assert!(
+            after_lsn >= before_lsn,
+            "MVCC watermark should advance after DML"
+        );
 
         // No active transactions remain after DML completes
         assert_eq!(conn.mvcc_manager().active_count(), 0);
@@ -2938,17 +3010,25 @@ mod tests {
     #[test]
     fn test_compact_table() {
         let conn = Connection::in_memory().unwrap();
-        conn.execute("CREATE TABLE frag (id BIGINT, val BIGINT)").unwrap();
+        conn.execute("CREATE TABLE frag (id BIGINT, val BIGINT)")
+            .unwrap();
 
         // Insert many small batches to create fragmentation
         for i in 0..10 {
-            conn.execute(&format!("INSERT INTO frag VALUES ({}, {})", i, i * 10)).unwrap();
+            conn.execute(&format!("INSERT INTO frag VALUES ({}, {})", i, i * 10))
+                .unwrap();
         }
 
         // Before compaction: many batches
         let stats = conn.compact_table("frag").unwrap();
-        assert!(stats.batches_before >= 10, "Should have multiple batches before compaction");
-        assert_eq!(stats.batches_after, 1, "Should have 1 batch after compaction");
+        assert!(
+            stats.batches_before >= 10,
+            "Should have multiple batches before compaction"
+        );
+        assert_eq!(
+            stats.batches_after, 1,
+            "Should have 1 batch after compaction"
+        );
         assert_eq!(stats.rows, 10, "Should preserve all rows");
 
         // Data should still be queryable
@@ -2963,5 +3043,47 @@ mod tests {
         // The vector_distance function should be registered
         let registry = conn.udf_registry();
         assert!(registry.get_scalar("vector_distance").is_some());
+    }
+
+    #[test]
+    fn test_plan_stream_basic() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE t_stream (id BIGINT)").unwrap();
+        conn.execute("INSERT INTO t_stream VALUES (1)").unwrap();
+        conn.execute("INSERT INTO t_stream VALUES (2)").unwrap();
+
+        let stream = conn.query_iter("SELECT * FROM t_stream").unwrap();
+
+        let mut count = 0;
+        for batch in stream {
+            count += batch.unwrap().num_rows();
+        }
+    }
+
+    #[test]
+    fn test_plan_stream_empty() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE t_stream_empty (id BIGINT)")
+            .unwrap();
+
+        let stream = conn.query_iter("SELECT * FROM t_stream_empty").unwrap();
+    }
+
+    #[test]
+    fn test_plan_stream_size_hint() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE t_stream_hint (id BIGINT)")
+            .unwrap();
+        conn.execute("INSERT INTO t_stream_hint VALUES (1), (2)")
+            .unwrap();
+
+        let mut stream = conn.query_iter("SELECT * FROM t_stream_hint").unwrap();
+        let (lo, hi) = stream.size_hint();
+        let initial_len = lo;
+
+        if initial_len > 0 {
+            stream.next();
+            let (lo2, hi2) = stream.size_hint();
+        }
     }
 }

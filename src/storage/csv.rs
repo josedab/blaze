@@ -356,12 +356,7 @@ impl TableProvider for CsvTable {
         None
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         self.scan_internal(projection, &[], limit)
     }
 
@@ -430,7 +425,7 @@ mod tests {
         let csv_file = create_test_csv();
         let table = CsvTable::open(csv_file.path()).unwrap();
 
-        let batches = table.scan(None, &[], None).unwrap();
+        let batches = table.scan(None, None).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3);
     }
@@ -440,7 +435,7 @@ mod tests {
         let csv_file = create_test_csv();
         let table = CsvTable::open(csv_file.path()).unwrap();
 
-        let batches = table.scan(None, &[], Some(2)).unwrap();
+        let batches = table.scan(None, Some(2)).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2);
     }

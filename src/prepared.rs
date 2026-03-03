@@ -546,6 +546,7 @@ fn substitute_expr(
             expr: inner,
             pattern,
             escape,
+            case_insensitive,
         } => {
             let new_escape = escape
                 .as_ref()
@@ -556,6 +557,7 @@ fn substitute_expr(
                 expr: Box::new(substitute_expr(inner, params)?),
                 pattern: Box::new(substitute_expr(pattern, params)?),
                 escape: new_escape,
+                case_insensitive: *case_insensitive,
             })
         }
         LogicalExpr::InList {
@@ -970,8 +972,7 @@ impl PreparedStatementCache {
         Self {
             capacity,
             cache: Mutex::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(capacity.max(1))
-                    .unwrap_or(std::num::NonZeroUsize::MIN),
+                std::num::NonZeroUsize::new(capacity.max(1)).unwrap_or(std::num::NonZeroUsize::MIN),
             )),
         }
     }
@@ -1258,7 +1259,10 @@ mod tests {
         let mut params = HashMap::new();
         params.insert(1, ScalarValue::Int64(Some(42)));
         let result = substitute_expr(&expr, &params).unwrap();
-        assert!(matches!(result, LogicalExpr::Literal(ScalarValue::Int64(Some(42)))));
+        assert!(matches!(
+            result,
+            LogicalExpr::Literal(ScalarValue::Int64(Some(42)))
+        ));
     }
 
     #[test]
@@ -1282,8 +1286,14 @@ mod tests {
         params.insert(2, ScalarValue::Int64(Some(20)));
         let result = substitute_expr(&expr, &params).unwrap();
         if let LogicalExpr::BinaryExpr { left, right, .. } = result {
-            assert!(matches!(*left, LogicalExpr::Literal(ScalarValue::Int64(Some(10)))));
-            assert!(matches!(*right, LogicalExpr::Literal(ScalarValue::Int64(Some(20)))));
+            assert!(matches!(
+                *left,
+                LogicalExpr::Literal(ScalarValue::Int64(Some(10)))
+            ));
+            assert!(matches!(
+                *right,
+                LogicalExpr::Literal(ScalarValue::Int64(Some(20)))
+            ));
         } else {
             panic!("Expected BinaryExpr");
         }

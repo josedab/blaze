@@ -1176,7 +1176,7 @@ fn read_csv(path: &str, delimiter: Option<char>, has_header: bool) -> PyResult<P
     options.has_header = has_header;
 
     let table = py_result(crate::storage::CsvTable::open_with_options(path, options))?;
-    let batches = py_result(table.scan(None, &[], None))?;
+    let batches = py_result(table.scan(None, None))?;
     Ok(PyQueryResult { batches })
 }
 
@@ -1190,7 +1190,7 @@ fn read_csv(path: &str, delimiter: Option<char>, has_header: bool) -> PyResult<P
 #[pyfunction]
 fn read_parquet(path: &str) -> PyResult<PyQueryResult> {
     let table = py_result(crate::storage::ParquetTable::open(path))?;
-    let batches = py_result(table.scan(None, &[], None))?;
+    let batches = py_result(table.scan(None, None))?;
     Ok(PyQueryResult { batches })
 }
 
@@ -1210,7 +1210,7 @@ fn read_delta(path: &str, version: Option<i64>) -> PyResult<PyQueryResult> {
         Some(v) => py_result(crate::storage::DeltaTable::open_at_version(path, v))?,
         None => py_result(crate::storage::DeltaTable::open(path))?,
     };
-    let batches = py_result(table.scan(None, &[], None))?;
+    let batches = py_result(table.scan(None, None))?;
     Ok(PyQueryResult { batches })
 }
 

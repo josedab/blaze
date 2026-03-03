@@ -4452,7 +4452,10 @@ impl QueryRewriter {
 
             // Exact match - substitute the entire query
             if normalized_sql == normalized_view_query {
-                return Some(format!("SELECT * FROM \"{}\"", view.name.replace('"', "\"\"")));
+                return Some(format!(
+                    "SELECT * FROM \"{}\"",
+                    view.name.replace('"', "\"\"")
+                ));
             }
 
             // Check if query is a subset (same tables with extra WHERE clause)

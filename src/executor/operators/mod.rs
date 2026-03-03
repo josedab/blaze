@@ -3,18 +3,18 @@
 //! This module contains the physical operators used by the query execution engine.
 //! Each operator type is organized in its own sub-module.
 
-mod hash_join;
-mod cross_join;
 mod aggregate;
-mod sort;
+mod cross_join;
+mod hash_join;
 mod memory;
+mod sort;
 mod window;
 
-pub use hash_join::*;
-pub use cross_join::*;
 pub use aggregate::*;
-pub use sort::*;
+pub use cross_join::*;
+pub use hash_join::*;
 pub use memory::*;
+pub use sort::*;
 pub use window::*;
 
 use arrow::array::ArrayRef;
@@ -23,7 +23,10 @@ use crate::error::{BlazeError, Result};
 
 /// Helper to downcast an array with a proper error message.
 /// Use this instead of `.unwrap()` on downcasts for better error reporting.
-pub(crate) fn try_downcast<'a, T: 'static>(array: &'a ArrayRef, expected_type: &str) -> Result<&'a T> {
+pub(crate) fn try_downcast<'a, T: 'static>(
+    array: &'a ArrayRef,
+    expected_type: &str,
+) -> Result<&'a T> {
     array.as_any().downcast_ref::<T>().ok_or_else(|| {
         BlazeError::type_error(format!(
             "Failed to downcast array to {}. Actual type: {:?}",
@@ -36,12 +39,10 @@ pub(crate) fn try_downcast<'a, T: 'static>(array: &'a ArrayRef, expected_type: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use arrow::array::{
-        Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray,
-    };
-    use arrow::datatypes::{DataType, Field, Schema, Schema as ArrowSchema};
     use crate::planner::{ColumnExpr, JoinType};
+    use arrow::array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema, Schema as ArrowSchema};
+    use std::sync::Arc;
 
     fn create_test_batch(
         schema: Arc<ArrowSchema>,
@@ -472,11 +473,7 @@ mod tests {
     #[test]
     fn test_hash_join_empty_right_inner() {
         let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
-        let left_batch = create_test_batch(
-            left_schema.clone(),
-            vec![1, 2],
-            vec!["Alice", "Bob"],
-        );
+        let left_batch = create_test_batch(left_schema.clone(), vec![1, 2], vec!["Alice", "Bob"]);
 
         let output_schema = make_schema(vec![
             ("id", DataType::Int64),
@@ -515,8 +512,7 @@ mod tests {
             ("user_id", DataType::Int64),
             ("product", DataType::Utf8),
         ]);
-        let right_batch =
-            create_test_batch(right_schema.clone(), vec![1], vec!["Widget"]);
+        let right_batch = create_test_batch(right_schema.clone(), vec![1], vec!["Widget"]);
 
         let left_key: Arc<dyn crate::planner::PhysicalExpr> = Arc::new(ColumnExpr::new("id", 0));
         let right_key: Arc<dyn crate::planner::PhysicalExpr> =
@@ -574,21 +570,14 @@ mod tests {
     #[test]
     fn test_hash_join_right_outer_with_unmatched() {
         let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
-        let left_batch = create_test_batch(
-            left_schema.clone(),
-            vec![1, 2],
-            vec!["Alice", "Bob"],
-        );
+        let left_batch = create_test_batch(left_schema.clone(), vec![1, 2], vec!["Alice", "Bob"]);
 
         let right_schema = make_schema(vec![
             ("user_id", DataType::Int64),
             ("product", DataType::Utf8),
         ]);
-        let right_batch = create_test_batch(
-            right_schema.clone(),
-            vec![1, 3],
-            vec!["Widget", "Gadget"],
-        );
+        let right_batch =
+            create_test_batch(right_schema.clone(), vec![1, 3], vec!["Widget", "Gadget"]);
 
         let output_schema = make_schema(vec![
             ("id", DataType::Int64),
@@ -619,21 +608,14 @@ mod tests {
     #[test]
     fn test_hash_join_full_outer() {
         let left_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
-        let left_batch = create_test_batch(
-            left_schema.clone(),
-            vec![1, 2],
-            vec!["Alice", "Bob"],
-        );
+        let left_batch = create_test_batch(left_schema.clone(), vec![1, 2], vec!["Alice", "Bob"]);
 
         let right_schema = make_schema(vec![
             ("user_id", DataType::Int64),
             ("product", DataType::Utf8),
         ]);
-        let right_batch = create_test_batch(
-            right_schema.clone(),
-            vec![1, 3],
-            vec!["Widget", "Gadget"],
-        );
+        let right_batch =
+            create_test_batch(right_schema.clone(), vec![1, 3], vec!["Widget", "Gadget"]);
 
         let output_schema = make_schema(vec![
             ("id", DataType::Int64),
@@ -727,11 +709,8 @@ mod tests {
         )
         .unwrap();
 
-        let sort_expr = crate::planner::SortExpr::new(
-            Arc::new(ColumnExpr::new("val", 0)),
-            true,
-            true,
-        );
+        let sort_expr =
+            crate::planner::SortExpr::new(Arc::new(ColumnExpr::new("val", 0)), true, true);
 
         let result = SortOperator::execute(&[sort_expr], vec![batch]).unwrap();
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
@@ -768,17 +747,9 @@ mod tests {
         )
         .unwrap();
 
-        let output_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let output_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
 
-        let result = CrossJoinOperator::execute(
-            vec![],
-            vec![right_batch],
-            &output_schema,
-        )
-        .unwrap();
+        let result = CrossJoinOperator::execute(vec![], vec![right_batch], &output_schema).unwrap();
 
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 0);
@@ -793,17 +764,9 @@ mod tests {
         )
         .unwrap();
 
-        let output_schema = make_schema(vec![
-            ("id", DataType::Int64),
-            ("name", DataType::Utf8),
-        ]);
+        let output_schema = make_schema(vec![("id", DataType::Int64), ("name", DataType::Utf8)]);
 
-        let result = CrossJoinOperator::execute(
-            vec![left_batch],
-            vec![],
-            &output_schema,
-        )
-        .unwrap();
+        let result = CrossJoinOperator::execute(vec![left_batch], vec![], &output_schema).unwrap();
 
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 0);

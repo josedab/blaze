@@ -284,7 +284,8 @@ impl CachingObjectStore {
         max_cache_bytes: usize,
         max_entries: usize,
     ) -> Self {
-        let cap = NonZeroUsize::new(max_entries).unwrap_or(NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN));
+        let cap = NonZeroUsize::new(max_entries)
+            .unwrap_or(NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN));
         Self {
             inner,
             cache: Mutex::new(LruCache::new(cap)),
@@ -419,12 +420,7 @@ impl TableProvider for ObjectStoreTable {
         None
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         let batches = self.get_batches()?;
         let mut result = Vec::new();
         let mut rows_collected = 0;
@@ -699,7 +695,10 @@ impl fmt::Debug for S3Credentials {
         f.debug_struct("S3Credentials")
             .field("access_key_id", &"[REDACTED]")
             .field("secret_access_key", &"[REDACTED]")
-            .field("session_token", &self.session_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -793,7 +792,10 @@ impl fmt::Debug for AzureBlobStore {
         f.debug_struct("AzureBlobStore")
             .field("account", &self.account)
             .field("container", &self.container)
-            .field("access_key", &self.access_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "access_key",
+                &self.access_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("sas_token", &self.sas_token.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -2128,16 +2130,16 @@ mod tests {
         let table = ObjectStoreTable::new(obj_path, schema, store);
 
         // Full scan.
-        let batches = table.scan(None, &[], None).unwrap();
+        let batches = table.scan(None, None).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
 
         // Projection pushdown – only "id" column.
-        let batches = table.scan(Some(&[0]), &[], None).unwrap();
+        let batches = table.scan(Some(&[0]), None).unwrap();
         assert_eq!(batches[0].num_columns(), 1);
 
         // Limit pushdown.
-        let batches = table.scan(None, &[], Some(3)).unwrap();
+        let batches = table.scan(None, Some(3)).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3);
     }
@@ -2161,10 +2163,10 @@ mod tests {
         let table = ObjectStoreTable::new(obj_path, schema, store);
 
         // First scan loads data.
-        let b1 = table.scan(None, &[], None).unwrap();
+        let b1 = table.scan(None, None).unwrap();
         // Delete the file to verify cache is used on second scan.
         fs::remove_file(&parquet_path).unwrap();
-        let b2 = table.scan(None, &[], None).unwrap();
+        let b2 = table.scan(None, None).unwrap();
 
         assert_eq!(b1.len(), b2.len());
         assert_eq!(b1[0].num_rows(), b2[0].num_rows());
@@ -2835,7 +2837,7 @@ mod tests {
         let uri = format!("file://{}", parquet_path.to_string_lossy());
         let table = factory.create_table(&uri).unwrap();
 
-        let batches = table.scan(None, &[], None).unwrap();
+        let batches = table.scan(None, None).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
     }

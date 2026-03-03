@@ -443,7 +443,10 @@ impl ApiServer {
 
     /// Handle an incoming request through the API pipeline.
     pub fn handle(&self, request: ApiRequest) -> ApiResponse {
-        self.stats.write().unwrap_or_else(|e| e.into_inner()).total_requests += 1;
+        self.stats
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .total_requests += 1;
 
         // Body size limit
         if self.config.max_body_size > 0 {
@@ -469,7 +472,10 @@ impl ApiServer {
                         .iter()
                         .any(|k| k.as_bytes().ct_eq(key.as_bytes()).into()) => {}
                 _ => {
-                    self.stats.write().unwrap_or_else(|e| e.into_inner()).unauthorized_requests += 1;
+                    self.stats
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .unauthorized_requests += 1;
                     return ApiResponse::unauthorized();
                 }
             }
@@ -482,16 +488,25 @@ impl ApiServer {
                     .headers
                     .get("authorization")
                     .or_else(|| request.headers.get("Authorization"))
-                    .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")));
+                    .and_then(|v| {
+                        v.strip_prefix("Bearer ")
+                            .or_else(|| v.strip_prefix("bearer "))
+                    });
                 match token {
                     Some(t) => {
                         if jwt.validate_token(t).is_err() {
-                            self.stats.write().unwrap_or_else(|e| e.into_inner()).unauthorized_requests += 1;
+                            self.stats
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .unauthorized_requests += 1;
                             return ApiResponse::unauthorized();
                         }
                     }
                     None => {
-                        self.stats.write().unwrap_or_else(|e| e.into_inner()).unauthorized_requests += 1;
+                        self.stats
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .unauthorized_requests += 1;
                         return ApiResponse::unauthorized();
                     }
                 }
@@ -505,7 +520,10 @@ impl ApiServer {
             .cloned()
             .unwrap_or_else(|| "anonymous".into());
         if !self.rate_limiter.check(&rate_key) {
-            self.stats.write().unwrap_or_else(|e| e.into_inner()).rate_limited_requests += 1;
+            self.stats
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .rate_limited_requests += 1;
             return ApiResponse::rate_limited();
         }
 
@@ -530,17 +548,27 @@ impl ApiServer {
         }
 
         // Security headers
-        response.headers.insert("X-Content-Type-Options".into(), "nosniff".into());
-        response.headers.insert("X-Frame-Options".into(), "DENY".into());
+        response
+            .headers
+            .insert("X-Content-Type-Options".into(), "nosniff".into());
+        response
+            .headers
+            .insert("X-Frame-Options".into(), "DENY".into());
         response.headers.insert(
             "Content-Security-Policy".into(),
             "default-src 'none'; frame-ancestors 'none'".into(),
         );
 
         if response.status < 400 {
-            self.stats.write().unwrap_or_else(|e| e.into_inner()).successful_requests += 1;
+            self.stats
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .successful_requests += 1;
         } else {
-            self.stats.write().unwrap_or_else(|e| e.into_inner()).failed_requests += 1;
+            self.stats
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .failed_requests += 1;
         }
         response
     }

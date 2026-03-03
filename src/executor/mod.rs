@@ -4,12 +4,14 @@
 //! physical plans and produces Arrow RecordBatches.
 
 mod operators;
+mod stream;
 
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 
 pub use operators::*;
+pub use stream::PlanStream;
 
 use crate::catalog::CatalogList;
 use crate::error::Result;
@@ -296,9 +298,7 @@ impl Executor {
                 source,
                 format,
                 ..
-            } => {
-                self.execute_copy_from(table_name, source, format)
-            }
+            } => self.execute_copy_from(table_name, source, format),
             PhysicalPlan::Exchange {
                 input,
                 exchange_type,
@@ -567,7 +567,11 @@ impl Executor {
             PhysicalPlan::ExplainAnalyze { .. } => "ExplainAnalyze".to_string(),
             PhysicalPlan::Copy { target, .. } => format!("Copy({})", target),
             PhysicalPlan::CopyFrom { source, .. } => format!("CopyFrom({})", source),
-            PhysicalPlan::Exchange { exchange_type, num_partitions, .. } => {
+            PhysicalPlan::Exchange {
+                exchange_type,
+                num_partitions,
+                ..
+            } => {
                 format!("Exchange({:?}, {})", exchange_type, num_partitions)
             }
         }
@@ -594,7 +598,7 @@ impl Executor {
                     let batches = if table.supports_filter_pushdown() && !filters.is_empty() {
                         table.scan_with_filters(projection, filters, None)?
                     } else {
-                        table.scan(projection, &[], None)?
+                        table.scan(projection, None)?
                     };
 
                     // If we got data, return it
@@ -980,20 +984,16 @@ impl Executor {
 
         // Read batches from the source file
         let source_table: Box<dyn crate::catalog::TableProvider> = match format {
-            crate::planner::CopyFormat::Csv => {
-                Box::new(CsvTable::open(source_path)?)
-            }
-            crate::planner::CopyFormat::Parquet => {
-                Box::new(ParquetTable::open(source_path)?)
-            }
+            crate::planner::CopyFormat::Csv => Box::new(CsvTable::open(source_path)?),
+            crate::planner::CopyFormat::Parquet => Box::new(ParquetTable::open(source_path)?),
             crate::planner::CopyFormat::Json => {
                 return Err(crate::error::BlazeError::not_implemented(
-                    "COPY FROM JSON format",
+                    "COPY FROM JSON format is not yet supported. Use CSV or Parquet format instead.",
                 ));
             }
         };
 
-        let batches = source_table.scan(None, &[], None)?;
+        let batches = source_table.scan(None, None)?;
 
         let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
 
@@ -1006,7 +1006,7 @@ impl Executor {
                         .downcast_ref::<crate::storage::MemoryTable>()
                         .ok_or_else(|| {
                             crate::error::BlazeError::not_implemented(
-                                "COPY FROM is only supported for in-memory tables",
+                                "COPY FROM is only supported for in-memory tables. External tables (CSV, Parquet) are read-only.",
                             )
                         })?;
                     memory_table.append(batches);
@@ -1020,11 +1020,9 @@ impl Executor {
         }
 
         // Return a result batch showing the count
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
-            "count",
-            arrow::datatypes::DataType::Int64,
-            false,
-        )]));
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("count", arrow::datatypes::DataType::Int64, false),
+        ]));
         let count_array = Arc::new(arrow::array::Int64Array::from(vec![row_count as i64]));
         Ok(vec![RecordBatch::try_new(schema, vec![count_array])?])
     }

@@ -57,7 +57,6 @@ impl TableProvider for ViewTable {
     fn scan(
         &self,
         _projection: Option<&[usize]>,
-        _filters: &[()],
         _limit: Option<usize>,
     ) -> Result<Vec<RecordBatch>> {
         Err(BlazeError::internal(

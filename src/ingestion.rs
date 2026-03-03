@@ -413,7 +413,7 @@ impl IngestionPipeline {
                 }
                 dt => {
                     return Err(BlazeError::not_implemented(format!(
-                        "ingest_rows does not yet support column type {dt:?}"
+                        "ingest_rows does not yet support column type {dt:?}. Supported types: Int64, Float64, Boolean, Utf8.",
                     )));
                 }
             };
@@ -657,7 +657,7 @@ impl SourceConnector for CsvSourceConnector {
         // from the CSV file at `self.path`. For now, mark as exhausted.
         self.exhausted = true;
         Err(BlazeError::not_implemented(format!(
-            "CsvSourceConnector::poll_batch not yet wired to file I/O for '{}'",
+            "CsvSourceConnector::poll_batch is not yet wired to file I/O for '{}'. Use the CSV storage provider via register_csv() instead.",
             self.path
         )))
     }
@@ -696,7 +696,7 @@ impl SourceConnector for JsonSourceConnector {
         }
         self.exhausted = true;
         Err(BlazeError::not_implemented(format!(
-            "JsonSourceConnector::poll_batch not yet wired to file I/O for '{}'",
+            "JsonSourceConnector::poll_batch is not yet wired to file I/O for '{}'. Use the JSON storage provider via register_json() instead.",
             self.path
         )))
     }
@@ -1124,7 +1124,7 @@ impl TransformPipeline {
                 }
 
                 Err(BlazeError::not_implemented(format!(
-                    "Filter predicate '{predicate}' is not yet supported"
+                    "Filter predicate '{predicate}' is not yet supported. Supported predicates: 'is_not_null'.",
                 )))
             }
         }

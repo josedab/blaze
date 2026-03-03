@@ -31,7 +31,8 @@ pub trait ExternalCatalogProvider: Send + Sync {
     fn get_table_schema(&self, schema: &str, table: &str) -> Result<Schema>;
 
     /// Get statistics for a table (optional).
-    fn get_table_statistics(&self, schema: &str, table: &str) -> Result<Option<ExternalTableStats>>;
+    fn get_table_statistics(&self, schema: &str, table: &str)
+        -> Result<Option<ExternalTableStats>>;
 
     /// Get the storage location for a table (e.g., S3 path).
     fn get_table_location(&self, schema: &str, table: &str) -> Result<Option<String>>;
@@ -148,7 +149,11 @@ impl ExternalCatalogProvider for CachedCatalogProvider {
         Ok(table_schema)
     }
 
-    fn get_table_statistics(&self, schema: &str, table: &str) -> Result<Option<ExternalTableStats>> {
+    fn get_table_statistics(
+        &self,
+        schema: &str,
+        table: &str,
+    ) -> Result<Option<ExternalTableStats>> {
         self.inner.get_table_statistics(schema, table)
     }
 

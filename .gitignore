@@ -32,3 +32,5 @@ Thumbs.db
 *.tmp
 *.log
 /fuzz/target
+vscode-extension/node_modules/
+vscode-extension/out/

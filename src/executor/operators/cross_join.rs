@@ -113,11 +113,8 @@ mod tests {
 
     fn make_batch(name: &str, values: Vec<i64>) -> (Arc<ArrowSchema>, RecordBatch) {
         let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Int64, false)]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(values))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(values))]).unwrap();
         (schema, batch)
     }
 
@@ -166,4 +163,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

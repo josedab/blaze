@@ -42,13 +42,64 @@ impl BlazeHelper {
 }
 
 const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
-    "DELETE", "CREATE", "TABLE", "DROP", "ALTER", "JOIN", "INNER", "LEFT",
-    "RIGHT", "FULL", "OUTER", "CROSS", "ON", "GROUP", "BY", "ORDER", "ASC",
-    "DESC", "LIMIT", "OFFSET", "HAVING", "UNION", "INTERSECT", "EXCEPT",
-    "WITH", "AS", "AND", "OR", "NOT", "NULL", "IS", "IN", "BETWEEN", "LIKE",
-    "CASE", "WHEN", "THEN", "ELSE", "END", "DISTINCT", "COUNT", "SUM", "AVG",
-    "MIN", "MAX", "EXPLAIN", "ANALYZE", "COPY", "TO", "VIEW",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "DROP",
+    "ALTER",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "CROSS",
+    "ON",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "ASC",
+    "DESC",
+    "LIMIT",
+    "OFFSET",
+    "HAVING",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "WITH",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "BETWEEN",
+    "LIKE",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "DISTINCT",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "EXPLAIN",
+    "ANALYZE",
+    "COPY",
+    "TO",
+    "VIEW",
 ];
 
 impl Completer for BlazeHelper {
@@ -73,8 +124,8 @@ impl Completer for BlazeHelper {
         // Complete dot-commands
         if prefix.starts_with('.') {
             for cmd in &[
-                ".tables", ".schema", ".read", ".timer", ".mode", ".output",
-                ".help", ".exit", ".quit", ".advice",
+                ".tables", ".schema", ".read", ".timer", ".mode", ".output", ".help", ".exit",
+                ".quit", ".advice",
             ] {
                 if cmd.starts_with(prefix) {
                     completions.push(Pair {
@@ -382,7 +433,11 @@ impl Session {
             match self.conn.query(input) {
                 Ok(batches) => {
                     for batch in &batches {
-                        if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow::array::StringArray>() {
+                        if let Some(col) = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<arrow::array::StringArray>()
+                        {
                             for i in 0..col.len() {
                                 if let Some(line) = col.value(i).into() {
                                     println!("{}", line);
@@ -437,9 +492,7 @@ fn main() -> Result<()> {
         println!("Type '.help' for available commands, '.exit' to quit.\n");
     }
 
-    let config = Config::builder()
-        .auto_add_history(true)
-        .build();
+    let config = Config::builder().auto_add_history(true).build();
     let mut rl = Editor::<BlazeHelper, rustyline::history::DefaultHistory>::with_config(config)
         .unwrap_or_else(|_| Editor::new().expect("Failed to create editor"));
     rl.set_helper(Some(BlazeHelper::new()));

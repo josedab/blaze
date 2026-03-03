@@ -598,9 +598,8 @@ impl AuditLogWriter {
 
     /// Serialize and append an audit event as a single JSON line.
     pub fn log_event(&self, event: &AuditEvent) -> Result<()> {
-        let json = serde_json::to_string(event).map_err(|e| {
-            BlazeError::internal(format!("Failed to serialize audit event: {}", e))
-        })?;
+        let json = serde_json::to_string(event)
+            .map_err(|e| BlazeError::internal(format!("Failed to serialize audit event: {}", e)))?;
         let mut file = self.file.lock();
         writeln!(file, "{}", json)?;
         file.flush()?;

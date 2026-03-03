@@ -167,7 +167,7 @@ impl LakehouseTable for DeltaTable {
             let file_path = self.location.join(&file_info.path);
             if file_path.exists() {
                 let parquet = ParquetTable::open(&file_path)?;
-                let batches = parquet.scan(None, &[], None)?;
+                let batches = parquet.scan(None, None)?;
                 all_batches.extend(batches);
             }
         }

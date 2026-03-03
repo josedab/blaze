@@ -122,12 +122,13 @@ pub enum LogicalExpr {
         high: Box<LogicalExpr>,
     },
 
-    /// LIKE expression
+    /// LIKE expression (also used for ILIKE with case_insensitive=true)
     Like {
         negated: bool,
         expr: Box<LogicalExpr>,
         pattern: Box<LogicalExpr>,
         escape: Option<Box<LogicalExpr>>,
+        case_insensitive: bool,
     },
 
     /// IN list expression
@@ -959,7 +960,11 @@ mod tests {
         };
         assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
         let display = format!("{}", expr);
-        assert!(display.contains("BETWEEN") || display.contains("NOT BETWEEN") || display.contains("expr"));
+        assert!(
+            display.contains("BETWEEN")
+                || display.contains("NOT BETWEEN")
+                || display.contains("expr")
+        );
     }
 
     // --- LIKE expression tests ---
@@ -971,6 +976,7 @@ mod tests {
             expr: Box::new(LogicalExpr::column("name")),
             pattern: Box::new(LogicalExpr::literal("A%")),
             escape: None,
+            case_insensitive: false,
         };
         let cols = expr.columns();
         assert_eq!(cols.len(), 1);
@@ -985,10 +991,26 @@ mod tests {
             expr: Box::new(LogicalExpr::column("name")),
             pattern: Box::new(LogicalExpr::literal("100\\%")),
             escape: Some(Box::new(LogicalExpr::literal("\\"))),
+            case_insensitive: false,
         };
         let cols = expr.columns();
         // Column from expr + column-less literal pattern + escape
         assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_ilike_expr() {
+        let expr = LogicalExpr::Like {
+            negated: false,
+            expr: Box::new(LogicalExpr::column("name")),
+            pattern: Box::new(LogicalExpr::literal("a%")),
+            escape: None,
+            case_insensitive: true,
+        };
+        let cols = expr.columns();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "name");
+        assert_eq!(expr.data_type(&test_schema()), DataType::Boolean);
     }
 
     // --- CASE expression tests ---
@@ -997,12 +1019,10 @@ mod tests {
     fn test_case_expr_simple() {
         let expr = LogicalExpr::Case {
             expr: None,
-            when_then_exprs: vec![
-                (
-                    LogicalExpr::column("active").eq(LogicalExpr::literal(true)),
-                    LogicalExpr::literal("yes"),
-                ),
-            ],
+            when_then_exprs: vec![(
+                LogicalExpr::column("active").eq(LogicalExpr::literal(true)),
+                LogicalExpr::literal("yes"),
+            )],
             else_expr: Some(Box::new(LogicalExpr::literal("no"))),
         };
         let cols = expr.columns();
@@ -1029,12 +1049,10 @@ mod tests {
     fn test_case_expr_no_else() {
         let expr = LogicalExpr::Case {
             expr: None,
-            when_then_exprs: vec![
-                (
-                    LogicalExpr::column("age").gt(LogicalExpr::literal(30i32)),
-                    LogicalExpr::literal("senior"),
-                ),
-            ],
+            when_then_exprs: vec![(
+                LogicalExpr::column("age").gt(LogicalExpr::literal(30i32)),
+                LogicalExpr::literal("senior"),
+            )],
             else_expr: None,
         };
         let cols = expr.columns();

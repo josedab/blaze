@@ -1042,15 +1042,16 @@ mod tests {
                 time_travel: None,
             },
             JoinType::Inner,
-            vec![(
-                LogicalExpr::column("id"),
-                LogicalExpr::column("user_id"),
-            )],
+            vec![(LogicalExpr::column("id"), LogicalExpr::column("user_id"))],
         )
         .unwrap()
         .build();
         let schema = plan.schema();
-        assert_eq!(schema.fields().len(), 4, "Join should merge fields from both sides");
+        assert_eq!(
+            schema.fields().len(),
+            4,
+            "Join should merge fields from both sides"
+        );
     }
 
     #[test]
@@ -1132,9 +1133,7 @@ mod tests {
 
     #[test]
     fn test_values_schema() {
-        let schema = Schema::new(vec![
-            Field::new("x", DataType::Int64, false),
-        ]);
+        let schema = Schema::new(vec![Field::new("x", DataType::Int64, false)]);
         let plan = LogicalPlan::Values {
             schema: schema.clone(),
             values: vec![vec![LogicalExpr::literal(1i32)]],

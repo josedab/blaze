@@ -99,7 +99,10 @@ impl WorkerPool {
 
         // For single task, execute directly
         if num_tasks == 1 {
-            let task = tasks.into_iter().next().ok_or_else(|| BlazeError::execution("Expected at least one task"))?;
+            let task = tasks
+                .into_iter()
+                .next()
+                .ok_or_else(|| BlazeError::execution("Expected at least one task"))?;
             let result = task.execute(1);
             return Ok(vec![result]);
         }
@@ -136,7 +139,8 @@ impl WorkerPool {
                                 Err(e) => {
                                     let mut rg = results.lock().unwrap_or_else(|e| e.into_inner());
                                     rg[idx] = Some(Err(BlazeError::execution(format!(
-                                        "Task mutex poisoned: {}", e
+                                        "Task mutex poisoned: {}",
+                                        e
                                     ))));
                                     continue;
                                 }

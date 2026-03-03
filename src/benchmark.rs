@@ -355,14 +355,18 @@ impl BenchmarkReport {
         html.push_str("margin: 0; padding: 20px; background: #f5f5f5; }\n");
         html.push_str("h1 { color: #333; text-align: center; }\n");
         html.push_str(".dashboard { max-width: 1200px; margin: 0 auto; }\n");
-        html.push_str(".card { background: white; border-radius: 8px; padding: 20px; margin: 16px 0; ");
+        html.push_str(
+            ".card { background: white; border-radius: 8px; padding: 20px; margin: 16px 0; ",
+        );
         html.push_str("box-shadow: 0 2px 4px rgba(0,0,0,0.1); }\n");
         html.push_str(".grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }\n");
         html.push_str(".stat { text-align: center; padding: 12px; }\n");
         html.push_str(".stat-value { font-size: 2em; font-weight: bold; color: #2563eb; }\n");
         html.push_str(".stat-label { color: #666; font-size: 0.9em; }\n");
         html.push_str("table { width: 100%; border-collapse: collapse; }\n");
-        html.push_str("th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; }\n");
+        html.push_str(
+            "th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; }\n",
+        );
         html.push_str("th { background: #f8f9fa; font-weight: 600; }\n");
         html.push_str(".pass { color: #16a34a; } .fail { color: #dc2626; }\n");
         html.push_str("</style>\n</head><body>\n");
@@ -429,10 +433,7 @@ impl BenchmarkReport {
         html.push_str("<script>\n");
         html.push_str("new Chart(document.getElementById('latencyChart'), {\n");
         html.push_str("  type: 'bar',\n");
-        html.push_str(&format!(
-            "  data: {{ labels: [{}],\n",
-            labels.join(",")
-        ));
+        html.push_str(&format!("  data: {{ labels: [{}],\n", labels.join(",")));
         html.push_str(&format!(
             "    datasets: [{{ label: 'Latency (ms)', data: [{}],\n",
             data.join(",")
@@ -580,9 +581,7 @@ pub struct EngineComparison {
 pub fn engine_comparison_report(comparisons: &[EngineComparison]) -> String {
     let mut md = String::new();
     md.push_str("## Cross-Engine Comparison\n\n");
-    md.push_str(
-        "| Query | Blaze (ms) | DuckDB (ms) | DataFusion (ms) | Blaze vs DuckDB |\n",
-    );
+    md.push_str("| Query | Blaze (ms) | DuckDB (ms) | DataFusion (ms) | Blaze vs DuckDB |\n");
     md.push_str("|-------|-----------|------------|----------------|----------------|\n");
 
     // Group by query name

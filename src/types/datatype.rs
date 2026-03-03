@@ -642,7 +642,10 @@ mod tests {
         assert_eq!(DataType::from_sql_type("FLOAT4"), DataType::Float32);
         assert_eq!(DataType::from_sql_type("DOUBLE"), DataType::Float64);
         assert_eq!(DataType::from_sql_type("FLOAT8"), DataType::Float64);
-        assert_eq!(DataType::from_sql_type("DOUBLE PRECISION"), DataType::Float64);
+        assert_eq!(
+            DataType::from_sql_type("DOUBLE PRECISION"),
+            DataType::Float64
+        );
     }
 
     #[test]
@@ -657,20 +660,32 @@ mod tests {
     fn test_from_sql_type_decimal() {
         assert_eq!(
             DataType::from_sql_type("DECIMAL(10,2)"),
-            DataType::Decimal128 { precision: 10, scale: 2 }
+            DataType::Decimal128 {
+                precision: 10,
+                scale: 2
+            }
         );
         assert_eq!(
             DataType::from_sql_type("DECIMAL(18)"),
-            DataType::Decimal128 { precision: 18, scale: 0 }
+            DataType::Decimal128 {
+                precision: 18,
+                scale: 0
+            }
         );
         assert_eq!(
             DataType::from_sql_type("NUMERIC(5,3)"),
-            DataType::Decimal128 { precision: 5, scale: 3 }
+            DataType::Decimal128 {
+                precision: 5,
+                scale: 3
+            }
         );
         // Without params
         assert_eq!(
             DataType::from_sql_type("DECIMAL"),
-            DataType::Decimal128 { precision: 38, scale: 0 }
+            DataType::Decimal128 {
+                precision: 38,
+                scale: 0
+            }
         );
     }
 
@@ -680,17 +695,32 @@ mod tests {
         assert!(matches!(ts, DataType::Timestamp { timezone: None, .. }));
 
         let ts_tz = DataType::from_sql_type("TIMESTAMP WITH TIME ZONE");
-        assert!(matches!(ts_tz, DataType::Timestamp { timezone: Some(_), .. }));
+        assert!(matches!(
+            ts_tz,
+            DataType::Timestamp {
+                timezone: Some(_),
+                ..
+            }
+        ));
 
         let ts_tz2 = DataType::from_sql_type("TIMESTAMPTZ");
-        assert!(matches!(ts_tz2, DataType::Timestamp { timezone: Some(_), .. }));
+        assert!(matches!(
+            ts_tz2,
+            DataType::Timestamp {
+                timezone: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn test_from_sql_type_date_time() {
         assert_eq!(DataType::from_sql_type("DATE"), DataType::Date32);
         assert_eq!(DataType::from_sql_type("TIME"), DataType::Time64Microsecond);
-        assert_eq!(DataType::from_sql_type("INTERVAL"), DataType::IntervalDayTime);
+        assert_eq!(
+            DataType::from_sql_type("INTERVAL"),
+            DataType::IntervalDayTime
+        );
     }
 
     #[test]
@@ -745,7 +775,11 @@ mod tests {
 
     #[test]
     fn test_is_numeric_decimal() {
-        assert!(DataType::Decimal128 { precision: 10, scale: 2 }.is_numeric());
+        assert!(DataType::Decimal128 {
+            precision: 10,
+            scale: 2
+        }
+        .is_numeric());
     }
 
     #[test]
@@ -756,8 +790,15 @@ mod tests {
         assert!(DataType::Time32Millisecond.is_temporal());
         assert!(DataType::Time64Microsecond.is_temporal());
         assert!(DataType::Time64Nanosecond.is_temporal());
-        assert!(DataType::Timestamp { unit: TimeUnit::Second, timezone: None }.is_temporal());
-        assert!(DataType::Duration { unit: TimeUnit::Millisecond }.is_temporal());
+        assert!(DataType::Timestamp {
+            unit: TimeUnit::Second,
+            timezone: None
+        }
+        .is_temporal());
+        assert!(DataType::Duration {
+            unit: TimeUnit::Millisecond
+        }
+        .is_temporal());
         assert!(DataType::IntervalYearMonth.is_temporal());
         assert!(DataType::IntervalDayTime.is_temporal());
         assert!(DataType::IntervalMonthDayNano.is_temporal());
@@ -767,7 +808,11 @@ mod tests {
     fn test_is_nested() {
         assert!(DataType::List(Box::new(DataType::Int32)).is_nested());
         assert!(DataType::Struct(vec![("a".to_string(), DataType::Int32)]).is_nested());
-        assert!(DataType::Map { key_type: Box::new(DataType::Utf8), value_type: Box::new(DataType::Int32) }.is_nested());
+        assert!(DataType::Map {
+            key_type: Box::new(DataType::Utf8),
+            value_type: Box::new(DataType::Int32)
+        }
+        .is_nested());
         assert!(!DataType::Int32.is_nested());
     }
 
@@ -817,9 +862,18 @@ mod tests {
         assert_eq!(format!("{}", DataType::Utf8), "VARCHAR");
         assert_eq!(format!("{}", DataType::Boolean), "BOOLEAN");
         assert_eq!(format!("{}", DataType::Json), "JSON");
-        assert_eq!(format!("{}", DataType::Vector { dimension: 128 }), "VECTOR(128)");
         assert_eq!(
-            format!("{}", DataType::Decimal128 { precision: 10, scale: 2 }),
+            format!("{}", DataType::Vector { dimension: 128 }),
+            "VECTOR(128)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                DataType::Decimal128 {
+                    precision: 10,
+                    scale: 2
+                }
+            ),
             "DECIMAL(10, 2)"
         );
     }
@@ -841,7 +895,10 @@ mod tests {
             DataType::LargeUtf8,
             DataType::Date32,
             DataType::Date64,
-            DataType::Decimal128 { precision: 10, scale: 2 },
+            DataType::Decimal128 {
+                precision: 10,
+                scale: 2,
+            },
         ];
 
         for dtype in types {
@@ -853,7 +910,12 @@ mod tests {
 
     #[test]
     fn test_time_unit_roundtrip() {
-        for unit in [TimeUnit::Second, TimeUnit::Millisecond, TimeUnit::Microsecond, TimeUnit::Nanosecond] {
+        for unit in [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ] {
             let arrow_unit = unit.to_arrow();
             let back = TimeUnit::from_arrow(arrow_unit);
             assert_eq!(unit, back);

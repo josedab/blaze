@@ -56,10 +56,7 @@ pub enum Statement {
         or_replace: bool,
     },
     /// DROP VIEW
-    DropView {
-        name: Vec<String>,
-        if_exists: bool,
-    },
+    DropView { name: Vec<String>, if_exists: bool },
     /// CREATE MATERIALIZED VIEW
     CreateMaterializedView(CreateMaterializedView),
     /// REFRESH MATERIALIZED VIEW
@@ -320,12 +317,13 @@ pub enum Expr {
         high: Box<Expr>,
         negated: bool,
     },
-    /// LIKE expression
+    /// LIKE expression (also used for ILIKE with case_insensitive=true)
     Like {
         expr: Box<Expr>,
         pattern: Box<Expr>,
         escape: Option<Box<Expr>>,
         negated: bool,
+        case_insensitive: bool,
     },
     /// Aggregate function
     Aggregate {
@@ -629,9 +627,6 @@ pub fn preprocess_duckdb_sql(sql: &str) -> String {
         result = cast_re.replace_all(&result, "CAST($1 AS $2)").to_string();
     }
 
-    // Transform ILIKE to LIKE (case-insensitive LIKE → use LOWER)
-    result = result.replace(" ILIKE ", " LIKE ");
-
     // Transform EPOCH_MS() to standard
     result = result.replace("epoch_ms(", "TO_TIMESTAMP(");
 
@@ -654,8 +649,13 @@ impl Parser {
     pub fn parse(sql: &str) -> Result<Vec<Statement>> {
         // Handle REFRESH MATERIALIZED VIEW before passing to sqlparser
         let trimmed = sql.trim();
-        if trimmed.to_uppercase().starts_with("REFRESH MATERIALIZED VIEW") {
-            let name = trimmed["REFRESH MATERIALIZED VIEW".len()..].trim().trim_end_matches(';');
+        if trimmed
+            .to_uppercase()
+            .starts_with("REFRESH MATERIALIZED VIEW")
+        {
+            let name = trimmed["REFRESH MATERIALIZED VIEW".len()..]
+                .trim()
+                .trim_end_matches(';');
             return Ok(vec![Statement::RefreshMaterializedView {
                 name: name.split('.').map(|s| s.trim().to_string()).collect(),
             }]);
@@ -735,7 +735,7 @@ impl Parser {
                             }
                             sql_ast::AssignmentTarget::Tuple(_) => {
                                 return Err(BlazeError::not_implemented(
-                                    "Tuple assignment targets",
+                                    "Tuple assignment targets in UPDATE are not supported. Assign columns individually instead.",
                                 ));
                             }
                         };
@@ -810,7 +810,9 @@ impl Parser {
                         let cols = columns.iter().map(|i| i.to_string()).collect();
                         (name, cols)
                     }
-                    _ => return Err(BlazeError::not_implemented("COPY from query")),
+                    _ => return Err(BlazeError::not_implemented(
+                        "COPY from a query is not supported. Use COPY from a table name instead.",
+                    )),
                 };
                 let direction = if to {
                     CopyDirection::To
@@ -821,7 +823,9 @@ impl Parser {
                     sql_ast::CopyTarget::File { filename } => CopyTarget::File(filename),
                     sql_ast::CopyTarget::Stdin => CopyTarget::Stdin,
                     sql_ast::CopyTarget::Stdout => CopyTarget::Stdout,
-                    _ => return Err(BlazeError::not_implemented("COPY target type")),
+                    _ => return Err(BlazeError::not_implemented(
+                        "COPY target type is not supported. Use file paths (COPY ... TO 'file.csv') or STDIN/STDOUT.",
+                    )),
                 };
                 let opts: Vec<(String, String)> = options
                     .iter()
@@ -1231,9 +1235,12 @@ impl Parser {
                 } else {
                     Ok(Expr::Column(ColumnRef {
                         relation: Some(parts[..parts.len() - 1].join(".")),
-                        name: parts.last().ok_or_else(|| {
-                            crate::error::BlazeError::analysis("Empty compound identifier")
-                        })?.clone(),
+                        name: parts
+                            .last()
+                            .ok_or_else(|| {
+                                crate::error::BlazeError::analysis("Empty compound identifier")
+                            })?
+                            .clone(),
                     }))
                 }
             }
@@ -1336,6 +1343,21 @@ impl Parser {
                 escape: escape_char
                     .map(|c| Box::new(Expr::Literal(Literal::String(c.to_string())))),
                 negated,
+                case_insensitive: false,
+            }),
+            sql_ast::Expr::ILike {
+                expr,
+                pattern,
+                escape_char,
+                negated,
+                ..
+            } => Ok(Expr::Like {
+                expr: Box::new(Self::convert_expr(*expr)?),
+                pattern: Box::new(Self::convert_expr(*pattern)?),
+                escape: escape_char
+                    .map(|c| Box::new(Expr::Literal(Literal::String(c.to_string())))),
+                negated,
+                case_insensitive: true,
             }),
             sql_ast::Expr::Nested(expr) => Ok(Expr::Nested(Box::new(Self::convert_expr(*expr)?))),
             sql_ast::Expr::Tuple(exprs) => Ok(Expr::Tuple(

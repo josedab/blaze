@@ -124,14 +124,14 @@ impl ExternalDataProvider for FileProvider {
             ExternalSourceType::File { path, format } => match format {
                 DataFormat::Csv => {
                     let table = crate::storage::CsvTable::open(path)?;
-                    table.scan(None, &[], config.max_rows)
+                    table.scan(None, config.max_rows)
                 }
                 DataFormat::Parquet => {
                     let table = crate::storage::ParquetTable::open(path)?;
-                    table.scan(None, &[], config.max_rows)
+                    table.scan(None, config.max_rows)
                 }
                 _ => Err(BlazeError::not_implemented(format!(
-                    "File format {:?} not yet supported by FileProvider",
+                    "File format {:?} is not yet supported by FileProvider. Use CSV or Parquet format instead.",
                     format
                 ))),
             },
@@ -153,7 +153,7 @@ impl ExternalDataProvider for FileProvider {
                     Ok(table.schema().clone())
                 }
                 _ => Err(BlazeError::not_implemented(format!(
-                    "Schema inference for file format {:?} not yet supported",
+                    "Schema inference for file format {:?} is not yet supported. Use CSV or Parquet format instead.",
                     format
                 ))),
             },
@@ -229,11 +229,11 @@ impl ExternalDataProvider for S3Provider {
                     match format_str {
                         "parquet" | "pq" => {
                             let table = crate::storage::ParquetTable::open(key)?;
-                            return table.scan(None, &[], config.max_rows);
+                            return table.scan(None, config.max_rows);
                         }
                         "csv" => {
                             let table = crate::storage::CsvTable::open(key)?;
-                            return table.scan(None, &[], config.max_rows);
+                            return table.scan(None, config.max_rows);
                         }
                         _ => {}
                     }
@@ -275,7 +275,9 @@ impl ExternalDataProvider for S3Provider {
                     }
                 }
 
-                Err(BlazeError::not_implemented("S3 remote schema inference"))
+                Err(BlazeError::not_implemented(
+                    "S3 remote schema inference requires a live S3 connection. Use a local file path for testing.",
+                ))
             }
             _ => Err(BlazeError::invalid_argument(
                 "S3Provider requires Custom source type",
@@ -329,7 +331,7 @@ impl ExternalDataProvider for HttpProvider {
                 // For JSON format, we'd parse the response into RecordBatches
                 // For now, return error with instructions
                 Err(BlazeError::not_implemented(format!(
-                    "HTTP fetch from {} (format: {:?}). Requires async HTTP client.",
+                    "HTTP fetch from {} (format: {:?}) requires an async HTTP client. Use local file paths or the file provider instead.",
                     url, format
                 )))
             }
@@ -344,14 +346,14 @@ impl ExternalDataProvider for HttpProvider {
                     match format_str {
                         "csv" => {
                             let table = crate::storage::CsvTable::open(url)?;
-                            return table.scan(None, &[], config.max_rows);
+                            return table.scan(None, config.max_rows);
                         }
                         _ => {}
                     }
                 }
 
                 Err(BlazeError::not_implemented(format!(
-                    "HTTP fetch from {}",
+                    "HTTP fetch from {} requires an async HTTP client. Use local file paths or the file provider instead.",
                     url
                 )))
             }
@@ -363,7 +365,7 @@ impl ExternalDataProvider for HttpProvider {
 
     fn infer_schema(&self, _config: &ExternalTableConfig) -> Result<Schema> {
         Err(BlazeError::not_implemented(
-            "HTTP schema inference requires fetching a sample from the endpoint",
+            "HTTP schema inference requires fetching a sample from the endpoint. Use local file-based providers instead.",
         ))
     }
 }
@@ -416,7 +418,7 @@ impl ExternalDataProvider for PostgresConnector {
                     })?;
 
                 Err(BlazeError::not_implemented(
-                    "PostgreSQL wire protocol connector requires tokio-postgres dependency",
+                    "PostgreSQL wire protocol connector requires the tokio-postgres dependency. Use file-based data sources instead.",
                 ))
             }
             _ => Err(BlazeError::invalid_argument(
@@ -435,7 +437,9 @@ impl ExternalDataProvider for PostgresConnector {
                 }
             }
         }
-        Err(BlazeError::not_implemented("PostgreSQL schema inference"))
+        Err(BlazeError::not_implemented(
+            "PostgreSQL schema inference requires a live database connection (not yet implemented). Use file-based data sources instead.",
+        ))
     }
 
     fn supports_pushdown(&self) -> bool {
@@ -520,12 +524,7 @@ impl TableProvider for ExternalTable {
         crate::catalog::TableType::External
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         let batches = self.get_data()?;
 
         // Apply projection if specified
@@ -606,7 +605,7 @@ impl FederationRegistry {
 
         let provider = self.get_provider(provider_name).ok_or_else(|| {
             BlazeError::not_implemented(format!(
-                "External data provider '{}' not registered",
+                "External data provider '{}' is not registered. Register it with FederationManager::register_provider() first.",
                 provider_name
             ))
         })?;
@@ -659,22 +658,46 @@ impl ShippablePredicate {
     pub fn to_sql(&self) -> String {
         match self {
             Self::Eq { column, value } => {
-                format!("\"{}\" = '{}'", Self::quote_ident(column), Self::escape_value(value))
+                format!(
+                    "\"{}\" = '{}'",
+                    Self::quote_ident(column),
+                    Self::escape_value(value)
+                )
             }
             Self::NotEq { column, value } => {
-                format!("\"{}\" <> '{}'", Self::quote_ident(column), Self::escape_value(value))
+                format!(
+                    "\"{}\" <> '{}'",
+                    Self::quote_ident(column),
+                    Self::escape_value(value)
+                )
             }
             Self::Lt { column, value } => {
-                format!("\"{}\" < '{}'", Self::quote_ident(column), Self::escape_value(value))
+                format!(
+                    "\"{}\" < '{}'",
+                    Self::quote_ident(column),
+                    Self::escape_value(value)
+                )
             }
             Self::LtEq { column, value } => {
-                format!("\"{}\" <= '{}'", Self::quote_ident(column), Self::escape_value(value))
+                format!(
+                    "\"{}\" <= '{}'",
+                    Self::quote_ident(column),
+                    Self::escape_value(value)
+                )
             }
             Self::Gt { column, value } => {
-                format!("\"{}\" > '{}'", Self::quote_ident(column), Self::escape_value(value))
+                format!(
+                    "\"{}\" > '{}'",
+                    Self::quote_ident(column),
+                    Self::escape_value(value)
+                )
             }
             Self::GtEq { column, value } => {
-                format!("\"{}\" >= '{}'", Self::quote_ident(column), Self::escape_value(value))
+                format!(
+                    "\"{}\" >= '{}'",
+                    Self::quote_ident(column),
+                    Self::escape_value(value)
+                )
             }
             Self::IsNull { column } => format!("\"{}\" IS NULL", Self::quote_ident(column)),
             Self::IsNotNull { column } => format!("\"{}\" IS NOT NULL", Self::quote_ident(column)),
@@ -745,7 +768,7 @@ impl FederatedQueryPlanner {
 
         // Fetch from source
         let table = self.registry.create_external_table(config.clone())?;
-        let data = table.scan(None, &[], config.max_rows)?;
+        let data = table.scan(None, config.max_rows)?;
 
         // Cache if TTL > 0
         if config.cache_ttl_secs > 0 {
@@ -846,12 +869,7 @@ impl TableProvider for FederatedTable {
         crate::catalog::TableType::External
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         let batches = self.materialize()?;
 
         let mut result = Vec::new();
@@ -962,7 +980,7 @@ impl ExternalDataProvider for MySQLConnector {
                     })?;
 
                 Err(BlazeError::not_implemented(
-                    "MySQL wire protocol connector requires mysql_async dependency",
+                    "MySQL wire protocol connector requires the mysql_async dependency. Use file-based data sources instead.",
                 ))
             }
             _ => Err(BlazeError::invalid_argument(
@@ -981,7 +999,9 @@ impl ExternalDataProvider for MySQLConnector {
                 }
             }
         }
-        Err(BlazeError::not_implemented("MySQL schema inference"))
+        Err(BlazeError::not_implemented(
+            "MySQL schema inference requires a live database connection (not yet implemented). Use file-based data sources instead.",
+        ))
     }
 
     fn supports_pushdown(&self) -> bool {
@@ -1843,7 +1863,7 @@ mod tests {
 
         assert_eq!(table.schema().len(), 3);
 
-        let batches = table.scan(None, &[], None).unwrap();
+        let batches = table.scan(None, None).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3);
     }
@@ -1868,7 +1888,7 @@ mod tests {
         let table = registry.create_external_table(config).unwrap();
 
         // Project only the first column
-        let batches = table.scan(Some(&[0]), &[], None).unwrap();
+        let batches = table.scan(Some(&[0]), None).unwrap();
         assert_eq!(batches[0].num_columns(), 1);
     }
 
@@ -1893,7 +1913,7 @@ mod tests {
         let registry = FederationRegistry::new();
         let table = registry.create_external_table(config).unwrap();
 
-        let batches = table.scan(None, &[], Some(2)).unwrap();
+        let batches = table.scan(None, Some(2)).unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2);
     }
@@ -1918,11 +1938,11 @@ mod tests {
         let table = registry.create_external_table(config).unwrap();
 
         // First scan populates cache
-        let batches1 = table.scan(None, &[], None).unwrap();
+        let batches1 = table.scan(None, None).unwrap();
         assert_eq!(batches1.len(), 1);
 
         // Second scan should use cache
-        let batches2 = table.scan(None, &[], None).unwrap();
+        let batches2 = table.scan(None, None).unwrap();
         assert_eq!(batches2.len(), 1);
     }
 
@@ -2071,7 +2091,7 @@ mod tests {
         );
 
         let fed_table = FederatedTable::new("fed", schema, vec![source], planner);
-        let batches = fed_table.scan(None, &[], None).unwrap();
+        let batches = fed_table.scan(None, None).unwrap();
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 2);
     }

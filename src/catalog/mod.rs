@@ -3,9 +3,9 @@
 //!
 //! The catalog maintains metadata about databases, schemas, tables, and functions.
 
-mod table;
 pub mod external;
 pub mod information_schema;
+mod table;
 
 use std::collections::HashMap;
 use std::sync::Arc;

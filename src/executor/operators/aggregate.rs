@@ -5,17 +5,17 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Date32Array, Date64Array, Float32Array,
-    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch, StringArray,
-    UInt32Array, UInt64Array,
+    Array, ArrayRef, Date32Array, Date64Array, Decimal128Array, Float32Array, Float64Array,
+    Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch, StringArray, UInt32Array,
+    UInt64Array,
 };
 use arrow::compute;
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 
 use crate::error::{BlazeError, Result};
 
-use super::try_downcast;
 use super::hash_join::JoinHashTable;
+use super::try_downcast;
 
 /// Legacy HashTable for backward compatibility.
 pub struct HashTable {
@@ -86,21 +86,61 @@ impl HashTable {
         }
 
         match array.data_type() {
+            DataType::Boolean => {
+                let arr = try_downcast::<arrow::array::BooleanArray>(array, "BooleanArray")?;
+                arr.value(row).hash(hasher);
+            }
+            DataType::Int8 => {
+                let arr = try_downcast::<Int8Array>(array, "Int8Array")?;
+                arr.value(row).hash(hasher);
+            }
+            DataType::Int16 => {
+                let arr = try_downcast::<Int16Array>(array, "Int16Array")?;
+                arr.value(row).hash(hasher);
+            }
+            DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(array, "Int32Array")?;
+                arr.value(row).hash(hasher);
+            }
             DataType::Int64 => {
                 let arr = try_downcast::<Int64Array>(array, "Int64Array")?;
                 arr.value(row).hash(hasher);
             }
-            DataType::Utf8 => {
-                let arr = try_downcast::<StringArray>(array, "StringArray")?;
+            DataType::UInt32 => {
+                let arr = try_downcast::<UInt32Array>(array, "UInt32Array")?;
                 arr.value(row).hash(hasher);
+            }
+            DataType::UInt64 => {
+                let arr = try_downcast::<UInt64Array>(array, "UInt64Array")?;
+                arr.value(row).hash(hasher);
+            }
+            DataType::Float32 => {
+                let arr = try_downcast::<Float32Array>(array, "Float32Array")?;
+                arr.value(row).to_bits().hash(hasher);
             }
             DataType::Float64 => {
                 let arr = try_downcast::<Float64Array>(array, "Float64Array")?;
                 arr.value(row).to_bits().hash(hasher);
             }
+            DataType::Utf8 => {
+                let arr = try_downcast::<StringArray>(array, "StringArray")?;
+                arr.value(row).hash(hasher);
+            }
+            DataType::Date32 => {
+                let arr = try_downcast::<Date32Array>(array, "Date32Array")?;
+                arr.value(row).hash(hasher);
+            }
+            DataType::Date64 => {
+                let arr = try_downcast::<Date64Array>(array, "Date64Array")?;
+                arr.value(row).hash(hasher);
+            }
+            DataType::Decimal128(_, _) => {
+                let arr = try_downcast::<Decimal128Array>(array, "Decimal128Array")?;
+                arr.value(row).hash(hasher);
+            }
             dt => {
                 return Err(BlazeError::not_implemented(format!(
-                    "Hash for type {:?}",
+                    "GROUP BY hash for type {:?}. Supported types: Boolean, Int8-64, UInt32-64, Float32-64, Utf8, Date32, Date64, Decimal128.",
                     dt
                 )));
             }
@@ -889,7 +929,8 @@ mod tests {
     #[test]
     fn test_count_basic() {
         let mut acc = CountAccumulator::new();
-        acc.update(&int64_array(&[Some(1), Some(2), Some(3)])).unwrap();
+        acc.update(&int64_array(&[Some(1), Some(2), Some(3)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(arr.value(0), 3);
@@ -898,7 +939,8 @@ mod tests {
     #[test]
     fn test_count_with_nulls() {
         let mut acc = CountAccumulator::new();
-        acc.update(&int64_array(&[Some(1), None, Some(3), None])).unwrap();
+        acc.update(&int64_array(&[Some(1), None, Some(3), None]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(arr.value(0), 2, "COUNT should skip NULL values");
@@ -949,7 +991,8 @@ mod tests {
     #[test]
     fn test_sum_int64() {
         let mut acc = SumAccumulator::new();
-        acc.update(&int64_array(&[Some(10), Some(20), Some(30)])).unwrap();
+        acc.update(&int64_array(&[Some(10), Some(20), Some(30)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(arr.value(0), 60.0);
@@ -958,7 +1001,8 @@ mod tests {
     #[test]
     fn test_sum_float64() {
         let mut acc = SumAccumulator::new();
-        acc.update(&float64_array(&[Some(1.5), Some(2.5), Some(3.0)])).unwrap();
+        acc.update(&float64_array(&[Some(1.5), Some(2.5), Some(3.0)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert!((arr.value(0) - 7.0).abs() < f64::EPSILON);
@@ -967,7 +1011,8 @@ mod tests {
     #[test]
     fn test_sum_with_nulls() {
         let mut acc = SumAccumulator::new();
-        acc.update(&int64_array(&[Some(10), None, Some(30)])).unwrap();
+        acc.update(&int64_array(&[Some(10), None, Some(30)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(arr.value(0), 40.0);
@@ -1007,7 +1052,8 @@ mod tests {
     #[test]
     fn test_avg_basic() {
         let mut acc = AvgAccumulator::new();
-        acc.update(&int64_array(&[Some(10), Some(20), Some(30)])).unwrap();
+        acc.update(&int64_array(&[Some(10), Some(20), Some(30)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert!((arr.value(0) - 20.0).abs() < f64::EPSILON);
@@ -1016,10 +1062,14 @@ mod tests {
     #[test]
     fn test_avg_with_nulls() {
         let mut acc = AvgAccumulator::new();
-        acc.update(&int64_array(&[Some(10), None, Some(30)])).unwrap();
+        acc.update(&int64_array(&[Some(10), None, Some(30)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert!((arr.value(0) - 20.0).abs() < f64::EPSILON, "AVG should skip NULLs");
+        assert!(
+            (arr.value(0) - 20.0).abs() < f64::EPSILON,
+            "AVG should skip NULLs"
+        );
     }
 
     #[test]
@@ -1047,7 +1097,8 @@ mod tests {
     #[test]
     fn test_min_basic() {
         let mut acc = MinAccumulator::new();
-        acc.update(&int64_array(&[Some(30), Some(10), Some(20)])).unwrap();
+        acc.update(&int64_array(&[Some(30), Some(10), Some(20)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(arr.value(0), 10.0);
@@ -1056,7 +1107,8 @@ mod tests {
     #[test]
     fn test_min_with_nulls() {
         let mut acc = MinAccumulator::new();
-        acc.update(&int64_array(&[None, Some(30), None, Some(10)])).unwrap();
+        acc.update(&int64_array(&[None, Some(30), None, Some(10)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(arr.value(0), 10.0, "MIN should skip NULLs");
@@ -1076,7 +1128,8 @@ mod tests {
     #[test]
     fn test_max_basic() {
         let mut acc = MaxAccumulator::new();
-        acc.update(&int64_array(&[Some(10), Some(30), Some(20)])).unwrap();
+        acc.update(&int64_array(&[Some(10), Some(30), Some(20)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(arr.value(0), 30.0);
@@ -1085,7 +1138,8 @@ mod tests {
     #[test]
     fn test_max_with_nulls() {
         let mut acc = MaxAccumulator::new();
-        acc.update(&int64_array(&[None, Some(10), Some(30), None])).unwrap();
+        acc.update(&int64_array(&[None, Some(10), Some(30), None]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(arr.value(0), 30.0, "MAX should skip NULLs");
@@ -1108,37 +1162,52 @@ mod tests {
     #[test]
     fn test_approx_count_distinct_basic() {
         let mut acc = ApproxCountDistinctAccumulator::new();
-        acc.update(&int64_array(&[Some(1), Some(2), Some(3), Some(1), Some(2)])).unwrap();
+        acc.update(&int64_array(&[Some(1), Some(2), Some(3), Some(1), Some(2)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
         let estimate = arr.value(0);
-        assert!(estimate >= 2 && estimate <= 5,
-            "Approx count distinct of [1,2,3,1,2] should be ~3, got {}", estimate);
+        assert!(
+            estimate >= 2 && estimate <= 5,
+            "Approx count distinct of [1,2,3,1,2] should be ~3, got {}",
+            estimate
+        );
     }
 
     #[test]
     fn test_approx_count_distinct_with_nulls() {
         let mut acc = ApproxCountDistinctAccumulator::new();
-        acc.update(&int64_array(&[Some(1), None, Some(2), None, Some(1)])).unwrap();
+        acc.update(&int64_array(&[Some(1), None, Some(2), None, Some(1)]))
+            .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
         let estimate = arr.value(0);
-        assert!(estimate >= 1 && estimate <= 4,
-            "Approx count distinct should be ~2, got {}", estimate);
+        assert!(
+            estimate >= 1 && estimate <= 4,
+            "Approx count distinct should be ~2, got {}",
+            estimate
+        );
     }
 
     #[test]
     fn test_approx_count_distinct_strings() {
         let mut acc = ApproxCountDistinctAccumulator::new();
         let arr: ArrayRef = Arc::new(StringArray::from(vec![
-            Some("a"), Some("b"), Some("a"), Some("c"), Some("b"),
+            Some("a"),
+            Some("b"),
+            Some("a"),
+            Some("c"),
+            Some("b"),
         ]));
         acc.update(&arr).unwrap();
         let result = acc.finalize().unwrap();
         let result_arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
         let estimate = result_arr.value(0);
-        assert!(estimate >= 2 && estimate <= 5,
-            "Approx count distinct of strings should be ~3, got {}", estimate);
+        assert!(
+            estimate >= 2 && estimate <= 5,
+            "Approx count distinct of strings should be ~3, got {}",
+            estimate
+        );
     }
 
     #[test]
@@ -1151,14 +1220,18 @@ mod tests {
         let result = acc1.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
         let estimate = arr.value(0);
-        assert!(estimate >= 3 && estimate <= 6,
-            "Merged approx count distinct should be ~4, got {}", estimate);
+        assert!(
+            estimate >= 3 && estimate <= 6,
+            "Merged approx count distinct should be ~4, got {}",
+            estimate
+        );
     }
 
     #[test]
     fn test_approx_count_distinct_reset() {
         let mut acc = ApproxCountDistinctAccumulator::new();
-        acc.update(&int64_array(&[Some(1), Some(2), Some(3)])).unwrap();
+        acc.update(&int64_array(&[Some(1), Some(2), Some(3)]))
+            .unwrap();
         acc.reset();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
@@ -1170,12 +1243,22 @@ mod tests {
     #[test]
     fn test_approx_percentile_median() {
         let mut acc = ApproxPercentileAccumulator::median();
-        acc.update(&float64_array(&[Some(10.0), Some(20.0), Some(30.0), Some(40.0), Some(50.0)])).unwrap();
+        acc.update(&float64_array(&[
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            Some(40.0),
+            Some(50.0),
+        ]))
+        .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         let median = arr.value(0);
-        assert!((median - 30.0).abs() < 10.0,
-            "Median of [10,20,30,40,50] should be ~30, got {}", median);
+        assert!(
+            (median - 30.0).abs() < 10.0,
+            "Median of [10,20,30,40,50] should be ~30, got {}",
+            median
+        );
     }
 
     #[test]
@@ -1186,19 +1269,32 @@ mod tests {
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         let p90 = arr.value(0);
-        assert!(p90 >= 50.0 && p90 <= 100.0,
-            "P90 of 1..100 should be high, got {}", p90);
+        assert!(
+            p90 >= 50.0 && p90 <= 100.0,
+            "P90 of 1..100 should be high, got {}",
+            p90
+        );
     }
 
     #[test]
     fn test_approx_percentile_with_nulls() {
         let mut acc = ApproxPercentileAccumulator::median();
-        acc.update(&float64_array(&[Some(10.0), None, Some(30.0), None, Some(50.0)])).unwrap();
+        acc.update(&float64_array(&[
+            Some(10.0),
+            None,
+            Some(30.0),
+            None,
+            Some(50.0),
+        ]))
+        .unwrap();
         let result = acc.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         let median = arr.value(0);
-        assert!((median - 30.0).abs() < 15.0,
-            "Median of [10,30,50] (nulls skipped) should be ~30, got {}", median);
+        assert!(
+            (median - 30.0).abs() < 15.0,
+            "Median of [10,30,50] (nulls skipped) should be ~30, got {}",
+            median
+        );
     }
 
     #[test]
@@ -1212,15 +1308,20 @@ mod tests {
     #[test]
     fn test_approx_percentile_merge() {
         let mut acc1 = ApproxPercentileAccumulator::median();
-        acc1.update(&float64_array(&[Some(10.0), Some(20.0)])).unwrap();
+        acc1.update(&float64_array(&[Some(10.0), Some(20.0)]))
+            .unwrap();
         let mut acc2 = ApproxPercentileAccumulator::median();
-        acc2.update(&float64_array(&[Some(30.0), Some(40.0)])).unwrap();
+        acc2.update(&float64_array(&[Some(30.0), Some(40.0)]))
+            .unwrap();
         acc1.merge(&acc2).unwrap();
         let result = acc1.finalize().unwrap();
         let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
         let median = arr.value(0);
-        assert!((median - 25.0).abs() < 15.0,
-            "Merged median of [10,20,30,40] should be ~25, got {}", median);
+        assert!(
+            (median - 25.0).abs() < 15.0,
+            "Merged median of [10,20,30,40] should be ~25, got {}",
+            median
+        );
     }
 
     #[test]
@@ -1236,9 +1337,14 @@ mod tests {
     #[test]
     fn test_approx_percentile_clamped() {
         let acc = ApproxPercentileAccumulator::new(1.5);
-        assert!((acc.percentile - 1.0).abs() < f64::EPSILON, "Percentile should be clamped to 1.0");
+        assert!(
+            (acc.percentile - 1.0).abs() < f64::EPSILON,
+            "Percentile should be clamped to 1.0"
+        );
         let acc2 = ApproxPercentileAccumulator::new(-0.5);
-        assert!((acc2.percentile - 0.0).abs() < f64::EPSILON, "Percentile should be clamped to 0.0");
+        assert!(
+            (acc2.percentile - 0.0).abs() < f64::EPSILON,
+            "Percentile should be clamped to 0.0"
+        );
     }
 }
-

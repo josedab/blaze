@@ -91,8 +91,7 @@ impl MemoryTable {
         let new_batches: Vec<RecordBatch> = batches
             .iter()
             .map(|batch| {
-                let mut columns: Vec<Arc<dyn arrow::array::Array>> =
-                    batch.columns().to_vec();
+                let mut columns: Vec<Arc<dyn arrow::array::Array>> = batch.columns().to_vec();
                 columns.push(arrow::array::new_null_array(&data_type, batch.num_rows()));
                 let arrow_schema = Arc::new(new_schema.to_arrow());
                 RecordBatch::try_new(arrow_schema, columns)
@@ -105,9 +104,10 @@ impl MemoryTable {
 
     /// Return a new MemoryTable with the specified column removed.
     pub fn with_dropped_column(&self, name: &str) -> Result<Self> {
-        let idx = self.schema.index_of(name).ok_or_else(|| {
-            BlazeError::analysis(format!("Column '{name}' not found in table"))
-        })?;
+        let idx = self
+            .schema
+            .index_of(name)
+            .ok_or_else(|| BlazeError::analysis(format!("Column '{name}' not found in table")))?;
 
         let fields: Vec<Field> = self
             .schema
@@ -224,12 +224,7 @@ impl TableProvider for MemoryTable {
         })
     }
 
-    fn scan(
-        &self,
-        projection: Option<&[usize]>,
-        _filters: &[()],
-        limit: Option<usize>,
-    ) -> Result<Vec<RecordBatch>> {
+    fn scan(&self, projection: Option<&[usize]>, limit: Option<usize>) -> Result<Vec<RecordBatch>> {
         let batches = self.batches.read();
         let mut result = Vec::new();
         let mut rows_collected = 0;
@@ -400,7 +395,7 @@ mod tests {
         let batch = create_test_batch();
         let table = MemoryTable::new(schema, vec![batch]);
 
-        let result = table.scan(Some(&[0]), &[], None).unwrap();
+        let result = table.scan(Some(&[0]), None).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].num_columns(), 1);
     }
@@ -415,7 +410,7 @@ mod tests {
         let batch = create_test_batch();
         let table = MemoryTable::new(schema, vec![batch]);
 
-        let result = table.scan(None, &[], Some(3)).unwrap();
+        let result = table.scan(None, Some(3)).unwrap();
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 3);
     }
