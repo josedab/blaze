@@ -266,3 +266,96 @@ fn test_like_not_like() {
         .unwrap();
     assert_eq!(total_rows(&r), 4);
 }
+
+// --- VALUES clause tests ---
+
+#[test]
+fn test_values_basic() {
+    let c = Connection::in_memory().unwrap();
+    let r = c.query("VALUES (1, 'hello'), (2, 'world')").unwrap();
+    assert_eq!(total_rows(&r), 2);
+    assert_eq!(r[0].num_columns(), 2);
+}
+
+#[test]
+fn test_values_single_row() {
+    let c = Connection::in_memory().unwrap();
+    let r = c.query("VALUES (42, 'test', true)").unwrap();
+    assert_eq!(total_rows(&r), 1);
+    assert_eq!(r[0].num_columns(), 3);
+}
+
+#[test]
+fn test_values_integers_only() {
+    let c = Connection::in_memory().unwrap();
+    let r = c.query("VALUES (1), (2), (3)").unwrap();
+    assert_eq!(total_rows(&r), 3);
+    assert_eq!(r[0].num_columns(), 1);
+
+    // Verify the actual data
+    let col = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("Expected Int64 column");
+    assert_eq!(col.value(0), 1);
+    assert_eq!(col.value(1), 2);
+    assert_eq!(col.value(2), 3);
+}
+
+#[test]
+fn test_values_with_nulls() {
+    let c = Connection::in_memory().unwrap();
+    let r = c.query("VALUES (1, 'hello'), (2, NULL)").unwrap();
+    assert_eq!(total_rows(&r), 2);
+    assert_eq!(r[0].num_columns(), 2);
+}
+
+#[test]
+fn test_values_floats() {
+    let c = Connection::in_memory().unwrap();
+    let r = c.query("VALUES (1.5), (2.7), (3.14)").unwrap();
+    assert_eq!(total_rows(&r), 3);
+
+    let col = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .expect("Expected Float64 column");
+    assert!((col.value(0) - 1.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_values_strings() {
+    let c = Connection::in_memory().unwrap();
+    let r = c.query("VALUES ('alice'), ('bob'), ('charlie')").unwrap();
+    assert_eq!(total_rows(&r), 3);
+
+    let col = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("Expected String column");
+    assert_eq!(col.value(0), "alice");
+    assert_eq!(col.value(1), "bob");
+    assert_eq!(col.value(2), "charlie");
+}
+
+#[test]
+fn test_values_booleans() {
+    let c = Connection::in_memory().unwrap();
+    let r = c.query("VALUES (true), (false), (true)").unwrap();
+    assert_eq!(total_rows(&r), 3);
+}
+
+#[test]
+fn test_values_insert_roundtrip() {
+    // VALUES should work correctly when used in INSERT context
+    let c = Connection::in_memory().unwrap();
+    c.execute("CREATE TABLE test_vals (id BIGINT, name VARCHAR)")
+        .unwrap();
+    c.execute("INSERT INTO test_vals VALUES (1, 'one'), (2, 'two'), (3, 'three')")
+        .unwrap();
+    let r = c.query("SELECT * FROM test_vals").unwrap();
+    assert_eq!(total_rows(&r), 3);
+}

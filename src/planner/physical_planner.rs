@@ -325,10 +325,92 @@ impl PhysicalPlanner {
                     });
                 }
 
-                // For now, create empty batches
-                // Full implementation would materialize values
+                let num_cols = if let Some(first_row) = values.first() {
+                    first_row.len()
+                } else {
+                    return Ok(PhysicalPlan::Empty {
+                        produce_one_row: false,
+                        schema: arrow_schema,
+                    });
+                };
+
+                // Build columnar arrays from row-oriented values.
+                // Each column collects ScalarValues from all rows, then converts to Arrow array.
+                let mut columns: Vec<Vec<ScalarValue>> =
+                    vec![Vec::with_capacity(values.len()); num_cols];
+
+                for row in values {
+                    if row.len() != num_cols {
+                        return Err(BlazeError::analysis(format!(
+                            "VALUES row has {} columns, expected {}",
+                            row.len(),
+                            num_cols
+                        )));
+                    }
+                    for (col_idx, expr) in row.iter().enumerate() {
+                        let scalar = match expr {
+                            LogicalExpr::Literal(val) => val.clone(),
+                            _ => {
+                                // For non-literal expressions, try to evaluate as a physical expression
+                                // against an empty batch (supports constant expressions like 1+2)
+                                let dummy_schema = arrow_schema.clone();
+                                match self.create_physical_expr(expr, &dummy_schema) {
+                                    Ok(phys_expr) => {
+                                        let empty_batch = RecordBatch::new_empty(dummy_schema);
+                                        // For constant expressions, evaluate against a 1-row dummy
+                                        let one_row_schema = Arc::new(ArrowSchema::new(vec![
+                                            arrow::datatypes::Field::new(
+                                                "_dummy",
+                                                arrow::datatypes::DataType::Boolean,
+                                                true,
+                                            ),
+                                        ]));
+                                        let one_row = RecordBatch::try_new(
+                                            one_row_schema,
+                                            vec![Arc::new(arrow::array::BooleanArray::from(vec![
+                                                Some(true),
+                                            ]))
+                                                as arrow::array::ArrayRef],
+                                        )
+                                        .map_err(|e| {
+                                            BlazeError::execution(format!(
+                                                "Failed to create dummy batch: {}",
+                                                e
+                                            ))
+                                        })?;
+
+                                        match phys_expr.evaluate(&one_row) {
+                                            Ok(arr) if !arr.is_empty() => {
+                                                ScalarValue::try_from_array(&arr, 0)?
+                                            }
+                                            _ => match phys_expr.evaluate(&empty_batch) {
+                                                Ok(arr) if !arr.is_empty() => {
+                                                    ScalarValue::try_from_array(&arr, 0)?
+                                                }
+                                                _ => ScalarValue::Null,
+                                            },
+                                        }
+                                    }
+                                    Err(_) => ScalarValue::Null,
+                                }
+                            }
+                        };
+                        columns[col_idx].push(scalar);
+                    }
+                }
+
+                // Convert each column to an Arrow array
+                let arrays: Vec<arrow::array::ArrayRef> = columns
+                    .iter()
+                    .map(|col| ScalarValue::vec_to_array(col))
+                    .collect::<Result<Vec<_>>>()?;
+
+                let batch = RecordBatch::try_new(arrow_schema.clone(), arrays).map_err(|e| {
+                    BlazeError::execution(format!("Failed to create VALUES batch: {}", e))
+                })?;
+
                 Ok(PhysicalPlan::Values {
-                    data: vec![],
+                    data: vec![batch],
                     schema: arrow_schema,
                 })
             }

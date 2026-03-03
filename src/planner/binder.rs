@@ -373,12 +373,41 @@ impl Binder {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                // Infer schema from first row
+                // Infer schema from actual expression types
                 let schema = if let Some(first_row) = values.first() {
-                    let fields: Vec<Field> = first_row
-                        .iter()
-                        .enumerate()
-                        .map(|(i, _)| Field::new(format!("column{}", i), DataType::Utf8, true))
+                    let num_cols = first_row.len();
+                    let fields: Vec<Field> = (0..num_cols)
+                        .map(|i| {
+                            // Find the type from the first non-null literal in this column
+                            let col_type = values
+                                .iter()
+                                .filter_map(|row| {
+                                    row.get(i).and_then(|expr| match expr {
+                                        LogicalExpr::Literal(ScalarValue::Null) => None,
+                                        LogicalExpr::Literal(val) => Some(val.data_type()),
+                                        _ => {
+                                            // For non-literal expressions, use a dummy schema
+                                            let dt = expr.data_type(&crate::types::Schema::empty());
+                                            if dt != crate::types::DataType::Utf8 {
+                                                Some(dt)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                    })
+                                })
+                                .next()
+                                .unwrap_or(crate::types::DataType::Utf8);
+
+                            // Column is nullable if any row has NULL for this column
+                            let nullable = values.iter().any(|row| {
+                                row.get(i)
+                                    .map(|e| matches!(e, LogicalExpr::Literal(ScalarValue::Null)))
+                                    .unwrap_or(true)
+                            });
+
+                            Field::new(format!("column{}", i), col_type, nullable)
+                        })
                         .collect();
                     Schema::new(fields)
                 } else {

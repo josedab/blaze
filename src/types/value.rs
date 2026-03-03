@@ -488,6 +488,39 @@ impl ScalarValue {
                     .collect();
                 Ok(Arc::new(arr))
             }
+            DataType::Int8 => {
+                let arr: Int8Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Int8(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Int16 => {
+                let arr: Int16Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Int16(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Int32 => {
+                let arr: Int32Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Int32(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
             DataType::Int64 => {
                 let arr: Int64Array = values
                     .iter()
@@ -499,11 +532,67 @@ impl ScalarValue {
                     .collect();
                 Ok(Arc::new(arr))
             }
+            DataType::UInt8 => {
+                let arr: UInt8Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::UInt8(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::UInt16 => {
+                let arr: UInt16Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::UInt16(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::UInt32 => {
+                let arr: UInt32Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::UInt32(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::UInt64 => {
+                let arr: UInt64Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::UInt64(i) => *i,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Float32 => {
+                let arr: Float32Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Float32(f) => *f,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
             DataType::Float64 => {
                 let arr: Float64Array = values
                     .iter()
                     .map(|v| match v {
                         ScalarValue::Float64(f) => *f,
+                        ScalarValue::Int64(Some(i)) => Some(*i as f64),
                         ScalarValue::Null => None,
                         _ => None,
                     })
@@ -521,8 +610,102 @@ impl ScalarValue {
                     .collect();
                 Ok(Arc::new(arr))
             }
+            DataType::LargeUtf8 => {
+                let arr: LargeStringArray = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::LargeUtf8(s) => s.as_deref(),
+                        ScalarValue::Utf8(s) => s.as_deref(),
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Binary => {
+                let arr: arrow::array::BinaryArray = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Binary(b) => b.as_deref(),
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Date32 => {
+                let arr: Date32Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Date32(d) => *d,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Date64 => {
+                let arr: Date64Array = values
+                    .iter()
+                    .map(|v| match v {
+                        ScalarValue::Date64(d) => *d,
+                        ScalarValue::Null => None,
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(arr))
+            }
+            DataType::Timestamp { unit, timezone } => {
+                let tz: Option<Arc<str>> = timezone.map(|s| s.into());
+                match unit {
+                    TimeUnit::Second => {
+                        let arr: TimestampSecondArray = values
+                            .iter()
+                            .map(|v| match v {
+                                ScalarValue::Timestamp { value, .. } => *value,
+                                ScalarValue::Null => None,
+                                _ => None,
+                            })
+                            .collect();
+                        Ok(Arc::new(arr.with_timezone_opt(tz)))
+                    }
+                    TimeUnit::Millisecond => {
+                        let arr: TimestampMillisecondArray = values
+                            .iter()
+                            .map(|v| match v {
+                                ScalarValue::Timestamp { value, .. } => *value,
+                                ScalarValue::Null => None,
+                                _ => None,
+                            })
+                            .collect();
+                        Ok(Arc::new(arr.with_timezone_opt(tz)))
+                    }
+                    TimeUnit::Microsecond => {
+                        let arr: TimestampMicrosecondArray = values
+                            .iter()
+                            .map(|v| match v {
+                                ScalarValue::Timestamp { value, .. } => *value,
+                                ScalarValue::Null => None,
+                                _ => None,
+                            })
+                            .collect();
+                        Ok(Arc::new(arr.with_timezone_opt(tz)))
+                    }
+                    TimeUnit::Nanosecond => {
+                        let arr: TimestampNanosecondArray = values
+                            .iter()
+                            .map(|v| match v {
+                                ScalarValue::Timestamp { value, .. } => *value,
+                                ScalarValue::Null => None,
+                                _ => None,
+                            })
+                            .collect();
+                        Ok(Arc::new(arr.with_timezone_opt(tz)))
+                    }
+                }
+            }
             _ => Err(BlazeError::not_implemented(format!(
-                "vec_to_array for data type {:?}. Supported types: Int64, Float64, Boolean, Utf8.",
+                "vec_to_array for data type {:?}",
                 data_type
             ))),
         }
