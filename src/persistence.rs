@@ -842,6 +842,35 @@ impl PersistentDatabase {
         Ok(entries.into_iter().map(|(_, entry)| entry).collect())
     }
 
+    /// Recover only WAL entries recorded after the last checkpoint.
+    ///
+    /// When snapshots are loaded first, only entries written after the last
+    /// checkpoint marker need to be replayed. This avoids re-applying
+    /// mutations that are already captured in the snapshot.
+    pub fn recover_after_checkpoint(&self) -> Result<Vec<WalEntry>> {
+        let entries = self.wal.replay()?;
+
+        // Find the position of the last checkpoint entry
+        let last_checkpoint_pos = entries
+            .iter()
+            .rposition(|(_, entry)| matches!(entry, WalEntry::Checkpoint { .. }));
+
+        match last_checkpoint_pos {
+            Some(pos) => {
+                // Return only entries after the last checkpoint
+                Ok(entries
+                    .into_iter()
+                    .skip(pos + 1)
+                    .map(|(_, entry)| entry)
+                    .collect())
+            }
+            None => {
+                // No checkpoint found — replay everything
+                Ok(entries.into_iter().map(|(_, entry)| entry).collect())
+            }
+        }
+    }
+
     /// Load all table snapshots.
     ///
     /// Returns a map from table name to (Arrow schema, record batches).
@@ -4665,5 +4694,201 @@ mod tests {
             }
             other => panic!("Expected DeleteRows, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_recover_after_checkpoint_skips_old_entries() {
+        let tmp = TempDir::new().unwrap();
+        let mut db = PersistentDatabase::open(tmp.path().join("db")).unwrap();
+
+        let schema = create_test_schema();
+
+        // Log some initial operations
+        db.log_create_table("users", &schema).unwrap();
+        let batch = create_test_batch();
+        db.log_insert("users", &batch).unwrap();
+
+        // Checkpoint (saves snapshots + truncates WAL)
+        let mut tables = HashMap::new();
+        tables.insert("users".to_string(), vec![create_test_batch()]);
+        db.checkpoint(&tables).unwrap();
+
+        // Log more operations after checkpoint
+        db.log_insert("users", &create_test_batch()).unwrap();
+        db.wal.flush().unwrap();
+
+        // recover() returns all entries (WAL was truncated at checkpoint, only post-checkpoint entries remain)
+        let all_entries = db.recover().unwrap();
+        // After truncation, only the post-checkpoint insert should remain
+        assert_eq!(all_entries.len(), 1);
+        assert!(matches!(all_entries[0], WalEntry::InsertBatch { .. }));
+
+        // recover_after_checkpoint() should also return just the post-checkpoint entry
+        let after_cp = db.recover_after_checkpoint().unwrap();
+        assert_eq!(after_cp.len(), 1);
+        assert!(matches!(after_cp[0], WalEntry::InsertBatch { .. }));
+    }
+
+    #[test]
+    fn test_recover_after_checkpoint_no_checkpoint() {
+        let tmp = TempDir::new().unwrap();
+        let mut db = PersistentDatabase::open(tmp.path().join("db")).unwrap();
+
+        let schema = create_test_schema();
+        db.log_create_table("t", &schema).unwrap();
+        db.log_insert("t", &create_test_batch()).unwrap();
+        db.wal.flush().unwrap();
+
+        // No checkpoint taken — recover_after_checkpoint returns everything
+        let entries = db.recover_after_checkpoint().unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn test_recover_after_checkpoint_with_inline_checkpoint_marker() {
+        let tmp = TempDir::new().unwrap();
+        let wal_path = tmp.path().join("test.wal");
+
+        // Manually build a WAL with a checkpoint marker in the middle
+        // (simulating a crash between snapshot save and WAL truncation)
+        let mut wal = WriteAheadLog::new(&wal_path).unwrap();
+
+        let schema = create_test_schema();
+        wal.append(&WalEntry::CreateTable {
+            name: "t".to_string(),
+            schema: schema.clone(),
+        })
+        .unwrap();
+
+        let batch = create_test_batch();
+        let batch_data = PersistentDatabase::serialize_batch(&batch).unwrap();
+        wal.append(&WalEntry::InsertBatch {
+            table: "t".to_string(),
+            batch_data: batch_data.clone(),
+        })
+        .unwrap();
+
+        // Checkpoint marker
+        wal.append(&WalEntry::Checkpoint { timestamp: 12345 })
+            .unwrap();
+
+        // Post-checkpoint entries
+        wal.append(&WalEntry::InsertBatch {
+            table: "t".to_string(),
+            batch_data,
+        })
+        .unwrap();
+
+        wal.flush().unwrap();
+
+        // Build a PersistentDatabase pointing at this WAL
+        let snapshot_dir = tmp.path().join("snapshots");
+        fs::create_dir_all(&snapshot_dir).unwrap();
+        let db = PersistentDatabase {
+            wal: WriteAheadLog::open(&wal_path).unwrap(),
+            snapshot_manager: SnapshotManager::new(&snapshot_dir).unwrap(),
+            db_path: tmp.path().to_path_buf(),
+        };
+
+        // recover() returns ALL 4 entries
+        let all = db.recover().unwrap();
+        assert_eq!(all.len(), 4);
+
+        // recover_after_checkpoint() returns only the 1 entry after the checkpoint marker
+        let after = db.recover_after_checkpoint().unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(matches!(after[0], WalEntry::InsertBatch { .. }));
+    }
+
+    #[test]
+    fn test_wal_encrypted_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let wal_path = tmp.path().join("encrypted.wal");
+        let key = [0xAB; 32];
+
+        {
+            let mut wal = WriteAheadLog::new(&wal_path)
+                .unwrap()
+                .with_encryption(WalEncryption::new(key));
+
+            let schema = create_test_schema();
+            wal.append(&WalEntry::CreateTable {
+                name: "secret_table".to_string(),
+                schema,
+            })
+            .unwrap();
+
+            let batch = create_test_batch();
+            let batch_data = PersistentDatabase::serialize_batch(&batch).unwrap();
+            wal.append(&WalEntry::InsertBatch {
+                table: "secret_table".to_string(),
+                batch_data,
+            })
+            .unwrap();
+
+            wal.flush().unwrap();
+        }
+
+        // Re-open with the same key and verify replay works
+        let wal = WriteAheadLog::open(&wal_path)
+            .unwrap()
+            .with_encryption(WalEncryption::new(key));
+
+        let entries = wal.replay().unwrap();
+        assert_eq!(entries.len(), 2);
+
+        if let WalEntry::CreateTable { name, .. } = &entries[0].1 {
+            assert_eq!(name, "secret_table");
+        } else {
+            panic!("Expected CreateTable");
+        }
+    }
+
+    #[test]
+    fn test_wal_encryption_disabled_by_default() {
+        let enc = WalEncryption::default();
+        assert!(!enc.is_enabled());
+
+        // When disabled, encrypt/decrypt are identity operations
+        let data = b"hello world";
+        assert_eq!(enc.encrypt(data), data.to_vec());
+        assert_eq!(enc.decrypt(data), data.to_vec());
+    }
+
+    #[test]
+    fn test_compression_rle_empty_data() {
+        let codec = CompressionCodec::RunLengthEncoding;
+        let compressed = codec.compress(&[]).unwrap();
+        assert!(compressed.is_empty());
+        let decompressed = codec.decompress(&compressed, 0).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[test]
+    fn test_compression_none_identity() {
+        let codec = CompressionCodec::None;
+        let data = vec![1, 2, 3, 4, 5];
+        let compressed = codec.compress(&data).unwrap();
+        assert_eq!(compressed, data);
+        let decompressed = codec.decompress(&compressed, data.len()).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_compression_codec_names() {
+        assert_eq!(CompressionCodec::None.name(), "none");
+        assert_eq!(CompressionCodec::Dictionary.name(), "dictionary");
+        assert_eq!(CompressionCodec::RunLengthEncoding.name(), "rle");
+        assert_eq!(CompressionCodec::DeltaEncoding.name(), "delta");
+        assert_eq!(CompressionCodec::Snappy.name(), "snappy");
+    }
+
+    #[test]
+    fn test_compression_snappy_roundtrip() {
+        let codec = CompressionCodec::Snappy;
+        let data = vec![10, 20, 30, 40, 50];
+        let compressed = codec.compress(&data).unwrap();
+        let decompressed = codec.decompress(&compressed, data.len()).unwrap();
+        assert_eq!(decompressed, data);
     }
 }

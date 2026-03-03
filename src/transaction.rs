@@ -165,6 +165,9 @@ impl TransactionManager {
     }
 
     /// Commit a transaction.
+    ///
+    /// If another transaction committed writes to any of the same tables since
+    /// this transaction's snapshot, the commit is rejected with a conflict error.
     pub fn commit(&self, txn_id: TxnId) -> Result<()> {
         // Get the transaction
         let txn = {
@@ -184,9 +187,30 @@ impl TransactionManager {
                 )));
             }
 
-            // Check for write-write conflicts
-            // (simplified: just check if any other committed transaction modified the same tables)
             let write_tables: Vec<String> = txn.write_set.keys().cloned().collect();
+            let snapshot_ts = txn.snapshot_ts;
+
+            // Check for write-write conflicts: reject if any other transaction
+            // committed writes to overlapping tables after our snapshot.
+            if !write_tables.is_empty() {
+                let versions = self.table_versions.read().map_err(|e| {
+                    BlazeError::internal(format!("Failed to acquire version lock: {}", e))
+                })?;
+
+                for table in &write_tables {
+                    if let Some(table_versions) = versions.get(table) {
+                        for version in table_versions {
+                            if version.created_by > snapshot_ts && version.visible {
+                                return Err(BlazeError::execution(format!(
+                                    "Write-write conflict on table '{}': \
+                                     another transaction committed changes since snapshot",
+                                    table
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
 
             // Mark as committed
             txn.status = TxnStatus::Committed;
@@ -682,14 +706,50 @@ mod tests {
         let t2 = mgr.begin().unwrap();
         mgr.write(t2, "table_a", vec![make_batch(&[2])]).unwrap();
 
-        // T1 commits first
+        // T1 commits first — should succeed
         mgr.commit(t1).unwrap();
 
-        // T2 commits after - in current implementation, both succeed
-        // (no strict write-write conflict detection yet)
+        // T2 commits after — should fail due to write-write conflict
         let result = mgr.commit(t2);
-        // Either outcome is valid for the current MVCC implementation
-        drop(result);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Write-write conflict"));
+    }
+
+    #[test]
+    fn test_no_conflict_on_different_tables() {
+        let mgr = TransactionManager::new();
+
+        // T1 writes to table A
+        let t1 = mgr.begin().unwrap();
+        mgr.write(t1, "table_a", vec![make_batch(&[1])]).unwrap();
+
+        // T2 writes to table B (different table)
+        let t2 = mgr.begin().unwrap();
+        mgr.write(t2, "table_b", vec![make_batch(&[2])]).unwrap();
+
+        // Both should commit successfully — no conflict
+        mgr.commit(t1).unwrap();
+        mgr.commit(t2).unwrap();
+    }
+
+    #[test]
+    fn test_no_conflict_when_first_txn_started_after() {
+        let mgr = TransactionManager::new();
+
+        // T1 writes and commits first
+        let t1 = mgr.begin().unwrap();
+        mgr.write(t1, "table_a", vec![make_batch(&[1])]).unwrap();
+        mgr.commit(t1).unwrap();
+
+        // T2 starts after T1 committed — should see T1's commit in its snapshot
+        let t2 = mgr.begin().unwrap();
+        mgr.write(t2, "table_a", vec![make_batch(&[2])]).unwrap();
+
+        // T2 should succeed — T1's version was before T2's snapshot
+        mgr.commit(t2).unwrap();
     }
 
     #[test]

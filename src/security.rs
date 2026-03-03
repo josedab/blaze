@@ -3,7 +3,7 @@
 //! Provides RBAC, row-level security, column masking, and audit logging
 //! for multi-tenant and enterprise deployments.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,8 @@ use parking_lot::Mutex;
 use serde::Serialize;
 
 use crate::error::{BlazeError, Result};
+
+use subtle::ConstantTimeEq;
 
 // ---------------------------------------------------------------------------
 // RBAC (Role-Based Access Control)
@@ -109,15 +111,16 @@ impl RbacManager {
     }
 
     /// Check whether a user holds a given permission through any assigned role.
+    /// A role with `Permission::Admin` implicitly grants all other permissions.
     pub fn check_permission(&self, username: &str, permission: Permission) -> bool {
         let user = match self.users.get(username) {
             Some(u) => u,
             None => return false,
         };
         user.roles.iter().any(|role_name| {
-            self.roles
-                .get(role_name)
-                .is_some_and(|r| r.permissions.contains(&permission))
+            self.roles.get(role_name).is_some_and(|r| {
+                r.permissions.contains(&permission) || r.permissions.contains(&Permission::Admin)
+            })
         })
     }
 }
@@ -334,23 +337,23 @@ pub struct AuditStats {
 #[derive(Debug)]
 pub struct AuditLog {
     max_entries: usize,
-    events: Vec<AuditEvent>,
+    events: VecDeque<AuditEvent>,
 }
 
 impl AuditLog {
     pub fn new(max_entries: usize) -> Self {
         Self {
             max_entries,
-            events: Vec::new(),
+            events: VecDeque::new(),
         }
     }
 
     /// Append an event, evicting the oldest entry when capacity is reached.
     pub fn log(&mut self, event: AuditEvent) {
         if self.events.len() >= self.max_entries {
-            self.events.remove(0);
+            self.events.pop_front();
         }
-        self.events.push(event);
+        self.events.push_back(event);
     }
 
     /// Query the log with optional filters.
@@ -785,9 +788,9 @@ impl ColumnEncryptionManager {
                     return Err(BlazeError::execution("Ciphertext too short"));
                 }
                 let (tag_bytes, data) = ciphertext.split_at(4);
-                // Verify tag
+                // Verify tag using constant-time comparison to prevent timing attacks
                 let expected_tag = compute_tag(&key, data);
-                if tag_bytes != expected_tag {
+                if tag_bytes.ct_eq(&expected_tag).unwrap_u8() != 1 {
                     return Err(BlazeError::execution(
                         "Decryption failed: authentication tag mismatch",
                     ));
@@ -885,6 +888,75 @@ mod tests {
         mgr.create_user("bob").unwrap();
         let res = mgr.grant_role("bob", "nonexistent");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_rbac_admin_grants_all_permissions() {
+        let mut mgr = RbacManager::new();
+        mgr.create_role("admin", HashSet::from([Permission::Admin]))
+            .unwrap();
+        mgr.create_user("superuser").unwrap();
+        mgr.grant_role("superuser", "admin").unwrap();
+
+        // Admin should implicitly grant all other permissions
+        assert!(mgr.check_permission("superuser", Permission::Select));
+        assert!(mgr.check_permission("superuser", Permission::Insert));
+        assert!(mgr.check_permission("superuser", Permission::Update));
+        assert!(mgr.check_permission("superuser", Permission::Delete));
+        assert!(mgr.check_permission("superuser", Permission::Create));
+        assert!(mgr.check_permission("superuser", Permission::Drop));
+        assert!(mgr.check_permission("superuser", Permission::Admin));
+    }
+
+    #[test]
+    fn test_rbac_non_admin_does_not_get_extra_perms() {
+        let mut mgr = RbacManager::new();
+        mgr.create_role("reader", HashSet::from([Permission::Select]))
+            .unwrap();
+        mgr.create_user("alice").unwrap();
+        mgr.grant_role("alice", "reader").unwrap();
+
+        assert!(mgr.check_permission("alice", Permission::Select));
+        assert!(!mgr.check_permission("alice", Permission::Insert));
+        assert!(!mgr.check_permission("alice", Permission::Admin));
+    }
+
+    #[test]
+    fn test_rbac_multiple_roles_union_permissions() {
+        let mut mgr = RbacManager::new();
+        mgr.create_role("reader", HashSet::from([Permission::Select]))
+            .unwrap();
+        mgr.create_role(
+            "writer",
+            HashSet::from([Permission::Insert, Permission::Update]),
+        )
+        .unwrap();
+        mgr.create_user("bob").unwrap();
+        mgr.grant_role("bob", "reader").unwrap();
+        mgr.grant_role("bob", "writer").unwrap();
+
+        assert!(mgr.check_permission("bob", Permission::Select));
+        assert!(mgr.check_permission("bob", Permission::Insert));
+        assert!(mgr.check_permission("bob", Permission::Update));
+        assert!(!mgr.check_permission("bob", Permission::Delete));
+    }
+
+    #[test]
+    fn test_rbac_duplicate_grant_is_idempotent() {
+        let mut mgr = RbacManager::new();
+        mgr.create_role("reader", HashSet::from([Permission::Select]))
+            .unwrap();
+        mgr.create_user("alice").unwrap();
+        mgr.grant_role("alice", "reader").unwrap();
+        mgr.grant_role("alice", "reader").unwrap(); // duplicate, should not error
+        assert!(mgr.check_permission("alice", Permission::Select));
+    }
+
+    #[test]
+    fn test_rbac_duplicate_user_error() {
+        let mut mgr = RbacManager::new();
+        mgr.create_user("alice").unwrap();
+        assert!(mgr.create_user("alice").is_err());
     }
 
     // -- RLS tests ----------------------------------------------------------
@@ -1076,6 +1148,92 @@ mod tests {
         assert_eq!(stats.total_events, 3);
         assert_eq!(stats.by_action.get("Query"), Some(&2));
         assert_eq!(stats.by_action.get("Login"), Some(&1));
+    }
+
+    #[test]
+    fn test_audit_log_capacity_one() {
+        let mut log = AuditLog::new(1);
+        log.log(AuditEvent {
+            timestamp: 1,
+            user: "a".into(),
+            action: AuditAction::Login,
+            table: None,
+            query: None,
+            success: true,
+        });
+        log.log(AuditEvent {
+            timestamp: 2,
+            user: "b".into(),
+            action: AuditAction::Query,
+            table: None,
+            query: None,
+            success: true,
+        });
+
+        let all = log.query(&AuditFilter::default());
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].user, "b");
+    }
+
+    #[test]
+    fn test_audit_log_filter_by_since() {
+        let mut log = AuditLog::new(100);
+        for i in 0..5 {
+            log.log(AuditEvent {
+                timestamp: i * 100,
+                user: "a".into(),
+                action: AuditAction::Query,
+                table: None,
+                query: None,
+                success: true,
+            });
+        }
+
+        let results = log.query(&AuditFilter {
+            since: Some(200),
+            ..Default::default()
+        });
+        assert_eq!(results.len(), 3); // timestamps 200, 300, 400
+    }
+
+    #[test]
+    fn test_audit_log_filter_by_table() {
+        let mut log = AuditLog::new(100);
+        log.log(AuditEvent {
+            timestamp: 1,
+            user: "a".into(),
+            action: AuditAction::Insert,
+            table: Some("orders".into()),
+            query: None,
+            success: true,
+        });
+        log.log(AuditEvent {
+            timestamp: 2,
+            user: "a".into(),
+            action: AuditAction::Insert,
+            table: Some("users".into()),
+            query: None,
+            success: true,
+        });
+
+        let results = log.query(&AuditFilter {
+            table: Some("orders".into()),
+            ..Default::default()
+        });
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_audit_event_constructors() {
+        let query_event = AuditEvent::query("alice", "SELECT 1");
+        assert_eq!(query_event.user, "alice");
+        assert_eq!(query_event.action, AuditAction::Query);
+        assert!(query_event.query.is_some());
+
+        let ddl_event = AuditEvent::ddl(AuditAction::CreateTable, "bob", "orders");
+        assert_eq!(ddl_event.user, "bob");
+        assert_eq!(ddl_event.action, AuditAction::CreateTable);
+        assert_eq!(ddl_event.table, Some("orders".into()));
     }
 
     // -- Security Context tests -----------------------------------------------
@@ -1333,5 +1491,129 @@ mod tests {
 
         let cols = mgr.encrypted_columns("users");
         assert_eq!(cols.len(), 2);
+    }
+
+    // -- Additional masking edge case tests -----------------------------------
+
+    #[test]
+    fn test_masking_partial_reveal_short_string() {
+        // When visible_chars >= string length, return original
+        let strategy = MaskingStrategy::PartialReveal { visible_chars: 10 };
+        assert_eq!(MaskingEngine::apply_mask("short", &strategy), "short");
+    }
+
+    #[test]
+    fn test_masking_partial_reveal_exact_length() {
+        let strategy = MaskingStrategy::PartialReveal { visible_chars: 5 };
+        assert_eq!(MaskingEngine::apply_mask("hello", &strategy), "hello");
+    }
+
+    #[test]
+    fn test_masking_partial_reveal_zero_visible() {
+        let strategy = MaskingStrategy::PartialReveal { visible_chars: 0 };
+        assert_eq!(MaskingEngine::apply_mask("hello", &strategy), "*****");
+    }
+
+    #[test]
+    fn test_masking_hash_different_inputs() {
+        let a = MaskingEngine::apply_mask("hello", &MaskingStrategy::Hash);
+        let b = MaskingEngine::apply_mask("world", &MaskingStrategy::Hash);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_masking_empty_string() {
+        assert_eq!(
+            MaskingEngine::apply_mask("", &MaskingStrategy::Redact),
+            "***"
+        );
+        assert_eq!(MaskingEngine::apply_mask("", &MaskingStrategy::Nullify), "");
+    }
+
+    #[test]
+    fn test_masking_engine_rule_lookup() {
+        let mut engine = MaskingEngine::new();
+        engine.add_rule(MaskingRule {
+            column: "ssn".into(),
+            strategy: MaskingStrategy::Redact,
+        });
+
+        assert!(engine.get_rule("ssn").is_some());
+        assert!(engine.get_rule("name").is_none());
+    }
+
+    // -- Additional encryption edge case tests --------------------------------
+
+    #[test]
+    fn test_encrypt_no_config_fails() {
+        let kp = InMemoryKeyProvider::new();
+        let mgr = ColumnEncryptionManager::new(Box::new(kp));
+        assert!(mgr.encrypt("t", "c", b"data").is_err());
+    }
+
+    #[test]
+    fn test_decrypt_too_short_ciphertext() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("k", vec![0x42; 32]);
+
+        let mut mgr = ColumnEncryptionManager::new(Box::new(kp));
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "t".into(),
+            column_name: "c".into(),
+            key_id: "k".into(),
+            algorithm: EncryptionAlgorithm::Aes256Gcm,
+        });
+
+        // Less than 4 bytes (tag size) should fail
+        assert!(mgr.decrypt("t", "c", &[0x01, 0x02]).is_err());
+    }
+
+    #[test]
+    fn test_encrypt_empty_plaintext() {
+        let mut kp = InMemoryKeyProvider::new();
+        kp.add_key("k", vec![0x42; 32]);
+
+        let mut mgr = ColumnEncryptionManager::new(Box::new(kp));
+        mgr.register_column(ColumnEncryptionConfig {
+            table_name: "t".into(),
+            column_name: "c".into(),
+            key_id: "k".into(),
+            algorithm: EncryptionAlgorithm::XorTest,
+        });
+
+        let encrypted = mgr.encrypt("t", "c", b"").unwrap();
+        let decrypted = mgr.decrypt("t", "c", &encrypted).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    // -- Audit log config test ------------------------------------------------
+
+    #[test]
+    fn test_audit_log_config_defaults() {
+        let config = AuditLogConfig::default();
+        assert_eq!(config.max_events, 100_000);
+        assert_eq!(config.retention_days, 90);
+        assert!((config.sample_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    // -- AuditAction display test ---------------------------------------------
+
+    #[test]
+    fn test_audit_action_display() {
+        assert_eq!(format!("{}", AuditAction::Query), "Query");
+        assert_eq!(format!("{}", AuditAction::Insert), "Insert");
+        assert_eq!(format!("{}", AuditAction::CreateTable), "CreateTable");
+        assert_eq!(format!("{}", AuditAction::Logout), "Logout");
+    }
+
+    // -- Column access control default test -----------------------------------
+
+    #[test]
+    fn test_column_access_default_allow() {
+        let cac = ColumnAccessControl::new();
+        assert_eq!(
+            cac.check_access("any", "any", "any"),
+            ColumnPermission::Allow
+        );
     }
 }

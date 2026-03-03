@@ -493,4 +493,168 @@ mod tests {
             _ => panic!("Wrong variant"),
         }
     }
+
+    #[test]
+    fn test_read_message_too_large() {
+        // Craft a length prefix claiming 200MB — should be rejected
+        let len: u32 = 200 * 1024 * 1024;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 32]); // Some dummy data
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let result = read_message(&mut cursor);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too large"));
+    }
+
+    #[test]
+    fn test_handle_get_schema_found() {
+        let conn = Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE items (id INT, name VARCHAR)")
+            .unwrap();
+
+        let req = IpcRequest::GetSchema {
+            table: "items".to_string(),
+        };
+        let (meta, _) = handle_request(&conn, &req);
+        assert!(matches!(meta.status, IpcStatus::Ok));
+        assert!(meta.tables.is_some());
+        let fields = meta.tables.unwrap();
+        assert_eq!(fields.len(), 2);
+    }
+
+    #[test]
+    fn test_handle_get_schema_not_found() {
+        let conn = Connection::in_memory().unwrap();
+        let req = IpcRequest::GetSchema {
+            table: "nonexistent".to_string(),
+        };
+        let (meta, _) = handle_request(&conn, &req);
+        assert!(matches!(meta.status, IpcStatus::Error));
+        assert!(meta.error.unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn test_handle_shutdown() {
+        let conn = Connection::in_memory().unwrap();
+        let (meta, _) = handle_request(&conn, &IpcRequest::Shutdown);
+        assert!(matches!(meta.status, IpcStatus::Ok));
+    }
+
+    #[test]
+    fn test_serve_connection_shutdown() {
+        use std::io::Cursor;
+
+        let conn = Connection::in_memory().unwrap();
+
+        // Build a buffer with a Ping followed by a Shutdown request
+        let mut request_buf = Vec::new();
+
+        let ping = serde_json::to_vec(&IpcRequest::Ping).unwrap();
+        write_message(&mut request_buf, &ping).unwrap();
+
+        let shutdown = serde_json::to_vec(&IpcRequest::Shutdown).unwrap();
+        write_message(&mut request_buf, &shutdown).unwrap();
+
+        // Create a duplex stream simulation
+        let request_cursor = Cursor::new(request_buf);
+        let mut response_buf = Vec::new();
+
+        // Use a combined reader/writer
+        let mut duplex = DuplexStream {
+            reader: request_cursor,
+            writer: &mut response_buf,
+        };
+
+        serve_connection(&conn, &mut duplex).unwrap();
+
+        // Verify we got two responses (ping + shutdown)
+        let mut response_cursor = Cursor::new(response_buf);
+        let meta1_data = read_message(&mut response_cursor).unwrap();
+        let meta1: IpcResponseMeta = serde_json::from_slice(&meta1_data).unwrap();
+        assert!(matches!(meta1.status, IpcStatus::Ok));
+
+        let meta2_data = read_message(&mut response_cursor).unwrap();
+        let meta2: IpcResponseMeta = serde_json::from_slice(&meta2_data).unwrap();
+        assert!(matches!(meta2.status, IpcStatus::Ok));
+    }
+
+    #[test]
+    fn test_all_request_variants_serialize() {
+        let variants = vec![
+            IpcRequest::Query {
+                sql: "SELECT 1".into(),
+            },
+            IpcRequest::Execute {
+                sql: "CREATE TABLE t (id INT)".into(),
+            },
+            IpcRequest::ListTables,
+            IpcRequest::GetSchema { table: "t".into() },
+            IpcRequest::Ping,
+            IpcRequest::Shutdown,
+        ];
+
+        for req in &variants {
+            let json = serde_json::to_string(req).unwrap();
+            let _: IpcRequest = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_response_meta_serialization() {
+        let meta = IpcResponseMeta {
+            status: IpcStatus::Ok,
+            error: None,
+            rows_affected: Some(42),
+            tables: None,
+            data_bytes: 0,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("error")); // skip_serializing_if = None
+        assert!(!json.contains("tables"));
+        assert!(json.contains("42"));
+    }
+
+    #[test]
+    fn test_write_read_empty_message() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, &[]).unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let result = read_message(&mut cursor).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_encode_multiple_batches() {
+        let b1 = make_test_batch();
+        let b2 = make_test_batch();
+        let encoded = encode_batches_to_ipc(&[b1, b2]).unwrap();
+        let decoded = decode_batches_from_ipc(&encoded).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].num_rows(), 3);
+        assert_eq!(decoded[1].num_rows(), 3);
+    }
+
+    /// Helper: a combined Read+Write that reads from one buffer and writes to another.
+    struct DuplexStream<'a> {
+        reader: std::io::Cursor<Vec<u8>>,
+        writer: &'a mut Vec<u8>,
+    }
+
+    impl Read for DuplexStream<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reader.read(buf)
+        }
+    }
+
+    impl Write for DuplexStream<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writer.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.writer.flush()
+        }
+    }
 }
