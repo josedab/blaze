@@ -396,7 +396,13 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Garbage collect completed transactions older than the oldest active snapshot.
+    /// Garbage collect completed transactions and unreachable table versions.
+    ///
+    /// Removes:
+    /// 1. Completed (committed/aborted) transactions older than the oldest active snapshot
+    /// 2. Table version entries that no active transaction can see
+    ///
+    /// Returns the total number of items removed (transactions + versions).
     pub fn gc(&self) -> Result<usize> {
         let min_active_ts = {
             let active = self
@@ -413,20 +419,64 @@ impl TransactionManager {
 
         // Remove completed transactions that are older than the oldest active snapshot
         let mut removed = 0;
-        let mut active = self
-            .active_txns
-            .write()
-            .map_err(|e| BlazeError::internal(format!("Failed to acquire txn lock: {}", e)))?;
+        {
+            let mut active = self
+                .active_txns
+                .write()
+                .map_err(|e| BlazeError::internal(format!("Failed to acquire txn lock: {}", e)))?;
 
-        let to_remove: Vec<TxnId> = active
-            .iter()
-            .filter(|(_, t)| t.status != TxnStatus::Active && t.id < min_active_ts)
-            .map(|(id, _)| *id)
-            .collect();
+            let to_remove: Vec<TxnId> = active
+                .iter()
+                .filter(|(_, t)| t.status != TxnStatus::Active && t.id < min_active_ts)
+                .map(|(id, _)| *id)
+                .collect();
 
-        for id in to_remove {
-            active.remove(&id);
-            removed += 1;
+            for id in to_remove {
+                active.remove(&id);
+                removed += 1;
+            }
+        }
+
+        // Prune old table versions that no active transaction can see.
+        // For each table, keep only the latest version visible at or before
+        // min_active_ts (so active transactions can still read it), plus
+        // all versions created after min_active_ts.
+        {
+            let mut versions = self.table_versions.write().map_err(|e| {
+                BlazeError::internal(format!("Failed to acquire version lock: {}", e))
+            })?;
+
+            for table_versions in versions.values_mut() {
+                // Find the latest version at or before the oldest active snapshot.
+                // Active transactions need this version, but older ones can be pruned.
+                let latest_needed = table_versions
+                    .iter()
+                    .filter(|v| v.created_by <= min_active_ts && v.visible)
+                    .map(|v| v.created_by)
+                    .max();
+
+                let before_len = table_versions.len();
+
+                table_versions.retain(|v| {
+                    // Keep versions newer than the oldest active snapshot
+                    if v.created_by > min_active_ts {
+                        return true;
+                    }
+                    // Keep the latest version that active transactions need
+                    if let Some(needed) = latest_needed {
+                        if v.created_by == needed {
+                            return true;
+                        }
+                    }
+                    // Prune everything else
+                    false
+                });
+
+                removed += before_len - table_versions.len();
+            }
+
+            // Remove empty table entries
+            versions.retain(|_, v| !v.is_empty());
         }
 
         Ok(removed)
@@ -889,6 +939,72 @@ mod tests {
         let mgr = TransactionManager::new();
         let removed = mgr.gc().unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_gc_prunes_old_table_versions() {
+        let mgr = TransactionManager::new();
+
+        // T1 writes V1 and commits
+        let t1 = mgr.begin().unwrap();
+        mgr.write(t1, "t", vec![make_batch(&[1])]).unwrap();
+        mgr.commit(t1).unwrap();
+
+        // T2 writes V2 and commits
+        let t2 = mgr.begin().unwrap();
+        mgr.write(t2, "t", vec![make_batch(&[2])]).unwrap();
+        mgr.commit(t2).unwrap();
+
+        // T3 writes V3 and commits
+        let t3 = mgr.begin().unwrap();
+        mgr.write(t3, "t", vec![make_batch(&[3])]).unwrap();
+        mgr.commit(t3).unwrap();
+
+        // Start new transaction (so gc knows the minimum active snapshot)
+        let t4 = mgr.begin().unwrap();
+
+        // Before GC: 3 versions in table_versions
+        let data = mgr.get_visible_data(t4, "t").unwrap();
+        assert_eq!(data.len(), 3);
+
+        // Run GC — should prune old versions and old transactions
+        let removed = mgr.gc().unwrap();
+        assert!(
+            removed >= 2,
+            "Expected at least 2 items removed, got {removed}"
+        );
+
+        // After GC: T4 should still see the latest version
+        let data = mgr.get_visible_data(t4, "t").unwrap();
+        assert!(!data.is_empty(), "Should still see committed data after GC");
+
+        mgr.commit(t4).unwrap();
+    }
+
+    #[test]
+    fn test_gc_preserves_versions_needed_by_active_txn() {
+        let mgr = TransactionManager::new();
+
+        // T1 writes and commits
+        let t1 = mgr.begin().unwrap();
+        mgr.write(t1, "t", vec![make_batch(&[1])]).unwrap();
+        mgr.commit(t1).unwrap();
+
+        // T2 starts (its snapshot includes T1's commit)
+        let t2 = mgr.begin().unwrap();
+
+        // T3 writes and commits (after T2 started)
+        let t3 = mgr.begin().unwrap();
+        mgr.write(t3, "t", vec![make_batch(&[3])]).unwrap();
+        mgr.commit(t3).unwrap();
+
+        // GC should preserve T1's version (T2 needs it for snapshot isolation)
+        mgr.gc().unwrap();
+
+        let data = mgr.get_visible_data(t2, "t").unwrap();
+        assert_eq!(data.len(), 1, "T2 should still see T1's data after GC");
+
+        mgr.commit(t2).unwrap();
     }
 
     #[test]

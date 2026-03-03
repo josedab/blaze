@@ -131,11 +131,18 @@ impl CardinalityEstimator {
                 left,
                 right,
                 join_type,
+                on,
                 ..
             } => {
                 let left_cardinality = self.estimate_plan(left, stats_manager)?;
                 let right_cardinality = self.estimate_plan(right, stats_manager)?;
-                self.estimate_join(left_cardinality, right_cardinality, join_type)
+                self.estimate_join(
+                    left_cardinality,
+                    right_cardinality,
+                    join_type,
+                    on,
+                    stats_manager,
+                )
             }
             LogicalPlan::CrossJoin { left, right, .. } => {
                 let left_cardinality = self.estimate_plan(left, stats_manager)?;
@@ -339,27 +346,78 @@ impl CardinalityEstimator {
         Ok(estimated.max(1))
     }
 
+    /// Estimate join selectivity using NDV from column statistics when available.
+    ///
+    /// Uses the standard formula: |L ⋈ R| = |L| * |R| / max(V(L.a), V(R.b))
+    /// where V(X.c) is the number of distinct values in column c of table X.
+    /// Falls back to a default selectivity factor when statistics are unavailable.
+    fn estimate_join_selectivity(
+        &self,
+        on: &[(LogicalExpr, LogicalExpr)],
+        stats_manager: &StatisticsManager,
+    ) -> f64 {
+        // Try to use NDV from the first equi-join condition
+        if let Some((left_expr, right_expr)) = on.first() {
+            if let (Some(left_col), Some(right_col)) = (
+                self.get_column_name(left_expr),
+                self.get_column_name(right_expr),
+            ) {
+                let left_ndv = self.lookup_ndv(&left_col, stats_manager);
+                let right_ndv = self.lookup_ndv(&right_col, stats_manager);
+
+                if let (Some(l_ndv), Some(r_ndv)) = (left_ndv, right_ndv) {
+                    let max_ndv = l_ndv.max(r_ndv).max(1);
+                    return 1.0 / max_ndv as f64;
+                }
+            }
+        }
+
+        // Default: flat selectivity factor
+        DEFAULT_EQ_SELECTIVITY
+    }
+
+    /// Look up the number of distinct values for a column across all known tables.
+    fn lookup_ndv(&self, col_name: &str, stats_manager: &StatisticsManager) -> Option<usize> {
+        for table_name in stats_manager.list_tables() {
+            if let Some(table_stats) = stats_manager.get(&table_name) {
+                if let Some(col_stats) = table_stats.column(col_name) {
+                    if let Some(ndv) = col_stats.distinct_count {
+                        return Some(ndv);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Estimate cardinality for join operations.
+    ///
+    /// Uses NDV-based estimation (|L|*|R|/max(V(L.a),V(R.b))) when column
+    /// statistics are available; falls back to heuristic selectivity factors.
     fn estimate_join(
         &self,
         left_cardinality: usize,
         right_cardinality: usize,
         join_type: &JoinType,
+        on: &[(LogicalExpr, LogicalExpr)],
+        stats_manager: &StatisticsManager,
     ) -> Result<usize> {
+        let join_selectivity = self.estimate_join_selectivity(on, stats_manager);
+
         match join_type {
             JoinType::Inner => {
-                // Assume 10% selectivity for inner joins
-                let estimated = (left_cardinality * right_cardinality) as f64 * 0.1;
-                Ok(estimated.ceil() as usize)
+                let estimated =
+                    (left_cardinality as f64) * (right_cardinality as f64) * join_selectivity;
+                Ok((estimated.ceil() as usize).max(1))
             }
             JoinType::Left => {
                 // Left join preserves all left rows, plus matched right rows
-                let matched = (right_cardinality as f64 * 0.1).ceil() as usize;
+                let matched = (right_cardinality as f64 * join_selectivity).ceil() as usize;
                 Ok(left_cardinality + matched)
             }
             JoinType::Right => {
                 // Right join preserves all right rows, plus matched left rows
-                let matched = (left_cardinality as f64 * 0.1).ceil() as usize;
+                let matched = (left_cardinality as f64 * join_selectivity).ceil() as usize;
                 Ok(right_cardinality + matched)
             }
             JoinType::Full => {
@@ -371,14 +429,16 @@ impl CardinalityEstimator {
                 Ok(left_cardinality * right_cardinality)
             }
             JoinType::LeftSemi | JoinType::RightSemi => {
-                // At most one side's cardinality
-                let estimated = (left_cardinality as f64 * 0.5).ceil() as usize;
-                Ok(estimated)
+                // At most one side's cardinality, scaled by selectivity
+                let estimated =
+                    (left_cardinality as f64 * join_selectivity.min(0.5)).ceil() as usize;
+                Ok(estimated.max(1))
             }
             JoinType::LeftAnti | JoinType::RightAnti => {
                 // Rows from one side that don't match
-                let estimated = (left_cardinality as f64 * 0.5).ceil() as usize;
-                Ok(estimated)
+                let estimated =
+                    (left_cardinality as f64 * (1.0 - join_selectivity).max(0.1)).ceil() as usize;
+                Ok(estimated.max(1))
             }
         }
     }
@@ -517,16 +577,81 @@ mod tests {
     #[test]
     fn test_estimate_join() {
         let estimator = CardinalityEstimator::new();
+        let stats_manager = StatisticsManager::new();
 
-        // Inner join
+        // Inner join without stats: uses default 0.1 selectivity
         let cardinality = estimator
-            .estimate_join(1000, 500, &JoinType::Inner)
+            .estimate_join(1000, 500, &JoinType::Inner, &[], &stats_manager)
             .unwrap();
         assert_eq!(cardinality, 50000); // 1000 * 500 * 0.1
 
         // Cross join
-        let cardinality = estimator.estimate_join(100, 100, &JoinType::Cross).unwrap();
+        let cardinality = estimator
+            .estimate_join(100, 100, &JoinType::Cross, &[], &stats_manager)
+            .unwrap();
         assert_eq!(cardinality, 10000); // 100 * 100
+    }
+
+    #[test]
+    fn test_estimate_join_with_ndv() {
+        use crate::optimizer::statistics::{ColumnStatistics, TableStatistics};
+        use crate::types::DataType;
+
+        let estimator = CardinalityEstimator::new();
+        let stats_manager = StatisticsManager::new();
+
+        // Register stats with NDV for join columns
+        let left_stats = TableStatistics::new("orders", 10_000).with_column(
+            ColumnStatistics::new("customer_id", DataType::Int64).with_distinct_count(1_000),
+        );
+        let right_stats = TableStatistics::new("customers", 1_000)
+            .with_column(ColumnStatistics::new("id", DataType::Int64).with_distinct_count(1_000));
+        stats_manager.register(left_stats).unwrap();
+        stats_manager.register(right_stats).unwrap();
+
+        // Join on orders.customer_id = customers.id
+        let on = vec![(
+            LogicalExpr::Column(crate::planner::Column::unqualified("customer_id")),
+            LogicalExpr::Column(crate::planner::Column::unqualified("id")),
+        )];
+
+        // NDV-based: 10_000 * 1_000 / max(1_000, 1_000) = 10_000
+        let cardinality = estimator
+            .estimate_join(10_000, 1_000, &JoinType::Inner, &on, &stats_manager)
+            .unwrap();
+        assert_eq!(cardinality, 10_000);
+    }
+
+    #[test]
+    fn test_estimate_join_ndv_asymmetric() {
+        use crate::optimizer::statistics::{ColumnStatistics, TableStatistics};
+        use crate::types::DataType;
+
+        let estimator = CardinalityEstimator::new();
+        let stats_manager = StatisticsManager::new();
+
+        // Left has high NDV, right has low NDV
+        let left_stats = TableStatistics::new("big", 100_000)
+            .with_column(ColumnStatistics::new("key", DataType::Int64).with_distinct_count(50_000));
+        let right_stats = TableStatistics::new("small", 100)
+            .with_column(ColumnStatistics::new("ref_key", DataType::Int64).with_distinct_count(80));
+        stats_manager.register(left_stats).unwrap();
+        stats_manager.register(right_stats).unwrap();
+
+        let on = vec![(
+            LogicalExpr::Column(crate::planner::Column::unqualified("key")),
+            LogicalExpr::Column(crate::planner::Column::unqualified("ref_key")),
+        )];
+
+        // NDV-based: 100_000 * 100 / max(50_000, 80) = 10_000_000 / 50_000 = 200
+        let cardinality = estimator
+            .estimate_join(100_000, 100, &JoinType::Inner, &on, &stats_manager)
+            .unwrap();
+        // ceil(100_000 * 100 * (1/50_000)) = ceil(200.0) = 200 (or 201 due to fp precision)
+        assert!(
+            cardinality >= 200 && cardinality <= 201,
+            "Expected ~200, got {cardinality}"
+        );
     }
 
     #[test]

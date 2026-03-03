@@ -2018,7 +2018,7 @@ mod tests {
             column: "id".to_string(),
             value: "42".to_string(),
         };
-        assert_eq!(pred.to_sql(), "id = 42");
+        assert_eq!(pred.to_sql(), "\"id\" = '42'");
 
         let and_pred = ShippablePredicate::And(
             Box::new(ShippablePredicate::Gt {
@@ -2030,7 +2030,7 @@ mod tests {
                 value: "65".to_string(),
             }),
         );
-        assert_eq!(and_pred.to_sql(), "(age > 18 AND age < 65)");
+        assert_eq!(and_pred.to_sql(), "(\"age\" > '18' AND \"age\" < '65')");
     }
 
     #[test]

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 
 use crate::error::{BlazeError, Result};
+use crate::optimizer::statistics::StatisticsManager;
 
 /// A recorded query execution for training.
 #[derive(Debug, Clone)]
@@ -298,10 +299,18 @@ impl std::fmt::Display for JoinStrategy {
     }
 }
 
+/// Default row count when no statistics or model are available.
+const DEFAULT_FALLBACK_ROW_COUNT: usize = 1_000;
+
+/// Default bytes per row when no statistics are available.
+const DEFAULT_BYTES_PER_ROW: usize = 100;
+
 /// Adaptive strategy selector that uses workload history to make decisions.
 pub struct AdaptiveStrategySelector {
     collector: Arc<WorkloadCollector>,
     cardinality_model: Arc<LearnedCardinalityModel>,
+    /// Optional statistics manager for catalog-based estimates
+    stats_manager: Option<Arc<StatisticsManager>>,
     /// Thresholds for strategy selection
     broadcast_threshold: usize,
     sort_merge_threshold: usize,
@@ -315,9 +324,54 @@ impl AdaptiveStrategySelector {
         Self {
             collector,
             cardinality_model,
+            stats_manager: None,
             broadcast_threshold: 10_000,
             sort_merge_threshold: 1_000_000,
         }
+    }
+
+    /// Attach a statistics manager for catalog-based cardinality estimates.
+    pub fn with_statistics(mut self, stats_manager: Arc<StatisticsManager>) -> Self {
+        self.stats_manager = Some(stats_manager);
+        self
+    }
+
+    /// Estimate row count for a query using (in priority order):
+    /// 1. Learned cardinality model (if trained)
+    /// 2. Catalog statistics (if available for the primary table)
+    /// 3. Default fallback
+    fn estimate_rows(&self, features: &QueryFeatures) -> usize {
+        // Priority 1: trained model
+        if self.cardinality_model.is_trained() {
+            return self.cardinality_model.predict(features) as usize;
+        }
+
+        // Priority 2: catalog statistics
+        if let Some(ref stats) = self.stats_manager {
+            if let Some(table) = features.tables.first() {
+                if let Some(table_stats) = stats.get(table) {
+                    return table_stats.row_count;
+                }
+            }
+        }
+
+        // Priority 3: default
+        DEFAULT_FALLBACK_ROW_COUNT
+    }
+
+    /// Estimate bytes per row using catalog statistics when available.
+    fn estimate_row_width(&self, features: &QueryFeatures) -> usize {
+        if let Some(ref stats) = self.stats_manager {
+            if let Some(table) = features.tables.first() {
+                if let Some(table_stats) = stats.get(table) {
+                    let width = table_stats.avg_row_width();
+                    if width > 0 {
+                        return width;
+                    }
+                }
+            }
+        }
+        DEFAULT_BYTES_PER_ROW
     }
 
     /// Recommend a join strategy based on estimated cardinalities.
@@ -326,17 +380,8 @@ impl AdaptiveStrategySelector {
         left_features: &QueryFeatures,
         right_features: &QueryFeatures,
     ) -> JoinStrategy {
-        let left_card = if self.cardinality_model.is_trained() {
-            self.cardinality_model.predict(left_features) as usize
-        } else {
-            1000 // default fallback
-        };
-
-        let right_card = if self.cardinality_model.is_trained() {
-            self.cardinality_model.predict(right_features) as usize
-        } else {
-            1000
-        };
+        let left_card = self.estimate_rows(left_features);
+        let right_card = self.estimate_rows(right_features);
 
         let smaller = left_card.min(right_card);
         let larger = left_card.max(right_card);
@@ -350,13 +395,9 @@ impl AdaptiveStrategySelector {
         }
     }
 
-    /// Recommend parallelism level based on workload history.
+    /// Recommend parallelism level based on estimated data volume.
     pub fn recommend_parallelism(&self, features: &QueryFeatures) -> usize {
-        let estimated_rows = if self.cardinality_model.is_trained() {
-            self.cardinality_model.predict(features) as usize
-        } else {
-            10_000
-        };
+        let estimated_rows = self.estimate_rows(features);
 
         if estimated_rows < 1_000 {
             1
@@ -369,16 +410,12 @@ impl AdaptiveStrategySelector {
         }
     }
 
-    /// Recommend memory allocation based on workload history.
+    /// Recommend memory allocation based on estimated data volume and row width.
     pub fn recommend_memory_budget(&self, features: &QueryFeatures) -> usize {
-        let estimated_rows = if self.cardinality_model.is_trained() {
-            self.cardinality_model.predict(features) as usize
-        } else {
-            10_000
-        };
+        let estimated_rows = self.estimate_rows(features);
+        let row_width = self.estimate_row_width(features);
 
-        // Estimate ~100 bytes per row for memory budget
-        let estimated_bytes = estimated_rows * 100;
+        let estimated_bytes = estimated_rows * row_width;
         estimated_bytes.max(1024 * 1024) // Minimum 1MB
     }
 }
@@ -1981,6 +2018,95 @@ mod tests {
             "Strategy was {:?}",
             strategy
         );
+    }
+
+    #[test]
+    fn test_adaptive_strategy_with_statistics() {
+        use crate::optimizer::statistics::{StatisticsManager, TableStatistics};
+
+        let collector = Arc::new(WorkloadCollector::with_default_capacity());
+        let model = Arc::new(LearnedCardinalityModel::default_model());
+        let stats_mgr = Arc::new(StatisticsManager::new());
+
+        // Register a large table (2M rows) and a small table (500 rows)
+        let large_stats = TableStatistics::new("large_table", 2_000_000).with_size(200_000_000);
+        let small_stats = TableStatistics::new("small_table", 500).with_size(50_000);
+        stats_mgr.register(large_stats).unwrap();
+        stats_mgr.register(small_stats).unwrap();
+
+        let selector =
+            AdaptiveStrategySelector::new(collector, model).with_statistics(stats_mgr.clone());
+
+        let large_features = QueryFeatures {
+            tables: vec!["large_table".into()],
+            ..Default::default()
+        };
+        let small_features = QueryFeatures {
+            tables: vec!["small_table".into()],
+            ..Default::default()
+        };
+
+        // With statistics: small (500) < broadcast_threshold → BroadcastHashJoin
+        let strategy = selector.recommend_join_strategy(&small_features, &large_features);
+        assert_eq!(
+            strategy,
+            JoinStrategy::BroadcastHashJoin,
+            "Small table should trigger broadcast"
+        );
+
+        // Large vs large: 2M > sort_merge_threshold → SortMergeJoin
+        let strategy = selector.recommend_join_strategy(&large_features, &large_features);
+        assert_eq!(
+            strategy,
+            JoinStrategy::SortMergeJoin,
+            "Large tables should trigger sort-merge"
+        );
+
+        // Parallelism should reflect actual row count
+        let par = selector.recommend_parallelism(&large_features);
+        assert_eq!(par, 8, "2M rows should recommend max parallelism");
+
+        let par_small = selector.recommend_parallelism(&small_features);
+        assert_eq!(par_small, 1, "500 rows should recommend single-threaded");
+
+        // Memory budget should use actual row width from statistics
+        let budget = selector.recommend_memory_budget(&small_features);
+        assert!(budget >= 1024 * 1024, "Should have at least 1MB minimum");
+    }
+
+    #[test]
+    fn test_estimate_rows_priority_order() {
+        use crate::optimizer::statistics::{StatisticsManager, TableStatistics};
+
+        let collector = Arc::new(WorkloadCollector::with_default_capacity());
+        let model = Arc::new(LearnedCardinalityModel::default_model());
+        let stats_mgr = Arc::new(StatisticsManager::new());
+        stats_mgr
+            .register(TableStatistics::new("t1", 5_000))
+            .unwrap();
+
+        // With no model and no stats: default fallback
+        let selector_bare = AdaptiveStrategySelector::new(collector.clone(), model.clone());
+        let features = QueryFeatures {
+            tables: vec!["unknown".into()],
+            ..Default::default()
+        };
+        let bare_rows = selector_bare.estimate_rows(&features);
+        assert_eq!(bare_rows, DEFAULT_FALLBACK_ROW_COUNT);
+
+        // With stats but no model: uses catalog stats
+        let selector_stats = AdaptiveStrategySelector::new(collector.clone(), model.clone())
+            .with_statistics(stats_mgr);
+        let features_t1 = QueryFeatures {
+            tables: vec!["t1".into()],
+            ..Default::default()
+        };
+        let stats_rows = selector_stats.estimate_rows(&features_t1);
+        assert_eq!(stats_rows, 5_000);
+
+        // Unknown table with stats manager: default fallback
+        let unknown_rows = selector_stats.estimate_rows(&features);
+        assert_eq!(unknown_rows, DEFAULT_FALLBACK_ROW_COUNT);
     }
 
     #[test]
