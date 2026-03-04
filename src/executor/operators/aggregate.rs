@@ -5,9 +5,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, Date32Array, Date64Array, Decimal128Array, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch, StringArray, UInt32Array,
-    UInt64Array,
+    Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Float32Array,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, RecordBatch, StringArray,
+    UInt32Array, UInt64Array,
 };
 use arrow::compute;
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
@@ -731,6 +731,522 @@ impl Accumulator for ApproxPercentileAccumulator {
     }
 }
 
+/// Variance accumulator using Welford's online algorithm.
+/// Supports both population and sample variance.
+pub struct VarianceAccumulator {
+    count: u64,
+    mean: f64,
+    m2: f64,
+    is_population: bool,
+}
+
+impl VarianceAccumulator {
+    pub fn population() -> Self {
+        Self {
+            count: 0,
+            mean: 0.0,
+            m2: 0.0,
+            is_population: true,
+        }
+    }
+
+    pub fn sample() -> Self {
+        Self {
+            count: 0,
+            mean: 0.0,
+            m2: 0.0,
+            is_population: false,
+        }
+    }
+
+    fn update_value(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+}
+
+impl Accumulator for VarianceAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        match values.data_type() {
+            DataType::Int64 => {
+                let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.update_value(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Float64 => {
+                let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.update_value(arr.value(i));
+                    }
+                }
+            }
+            DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(values, "Int32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.update_value(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Float32 => {
+                let arr = try_downcast::<Float32Array>(values, "Float32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.update_value(arr.value(i) as f64);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<VarianceAccumulator>() {
+            if other.count == 0 {
+                return Ok(());
+            }
+            if self.count == 0 {
+                self.count = other.count;
+                self.mean = other.mean;
+                self.m2 = other.m2;
+                return Ok(());
+            }
+            let combined_count = self.count + other.count;
+            let delta = other.mean - self.mean;
+            let new_mean = self.mean
+                + delta * other.count as f64 / combined_count as f64;
+            let new_m2 = self.m2
+                + other.m2
+                + delta * delta * self.count as f64 * other.count as f64
+                    / combined_count as f64;
+            self.count = combined_count;
+            self.mean = new_mean;
+            self.m2 = new_m2;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        let result = if self.count == 0 {
+            None
+        } else if self.is_population {
+            Some(self.m2 / self.count as f64)
+        } else if self.count == 1 {
+            None
+        } else {
+            Some(self.m2 / (self.count - 1) as f64)
+        };
+        Ok(Arc::new(Float64Array::from(vec![result])))
+    }
+
+    fn reset(&mut self) {
+        self.count = 0;
+        self.mean = 0.0;
+        self.m2 = 0.0;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Standard deviation accumulator (wraps VarianceAccumulator, takes sqrt).
+pub struct StddevAccumulator {
+    variance: VarianceAccumulator,
+}
+
+impl StddevAccumulator {
+    pub fn population() -> Self {
+        Self {
+            variance: VarianceAccumulator::population(),
+        }
+    }
+
+    pub fn sample() -> Self {
+        Self {
+            variance: VarianceAccumulator::sample(),
+        }
+    }
+}
+
+impl Accumulator for StddevAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        self.variance.update(values)
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<StddevAccumulator>() {
+            self.variance.merge(&other.variance)?;
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        let var_arr = self.variance.finalize()?;
+        let var_arr = try_downcast::<Float64Array>(&var_arr, "Float64Array")?;
+        let result = if var_arr.is_null(0) {
+            None
+        } else {
+            Some(var_arr.value(0).sqrt())
+        };
+        Ok(Arc::new(Float64Array::from(vec![result])))
+    }
+
+    fn reset(&mut self) {
+        self.variance.reset();
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// BOOL_AND aggregate: returns true if all non-null values are true.
+pub struct BoolAndAccumulator {
+    result: Option<bool>,
+}
+
+impl BoolAndAccumulator {
+    pub fn new() -> Self {
+        Self { result: None }
+    }
+}
+
+impl Default for BoolAndAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Accumulator for BoolAndAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        let arr = values
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| BlazeError::type_error("BOOL_AND requires boolean argument"))?;
+        for i in 0..arr.len() {
+            if !arr.is_null(i) {
+                let val = arr.value(i);
+                self.result = Some(self.result.unwrap_or(true) && val);
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<BoolAndAccumulator>() {
+            if let Some(other_val) = other.result {
+                self.result = Some(self.result.unwrap_or(true) && other_val);
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        Ok(Arc::new(BooleanArray::from(vec![self.result])))
+    }
+
+    fn reset(&mut self) {
+        self.result = None;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// BOOL_OR aggregate: returns true if any non-null value is true.
+pub struct BoolOrAccumulator {
+    result: Option<bool>,
+}
+
+impl BoolOrAccumulator {
+    pub fn new() -> Self {
+        Self { result: None }
+    }
+}
+
+impl Default for BoolOrAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Accumulator for BoolOrAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        let arr = values
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| BlazeError::type_error("BOOL_OR requires boolean argument"))?;
+        for i in 0..arr.len() {
+            if !arr.is_null(i) {
+                let val = arr.value(i);
+                self.result = Some(self.result.unwrap_or(false) || val);
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<BoolOrAccumulator>() {
+            if let Some(other_val) = other.result {
+                self.result = Some(self.result.unwrap_or(false) || other_val);
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        Ok(Arc::new(BooleanArray::from(vec![self.result])))
+    }
+
+    fn reset(&mut self) {
+        self.result = None;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// ANY_VALUE aggregate: returns the first non-null value encountered.
+pub struct AnyValueAccumulator {
+    value: Option<ArrayRef>,
+}
+
+impl AnyValueAccumulator {
+    pub fn new() -> Self {
+        Self { value: None }
+    }
+}
+
+impl Default for AnyValueAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Accumulator for AnyValueAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        if self.value.is_some() {
+            return Ok(());
+        }
+        for i in 0..values.len() {
+            if !values.is_null(i) {
+                self.value = Some(values.slice(i, 1));
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if self.value.is_none() {
+            if let Some(other) = other.as_any().downcast_ref::<AnyValueAccumulator>() {
+                self.value = other.value.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        match &self.value {
+            Some(v) => Ok(v.clone()),
+            None => Ok(Arc::new(Int64Array::from(vec![None::<i64>]))),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.value = None;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// PERCENTILE_CONT accumulator: exact continuous percentile with linear interpolation.
+pub struct PercentileContAccumulator {
+    values: Vec<f64>,
+    percentile: f64,
+}
+
+impl PercentileContAccumulator {
+    pub fn new(percentile: f64) -> Self {
+        Self {
+            values: Vec::new(),
+            percentile: percentile.clamp(0.0, 1.0),
+        }
+    }
+}
+
+impl Accumulator for PercentileContAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        match values.data_type() {
+            DataType::Int64 => {
+                let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Float64 => {
+                let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i));
+                    }
+                }
+            }
+            DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(values, "Int32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Float32 => {
+                let arr = try_downcast::<Float32Array>(values, "Float32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i) as f64);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<PercentileContAccumulator>() {
+            self.values.extend_from_slice(&other.values);
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        if self.values.is_empty() {
+            return Ok(Arc::new(Float64Array::from(vec![None::<f64>])));
+        }
+        let mut sorted = self.values.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = sorted.len();
+        // Linear interpolation between adjacent values
+        let idx = self.percentile * (n - 1) as f64;
+        let lower = idx.floor() as usize;
+        let upper = idx.ceil() as usize;
+        let result = if lower == upper {
+            sorted[lower]
+        } else {
+            let frac = idx - lower as f64;
+            sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+        };
+        Ok(Arc::new(Float64Array::from(vec![Some(result)])))
+    }
+
+    fn reset(&mut self) {
+        self.values.clear();
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// PERCENTILE_DISC accumulator: exact discrete percentile (nearest value).
+pub struct PercentileDiscAccumulator {
+    values: Vec<f64>,
+    percentile: f64,
+}
+
+impl PercentileDiscAccumulator {
+    pub fn new(percentile: f64) -> Self {
+        Self {
+            values: Vec::new(),
+            percentile: percentile.clamp(0.0, 1.0),
+        }
+    }
+}
+
+impl Accumulator for PercentileDiscAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        match values.data_type() {
+            DataType::Int64 => {
+                let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Float64 => {
+                let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i));
+                    }
+                }
+            }
+            DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(values, "Int32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i) as f64);
+                    }
+                }
+            }
+            DataType::Float32 => {
+                let arr = try_downcast::<Float32Array>(values, "Float32Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.values.push(arr.value(i) as f64);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<PercentileDiscAccumulator>() {
+            self.values.extend_from_slice(&other.values);
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        if self.values.is_empty() {
+            return Ok(Arc::new(Float64Array::from(vec![None::<f64>])));
+        }
+        let mut sorted = self.values.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Nearest-rank: ceil(percentile * n) clamped to valid index
+        let idx = (self.percentile * sorted.len() as f64).ceil() as usize;
+        let idx = idx.saturating_sub(1).min(sorted.len() - 1);
+        Ok(Arc::new(Float64Array::from(vec![Some(sorted[idx])])))
+    }
+
+    fn reset(&mut self) {
+        self.values.clear();
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// Hash aggregate operator for GROUP BY queries.
 pub struct HashAggregateOperator;
 
@@ -786,7 +1302,7 @@ impl HashAggregateOperator {
                     // Create accumulators for this group
                     let accumulators: Vec<Box<dyn Accumulator>> = aggr_exprs
                         .iter()
-                        .map(|agg| Self::create_accumulator(&agg.func))
+                        .map(|agg| Self::create_accumulator(agg))
                         .collect();
 
                     (key_values, accumulators)
@@ -794,9 +1310,9 @@ impl HashAggregateOperator {
 
                 // Update accumulators with values from this row
                 for (i, agg_inputs) in aggr_input_arrays.iter().enumerate() {
-                    // For simplicity, use the first argument (most aggregates have one arg)
                     if !agg_inputs.is_empty() {
-                        let value_slice = agg_inputs[0].slice(row, 1);
+                        let eval_idx = Self::get_eval_arg_index(&aggr_exprs[i].func, agg_inputs.len());
+                        let value_slice = agg_inputs[eval_idx].slice(row, 1);
                         entry.1[i].update(&value_slice)?;
                     } else {
                         // COUNT(*) case - count the row
@@ -824,7 +1340,7 @@ impl HashAggregateOperator {
         // Create single set of accumulators
         let mut accumulators: Vec<Box<dyn Accumulator>> = aggr_exprs
             .iter()
-            .map(|agg| Self::create_accumulator(&agg.func))
+            .map(|agg| Self::create_accumulator(agg))
             .collect();
 
         // Process all input
@@ -835,7 +1351,9 @@ impl HashAggregateOperator {
 
             for (i, agg) in aggr_exprs.iter().enumerate() {
                 if !agg.args.is_empty() {
-                    let values = agg.args[0].evaluate(batch)?;
+                    // For ordered-set aggregates with WITHIN GROUP, use the last arg (the column)
+                    let eval_idx = Self::get_eval_arg_index(&agg.func, agg.args.len());
+                    let values = agg.args[eval_idx].evaluate(batch)?;
                     accumulators[i].update(&values)?;
                 } else {
                     // COUNT(*) - count all rows
@@ -854,19 +1372,70 @@ impl HashAggregateOperator {
         Ok(vec![RecordBatch::try_new(output_schema.clone(), columns)?])
     }
 
-    fn create_accumulator(func: &crate::planner::AggregateFunc) -> Box<dyn Accumulator> {
+    fn create_accumulator(agg: &crate::planner::AggregateExpr) -> Box<dyn Accumulator> {
         use crate::planner::AggregateFunc;
 
-        match func {
+        match &agg.func {
             AggregateFunc::Count => Box::new(CountAccumulator::new()),
             AggregateFunc::Sum => Box::new(SumAccumulator::new()),
             AggregateFunc::Avg => Box::new(AvgAccumulator::new()),
             AggregateFunc::Min => Box::new(MinAccumulator::new()),
             AggregateFunc::Max => Box::new(MaxAccumulator::new()),
             AggregateFunc::ApproxCountDistinct => Box::new(ApproxCountDistinctAccumulator::new()),
-            AggregateFunc::ApproxPercentile => Box::new(ApproxPercentileAccumulator::new(0.5)), // Default to median
+            AggregateFunc::ApproxPercentile => Box::new(ApproxPercentileAccumulator::new(0.5)),
             AggregateFunc::ApproxMedian => Box::new(ApproxPercentileAccumulator::median()),
-            _ => Box::new(CountAccumulator::new()), // Fallback
+            AggregateFunc::VariancePop => Box::new(VarianceAccumulator::population()),
+            AggregateFunc::VarianceSamp => Box::new(VarianceAccumulator::sample()),
+            AggregateFunc::StddevPop => Box::new(StddevAccumulator::population()),
+            AggregateFunc::StddevSamp => Box::new(StddevAccumulator::sample()),
+            AggregateFunc::BoolAnd => Box::new(BoolAndAccumulator::new()),
+            AggregateFunc::BoolOr => Box::new(BoolOrAccumulator::new()),
+            AggregateFunc::AnyValue => Box::new(AnyValueAccumulator::new()),
+            AggregateFunc::First => Box::new(AnyValueAccumulator::new()),
+            AggregateFunc::Last => Box::new(AnyValueAccumulator::new()),
+            AggregateFunc::PercentileCont => {
+                let frac = Self::extract_percentile_fraction(agg);
+                Box::new(PercentileContAccumulator::new(frac))
+            }
+            AggregateFunc::PercentileDisc => {
+                let frac = Self::extract_percentile_fraction(agg);
+                Box::new(PercentileDiscAccumulator::new(frac))
+            }
+            AggregateFunc::Median => Box::new(PercentileContAccumulator::new(0.5)),
+            AggregateFunc::CountDistinct | AggregateFunc::ArrayAgg | AggregateFunc::StringAgg => {
+                Box::new(CountAccumulator::new())
+            }
+        }
+    }
+
+    /// Extract percentile fraction from aggregate args.
+    /// For PERCENTILE_CONT(0.75, col) the fraction is the first literal arg.
+    fn extract_percentile_fraction(agg: &crate::planner::AggregateExpr) -> f64 {
+        use crate::planner::physical_expr::LiteralExpr;
+        if let Some(first_arg) = agg.args.first() {
+            if let Some(lit) = first_arg.as_any().downcast_ref::<LiteralExpr>() {
+                match lit.value() {
+                    crate::types::ScalarValue::Float64(Some(v)) => return *v,
+                    crate::types::ScalarValue::Int64(Some(v)) => return *v as f64,
+                    _ => {}
+                }
+            }
+        }
+        0.5
+    }
+
+    /// For ordered-set aggregates (PERCENTILE_CONT, PERCENTILE_DISC), the column
+    /// to aggregate is the last arg (after the fraction). For all others, use arg[0].
+    fn get_eval_arg_index(func: &crate::planner::AggregateFunc, num_args: usize) -> usize {
+        use crate::planner::AggregateFunc;
+        if num_args > 1 {
+            match func {
+                AggregateFunc::PercentileCont
+                | AggregateFunc::PercentileDisc => num_args - 1,
+                _ => 0,
+            }
+        } else {
+            0
         }
     }
 

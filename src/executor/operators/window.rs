@@ -53,6 +53,8 @@ impl WindowOperator {
                 &window_expr.order_by,
                 &combined,
                 num_rows,
+                window_expr.filter.as_ref(),
+                window_expr.frame.as_ref(),
             )?;
             result_columns.push(window_result);
         }
@@ -75,6 +77,7 @@ impl WindowOperator {
     }
 
     /// Compute a window function result.
+    #[allow(clippy::too_many_arguments)]
     fn compute_window_function(
         func: &crate::planner::WindowFunction,
         args: &[Arc<dyn crate::planner::PhysicalExpr>],
@@ -82,6 +85,8 @@ impl WindowOperator {
         order_by: &[crate::planner::SortExpr],
         batch: &RecordBatch,
         num_rows: usize,
+        filter: Option<&Arc<dyn crate::planner::PhysicalExpr>>,
+        frame: Option<&crate::planner::WindowFrame>,
     ) -> Result<ArrayRef> {
         use crate::planner::WindowFunction;
 
@@ -170,7 +175,16 @@ impl WindowOperator {
                 Self::compute_nth_value(args, batch, &partitions, sorted_indices.as_ref(), num_rows)
             }
             WindowFunction::Aggregate(agg_func) => {
-                Self::compute_window_aggregate(agg_func, args, batch, &partitions, num_rows)
+                Self::compute_window_aggregate(
+                    agg_func,
+                    args,
+                    batch,
+                    &partitions,
+                    num_rows,
+                    filter,
+                    frame,
+                    sorted_indices.as_ref(),
+                )
             }
         }
     }
@@ -1223,124 +1237,227 @@ impl WindowOperator {
     }
 
     /// Compute aggregate as window function.
+    #[allow(clippy::too_many_arguments)]
     fn compute_window_aggregate(
         agg_func: &crate::planner::AggregateFunc,
         args: &[Arc<dyn crate::planner::PhysicalExpr>],
         batch: &RecordBatch,
         partitions: &[Vec<usize>],
         num_rows: usize,
+        filter: Option<&Arc<dyn crate::planner::PhysicalExpr>>,
+        frame: Option<&crate::planner::WindowFrame>,
+        sorted_indices: Option<&Vec<Vec<usize>>>,
     ) -> Result<ArrayRef> {
-        use crate::planner::AggregateFunc;
-
         let value_array = if !args.is_empty() {
             Some(args[0].evaluate(batch)?)
         } else {
             None
         };
 
+        let filter_mask: Option<BooleanArray> = if let Some(filter_expr) = filter {
+            let mask_arr = filter_expr.evaluate(batch)?;
+            Some(
+                mask_arr
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| {
+                        BlazeError::type_error("FILTER expression must return boolean")
+                    })?
+                    .clone(),
+            )
+        } else {
+            None
+        };
+
+        let has_row_frame = matches!(
+            frame,
+            Some(crate::planner::WindowFrame {
+                units: crate::planner::WindowFrameUnits::Rows,
+                ..
+            })
+        );
+
         let mut result = vec![0.0f64; num_rows];
 
-        for partition_rows in partitions {
-            let agg_value = match agg_func {
-                AggregateFunc::Count => partition_rows.len() as f64,
-                AggregateFunc::Sum => {
-                    if let Some(arr) = &value_array {
-                        if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            partition_rows
-                                .iter()
-                                .filter(|&&i| !int_arr.is_null(i))
-                                .map(|&i| int_arr.value(i) as f64)
-                                .sum()
-                        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float64Array>()
-                        {
-                            partition_rows
-                                .iter()
-                                .filter(|&&i| !float_arr.is_null(i))
-                                .map(|&i| float_arr.value(i))
-                                .sum()
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                }
-                AggregateFunc::Avg => {
-                    if let Some(arr) = &value_array {
-                        if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            let values: Vec<f64> = partition_rows
-                                .iter()
-                                .filter(|&&i| !int_arr.is_null(i))
-                                .map(|&i| int_arr.value(i) as f64)
-                                .collect();
-                            if values.is_empty() {
-                                0.0
-                            } else {
-                                values.iter().sum::<f64>() / values.len() as f64
-                            }
-                        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float64Array>()
-                        {
-                            let values: Vec<f64> = partition_rows
-                                .iter()
-                                .filter(|&&i| !float_arr.is_null(i))
-                                .map(|&i| float_arr.value(i))
-                                .collect();
-                            if values.is_empty() {
-                                0.0
-                            } else {
-                                values.iter().sum::<f64>() / values.len() as f64
-                            }
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                }
-                AggregateFunc::Min => {
-                    if let Some(arr) = &value_array {
-                        if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            partition_rows
-                                .iter()
-                                .filter(|&&i| !int_arr.is_null(i))
-                                .map(|&i| int_arr.value(i) as f64)
-                                .min_by(|a, b| {
-                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                                })
-                                .unwrap_or(0.0)
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                }
-                AggregateFunc::Max => {
-                    if let Some(arr) = &value_array {
-                        if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-                            partition_rows
-                                .iter()
-                                .filter(|&&i| !int_arr.is_null(i))
-                                .map(|&i| int_arr.value(i) as f64)
-                                .max_by(|a, b| {
-                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                                })
-                                .unwrap_or(0.0)
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                }
-                _ => 0.0,
+        for (part_idx, partition_rows) in partitions.iter().enumerate() {
+            let ordered_rows = if let Some(si) = sorted_indices {
+                si[part_idx].clone()
+            } else {
+                partition_rows.clone()
             };
 
-            for &idx in partition_rows {
-                result[idx] = agg_value;
+            if has_row_frame {
+                if let Some(f) = frame {
+                    Self::compute_framed_aggregate(
+                        agg_func,
+                        &value_array,
+                        &filter_mask,
+                        &ordered_rows,
+                        f,
+                        &mut result,
+                    );
+                }
+            } else {
+                let filtered_rows: Vec<usize> = if let Some(mask) = &filter_mask {
+                    partition_rows
+                        .iter()
+                        .filter(|&&i| !mask.is_null(i) && mask.value(i))
+                        .copied()
+                        .collect()
+                } else {
+                    partition_rows.clone()
+                };
+
+                let agg_value = Self::aggregate_rows(agg_func, &value_array, &filtered_rows);
+
+                for &idx in partition_rows {
+                    result[idx] = agg_value;
+                }
             }
         }
 
         Ok(Arc::new(Float64Array::from(result)))
+    }
+
+    /// Compute a per-row framed aggregate over ordered partition rows.
+    fn compute_framed_aggregate(
+        agg_func: &crate::planner::AggregateFunc,
+        value_array: &Option<ArrayRef>,
+        filter_mask: &Option<BooleanArray>,
+        ordered_rows: &[usize],
+        frame: &crate::planner::WindowFrame,
+        result: &mut [f64],
+    ) {
+        use crate::planner::WindowFrameBound;
+
+        let n = ordered_rows.len();
+
+        for (pos, &row_idx) in ordered_rows.iter().enumerate() {
+            let frame_start = match &frame.start {
+                WindowFrameBound::CurrentRow => pos,
+                WindowFrameBound::Preceding(None) => 0,
+                WindowFrameBound::Preceding(Some(offset)) => {
+                    pos.saturating_sub(*offset as usize)
+                }
+                WindowFrameBound::Following(None) => n,
+                WindowFrameBound::Following(Some(offset)) => {
+                    (pos + *offset as usize).min(n)
+                }
+            };
+
+            let frame_end = match &frame.end {
+                WindowFrameBound::CurrentRow => pos + 1,
+                WindowFrameBound::Preceding(None) => 0,
+                WindowFrameBound::Preceding(Some(offset)) => {
+                    (pos + 1).saturating_sub(*offset as usize)
+                }
+                WindowFrameBound::Following(None) => n,
+                WindowFrameBound::Following(Some(offset)) => {
+                    (pos + 1 + *offset as usize).min(n)
+                }
+            };
+
+            let frame_rows: Vec<usize> = if frame_start < frame_end {
+                ordered_rows[frame_start..frame_end]
+                    .iter()
+                    .filter(|&&i| {
+                        if let Some(mask) = filter_mask {
+                            !mask.is_null(i) && mask.value(i)
+                        } else {
+                            true
+                        }
+                    })
+                    .copied()
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            result[row_idx] =
+                Self::aggregate_rows(agg_func, value_array, &frame_rows);
+        }
+    }
+
+    /// Compute a single aggregate value over a set of row indices.
+    fn aggregate_rows(
+        agg_func: &crate::planner::AggregateFunc,
+        value_array: &Option<ArrayRef>,
+        rows: &[usize],
+    ) -> f64 {
+        use crate::planner::AggregateFunc;
+
+        match agg_func {
+            AggregateFunc::Count => {
+                if let Some(arr) = value_array {
+                    rows.iter().filter(|&&i| !arr.is_null(i)).count() as f64
+                } else {
+                    rows.len() as f64
+                }
+            }
+            AggregateFunc::Sum => {
+                if let Some(arr) = value_array {
+                    Self::extract_f64_values(arr, rows).iter().sum()
+                } else {
+                    0.0
+                }
+            }
+            AggregateFunc::Avg => {
+                if let Some(arr) = value_array {
+                    let values = Self::extract_f64_values(arr, rows);
+                    if values.is_empty() {
+                        0.0
+                    } else {
+                        values.iter().sum::<f64>() / values.len() as f64
+                    }
+                } else {
+                    0.0
+                }
+            }
+            AggregateFunc::Min => {
+                if let Some(arr) = value_array {
+                    Self::extract_f64_values(arr, rows)
+                        .iter()
+                        .copied()
+                        .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            }
+            AggregateFunc::Max => {
+                if let Some(arr) = value_array {
+                    Self::extract_f64_values(arr, rows)
+                        .iter()
+                        .copied()
+                        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Extract f64 values from an array at given row indices.
+    fn extract_f64_values(arr: &ArrayRef, rows: &[usize]) -> Vec<f64> {
+        if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
+            rows.iter()
+                .filter(|&&i| !int_arr.is_null(i))
+                .map(|&i| int_arr.value(i) as f64)
+                .collect()
+        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float64Array>() {
+            rows.iter()
+                .filter(|&&i| !float_arr.is_null(i))
+                .map(|&i| float_arr.value(i))
+                .collect()
+        } else if let Some(float_arr) = arr.as_any().downcast_ref::<Float32Array>() {
+            rows.iter()
+                .filter(|&&i| !float_arr.is_null(i))
+                .map(|&i| float_arr.value(i) as f64)
+                .collect()
+        } else {
+            vec![]
+        }
     }
 }

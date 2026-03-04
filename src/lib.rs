@@ -509,8 +509,13 @@ impl Connection {
                 .unwrap_or(optimized_plan)
         };
 
-        // Create physical plan
-        let physical_planner = PhysicalPlanner::new();
+        // Create physical plan with subquery executor for IN/EXISTS support
+        let exec_ctx = self.execution_context.clone();
+        let physical_planner = PhysicalPlanner::with_subquery_executor(Box::new(
+            move |subquery_plan: &crate::planner::PhysicalPlan| {
+                exec_ctx.execute(subquery_plan)
+            },
+        ));
         let physical_plan = physical_planner.create_physical_plan(&optimized_plan)?;
 
         // Execute (use parallel executor when configured with multiple threads)

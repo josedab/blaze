@@ -678,6 +678,11 @@ fn substitute_window_expr(
             .map(|se| substitute_sort_expr(se, params))
             .collect::<Result<_>>()?,
         frame: window.frame.clone(),
+        filter: window
+            .filter
+            .as_ref()
+            .map(|f| substitute_expr(f, params).map(Box::new))
+            .transpose()?,
     })
 }
 
