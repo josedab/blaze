@@ -5,6 +5,91 @@ use sqlparser::ast::{self as sql_ast, ObjectName};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser as SqlParser;
 
+/// Blaze SQL dialect — extends GenericDialect with FILTER clause support.
+#[derive(Debug)]
+struct BlazeDialect;
+
+impl sqlparser::dialect::Dialect for BlazeDialect {
+    fn is_identifier_start(&self, ch: char) -> bool {
+        GenericDialect {}.is_identifier_start(ch)
+    }
+    fn is_identifier_part(&self, ch: char) -> bool {
+        GenericDialect {}.is_identifier_part(ch)
+    }
+    fn is_delimited_identifier_start(&self, ch: char) -> bool {
+        GenericDialect {}.is_delimited_identifier_start(ch)
+    }
+    fn supports_filter_during_aggregation(&self) -> bool {
+        true
+    }
+    fn supports_unicode_string_literal(&self) -> bool {
+        true
+    }
+    fn supports_group_by_expr(&self) -> bool {
+        true
+    }
+    fn supports_connect_by(&self) -> bool {
+        true
+    }
+    fn supports_match_recognize(&self) -> bool {
+        true
+    }
+    fn supports_start_transaction_modifier(&self) -> bool {
+        true
+    }
+    fn supports_window_function_null_treatment_arg(&self) -> bool {
+        true
+    }
+    fn supports_dictionary_syntax(&self) -> bool {
+        true
+    }
+    fn supports_window_clause_named_window_reference(&self) -> bool {
+        true
+    }
+    fn supports_parenthesized_set_variables(&self) -> bool {
+        true
+    }
+    fn supports_select_wildcard_except(&self) -> bool {
+        true
+    }
+    fn support_map_literal_syntax(&self) -> bool {
+        true
+    }
+    fn allow_extract_custom(&self) -> bool {
+        true
+    }
+    fn allow_extract_single_quotes(&self) -> bool {
+        true
+    }
+    fn supports_create_index_with_clause(&self) -> bool {
+        true
+    }
+    fn supports_explain_with_utility_options(&self) -> bool {
+        true
+    }
+    fn supports_limit_comma(&self) -> bool {
+        true
+    }
+    fn supports_asc_desc_in_column_definition(&self) -> bool {
+        true
+    }
+    fn supports_try_convert(&self) -> bool {
+        true
+    }
+    fn supports_comment_on(&self) -> bool {
+        true
+    }
+    fn supports_load_extension(&self) -> bool {
+        true
+    }
+    fn supports_named_fn_args_with_assignment_operator(&self) -> bool {
+        true
+    }
+    fn supports_struct_literal(&self) -> bool {
+        true
+    }
+}
+
 use crate::error::{BlazeError, Result};
 
 /// Blaze's SQL statement representation.
@@ -437,6 +522,26 @@ pub enum AggregateFunction {
     ApproxPercentile,
     /// Approximate median (50th percentile)
     ApproxMedian,
+    /// Population variance
+    VariancePop,
+    /// Sample variance
+    VarianceSamp,
+    /// Population standard deviation
+    StddevPop,
+    /// Sample standard deviation
+    StddevSamp,
+    /// Boolean AND aggregate
+    BoolAnd,
+    /// Boolean OR aggregate
+    BoolOr,
+    /// Returns any non-null value from the group
+    AnyValue,
+    /// Exact continuous percentile (interpolated)
+    PercentileCont,
+    /// Exact discrete percentile (nearest value)
+    PercentileDisc,
+    /// Exact median (50th percentile)
+    Median,
 }
 
 /// ORDER BY expression.
@@ -661,7 +766,7 @@ impl Parser {
             }]);
         }
 
-        let dialect = GenericDialect {};
+        let dialect = BlazeDialect;
         let ast = SqlParser::parse_sql(&dialect, sql)?;
 
         ast.into_iter().map(Self::convert_statement).collect()
@@ -1111,6 +1216,30 @@ impl Parser {
             sql_ast::TableFactor::Table {
                 name,
                 alias,
+                args: Some(table_fn_args),
+                ..
+            } => {
+                // Table with args = table-valued function (e.g., generate_series(1, 10))
+                let converted_name = Self::convert_object_name(&name);
+                let args: Vec<Expr> = table_fn_args
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        sql_ast::FunctionArg::Unnamed(sql_ast::FunctionArgExpr::Expr(e)) => {
+                            Some(Self::convert_expr(e.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(TableFactor::TableFunction {
+                    name: converted_name,
+                    args,
+                    alias: alias.map(Self::convert_table_alias),
+                })
+            }
+            sql_ast::TableFactor::Table {
+                name,
+                alias,
                 version,
                 ..
             } => {
@@ -1462,6 +1591,16 @@ impl Parser {
             "APPROX_COUNT_DISTINCT" => Some(AggregateFunction::ApproxCountDistinct),
             "APPROX_PERCENTILE" => Some(AggregateFunction::ApproxPercentile),
             "APPROX_MEDIAN" => Some(AggregateFunction::ApproxMedian),
+            "VARIANCE" | "VAR_SAMP" => Some(AggregateFunction::VarianceSamp),
+            "VAR_POP" => Some(AggregateFunction::VariancePop),
+            "STDDEV" | "STDDEV_SAMP" => Some(AggregateFunction::StddevSamp),
+            "STDDEV_POP" => Some(AggregateFunction::StddevPop),
+            "BOOL_AND" | "EVERY" => Some(AggregateFunction::BoolAnd),
+            "BOOL_OR" => Some(AggregateFunction::BoolOr),
+            "ANY_VALUE" => Some(AggregateFunction::AnyValue),
+            "PERCENTILE_CONT" => Some(AggregateFunction::PercentileCont),
+            "PERCENTILE_DISC" => Some(AggregateFunction::PercentileDisc),
+            "MEDIAN" => Some(AggregateFunction::Median),
             _ => None,
         };
 
@@ -1493,9 +1632,56 @@ impl Parser {
         };
 
         if let Some(agg_func) = aggregate {
+            // Handle WITHIN GROUP (ORDER BY col) for ordered-set aggregates
+            let final_args = if !func.within_group.is_empty() {
+                // PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY salary)
+                // => args = [0.5, salary] where 0.5 is the fraction and salary is the column
+                let mut combined_args = args.clone();
+                for wg_expr in &func.within_group {
+                    combined_args.push(Self::convert_expr(wg_expr.expr.clone())?);
+                }
+                combined_args
+            } else {
+                args.clone()
+            };
+
+            // If there's also an OVER clause, wrap as window function
+            if let Some(over) = func.over {
+                let agg_expr = Expr::Aggregate {
+                    function: agg_func,
+                    args: final_args,
+                    distinct,
+                    filter: func
+                        .filter
+                        .map(|e| Self::convert_expr(*e))
+                        .transpose()?
+                        .map(Box::new),
+                };
+                return match over {
+                    sql_ast::WindowType::WindowSpec(spec) => Ok(Expr::Window {
+                        function: Box::new(agg_expr),
+                        partition_by: spec
+                            .partition_by
+                            .into_iter()
+                            .map(Self::convert_expr)
+                            .collect::<Result<Vec<_>>>()?,
+                        order_by: spec
+                            .order_by
+                            .into_iter()
+                            .map(Self::convert_order_by)
+                            .collect::<Result<Vec<_>>>()?,
+                        frame: spec
+                            .window_frame
+                            .map(Self::convert_window_frame)
+                            .transpose()?,
+                    }),
+                    sql_ast::WindowType::NamedWindow(_) => Ok(agg_expr),
+                };
+            }
+
             return Ok(Expr::Aggregate {
                 function: agg_func,
-                args,
+                args: final_args,
                 distinct,
                 filter: func
                     .filter
