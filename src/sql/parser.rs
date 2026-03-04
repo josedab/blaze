@@ -164,6 +164,8 @@ pub enum AlterTableOperation {
     DropColumn { name: String, if_exists: bool },
     /// RENAME COLUMN
     RenameColumn { old_name: String, new_name: String },
+    /// RENAME TABLE
+    RenameTable { new_name: String },
 }
 
 /// A SELECT query.
@@ -292,6 +294,8 @@ pub enum TableFactor {
     Derived {
         subquery: Box<Query>,
         alias: Option<TableAlias>,
+        /// Whether this is a LATERAL subquery (can reference preceding tables)
+        lateral: bool,
     },
     /// A table function
     TableFunction {
@@ -434,6 +438,12 @@ pub enum Expr {
     Nested(Box<Expr>),
     /// Wildcard (*)
     Wildcard,
+    /// GROUPING SETS clause in GROUP BY
+    GroupingSets(Vec<Vec<Expr>>),
+    /// CUBE clause in GROUP BY
+    Cube(Vec<Vec<Expr>>),
+    /// ROLLUP clause in GROUP BY
+    Rollup(Vec<Vec<Expr>>),
 }
 
 /// Column reference.
@@ -1047,6 +1057,11 @@ impl Parser {
                         old_name: old_column_name.to_string(),
                         new_name: new_column_name.to_string(),
                     },
+                    sql_ast::AlterTableOperation::RenameTable { table_name } => {
+                        AlterTableOperation::RenameTable {
+                            new_name: table_name.to_string(),
+                        }
+                    }
                     other => {
                         return Err(BlazeError::not_implemented(format!(
                             "ALTER TABLE operation: {other}"
@@ -1252,10 +1267,11 @@ impl Parser {
                 })
             }
             sql_ast::TableFactor::Derived {
-                subquery, alias, ..
+                subquery, alias, lateral, ..
             } => Ok(TableFactor::Derived {
                 subquery: Box::new(Self::convert_query(*subquery)?),
                 alias: alias.map(Self::convert_table_alias),
+                lateral,
             }),
             sql_ast::TableFactor::TableFunction { expr: _, alias: _ } => {
                 // TableFunction in newer sqlparser has an expr field, not name/args
@@ -1502,6 +1518,21 @@ impl Parser {
                     .collect::<Result<Vec<_>>>()?,
             )),
             sql_ast::Expr::Wildcard(_) => Ok(Expr::Wildcard),
+            sql_ast::Expr::GroupingSets(sets) => Ok(Expr::GroupingSets(
+                sets.into_iter()
+                    .map(|set| set.into_iter().map(Self::convert_expr).collect::<Result<Vec<_>>>())
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            sql_ast::Expr::Cube(sets) => Ok(Expr::Cube(
+                sets.into_iter()
+                    .map(|set| set.into_iter().map(Self::convert_expr).collect::<Result<Vec<_>>>())
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            sql_ast::Expr::Rollup(sets) => Ok(Expr::Rollup(
+                sets.into_iter()
+                    .map(|set| set.into_iter().map(Self::convert_expr).collect::<Result<Vec<_>>>())
+                    .collect::<Result<Vec<_>>>()?,
+            )),
             _ => Err(BlazeError::not_implemented(format!(
                 "Expression: {:?}",
                 expr
