@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::catalog::TableType;
 use crate::catalog::{CatalogList, ResolvedTableRef, TableRef};
 use crate::error::{BlazeError, Result};
-use crate::sql::parser::{Expr, Parser};
+use crate::sql::parser::{Expr, Parser, SelectItem};
 use crate::sql::{self, Statement};
 use crate::storage::ViewTable;
 use crate::types::{DataType, Field, ScalarValue, Schema};
@@ -295,10 +295,11 @@ impl Binder {
 
         // Apply ORDER BY
         if !query.order_by.is_empty() {
+            let plan_schema = plan.schema().clone();
             let sort_exprs: Vec<SortExpr> = query
                 .order_by
                 .into_iter()
-                .map(|o| self.bind_order_by(o, ctx))
+                .map(|o| self.bind_order_by(o, &plan_schema, ctx))
                 .collect::<Result<Vec<_>>>()?;
             plan = LogicalPlanBuilder::from(plan).sort(sort_exprs).build();
         }
@@ -333,8 +334,9 @@ impl Binder {
             sql::parser::SetExpr::Union { left, right, all } => {
                 let left_plan = self.bind_set_expr(*left, ctx)?;
                 let right_plan = self.bind_set_expr(*right, ctx)?;
+                let schema = Self::coerce_set_schema(left_plan.schema(), right_plan.schema())?;
                 Ok(LogicalPlan::SetOperation {
-                    schema: left_plan.schema().clone(),
+                    schema,
                     left: Arc::new(left_plan),
                     right: Arc::new(right_plan),
                     op: SetOperation::Union,
@@ -344,8 +346,9 @@ impl Binder {
             sql::parser::SetExpr::Intersect { left, right, all } => {
                 let left_plan = self.bind_set_expr(*left, ctx)?;
                 let right_plan = self.bind_set_expr(*right, ctx)?;
+                let schema = Self::coerce_set_schema(left_plan.schema(), right_plan.schema())?;
                 Ok(LogicalPlan::SetOperation {
-                    schema: left_plan.schema().clone(),
+                    schema,
                     left: Arc::new(left_plan),
                     right: Arc::new(right_plan),
                     op: SetOperation::Intersect,
@@ -355,8 +358,9 @@ impl Binder {
             sql::parser::SetExpr::Except { left, right, all } => {
                 let left_plan = self.bind_set_expr(*left, ctx)?;
                 let right_plan = self.bind_set_expr(*right, ctx)?;
+                let schema = Self::coerce_set_schema(left_plan.schema(), right_plan.schema())?;
                 Ok(LogicalPlan::SetOperation {
-                    schema: left_plan.schema().clone(),
+                    schema,
                     left: Arc::new(left_plan),
                     right: Arc::new(right_plan),
                     op: SetOperation::Except,
@@ -453,12 +457,75 @@ impl Binder {
 
         let has_group_by = !select.group_by.is_empty();
 
-        if has_aggregate || has_group_by {
-            // Bind GROUP BY and aggregates
+        // Check for GROUPING SETS / CUBE / ROLLUP
+        let grouping_sets = self.extract_grouping_sets(&select.group_by, ctx)?;
+
+        if let Some(sets) = grouping_sets {
+            // Expand GROUPING SETS/CUBE/ROLLUP into UNION ALL of aggregates
+            plan = self.expand_grouping_sets(
+                plan,
+                sets,
+                &select.projection,
+                select.having.as_ref(),
+                ctx,
+            )?;
+
+            // Apply the SELECT projection over the grouping sets result.
+            // Bind projection items, resolving GROUPING() to __grouping_id column.
+            let mut proj_exprs: Vec<LogicalExpr> = Vec::new();
+            for item in &select.projection {
+                match item {
+                    SelectItem::Expr { expr, alias } => {
+                        let bound = self.bind_grouping_expr(expr.clone(), ctx)?;
+                        if let Some(a) = alias {
+                            proj_exprs.push(LogicalExpr::Alias {
+                                expr: Box::new(bound),
+                                alias: a.clone(),
+                            });
+                        } else {
+                            proj_exprs.push(bound);
+                        }
+                    }
+                    SelectItem::Wildcard => {
+                        proj_exprs.push(LogicalExpr::Wildcard);
+                    }
+                    SelectItem::QualifiedWildcard(parts) => {
+                        proj_exprs.push(LogicalExpr::Column(
+                            crate::planner::logical_expr::Column::qualified(
+                                parts.join("."),
+                                "*",
+                            ),
+                        ));
+                    }
+                }
+            }
+            if !proj_exprs.is_empty() {
+                plan = LogicalPlanBuilder::from(plan)
+                    .project(proj_exprs)?
+                    .build();
+            }
+        } else if has_aggregate || has_group_by {
+            // Bind GROUP BY and aggregates, resolving positional references
             let group_by: Vec<LogicalExpr> = select
                 .group_by
                 .into_iter()
-                .map(|e| self.bind_expr(e, ctx))
+                .map(|e| {
+                    // Handle positional references (GROUP BY 1, 2, ...)
+                    if let Expr::Literal(sql::parser::Literal::Integer(n)) = &e {
+                        let idx = (*n as usize).wrapping_sub(1);
+                        if idx < select.projection.len() {
+                            if let SelectItem::Expr { expr, .. } = &select.projection[idx] {
+                                return self.bind_expr(expr.clone(), ctx);
+                            }
+                        }
+                        return Err(BlazeError::analysis(format!(
+                            "GROUP BY position {} is out of range (query has {} columns)",
+                            n,
+                            select.projection.len()
+                        )));
+                    }
+                    self.bind_expr(e, ctx)
+                })
                 .collect::<Result<Vec<_>>>()?;
 
             let (projection, aggr_exprs) = self.extract_aggregates(&select.projection, ctx)?;
@@ -471,9 +538,9 @@ impl Binder {
                 .aggregate(group_by, aggr_exprs)?
                 .build();
 
-            // Apply HAVING
+            // Apply HAVING — rewrite aggregate expressions to column references
             if let Some(having) = select.having {
-                let predicate = self.bind_expr(having, ctx)?;
+                let predicate = self.bind_having_expr(having, &aggr_exprs_clone, ctx)?;
                 plan = LogicalPlanBuilder::from(plan).filter(predicate).build();
             }
 
@@ -765,8 +832,20 @@ impl Binder {
 
                 Ok(plan)
             }
-            sql::parser::TableFactor::Derived { subquery, alias } => {
-                let plan = self.bind_query(*subquery.clone(), ctx)?;
+            sql::parser::TableFactor::Derived {
+                subquery,
+                alias,
+                lateral,
+            } => {
+                let plan = if *lateral {
+                    // LATERAL: subquery can reference columns from preceding tables.
+                    // The current context already has outer table schemas registered.
+                    self.bind_query(*subquery.clone(), ctx)?
+                } else {
+                    // Non-lateral: bind in a fresh context to prevent outer references
+                    let mut subquery_ctx = BindContext::new();
+                    self.bind_query(*subquery.clone(), &mut subquery_ctx)?
+                };
                 if let Some(a) = alias {
                     let aliased = LogicalPlanBuilder::from(plan).alias(&a.name).build();
                     ctx.with_alias(a.name.clone(), aliased.schema().clone());
@@ -1471,6 +1550,13 @@ impl Binder {
                     args: values,
                 })
             }
+            // GROUPING SETS/CUBE/ROLLUP are handled at the GROUP BY level,
+            // not as individual expressions. If they appear here, it's an error.
+            sql::parser::Expr::GroupingSets(_)
+            | sql::parser::Expr::Cube(_)
+            | sql::parser::Expr::Rollup(_) => Err(BlazeError::analysis(
+                "GROUPING SETS/CUBE/ROLLUP can only appear in GROUP BY clause",
+            )),
         }
     }
 
@@ -1557,9 +1643,29 @@ impl Binder {
     fn bind_order_by(
         &self,
         order_by: sql::parser::OrderByExpr,
+        plan_schema: &crate::types::Schema,
         ctx: &mut BindContext,
     ) -> Result<SortExpr> {
-        let expr = self.bind_expr(order_by.expr, ctx)?;
+        // Check for positional references (ORDER BY 1, 2, etc.)
+        let expr = match &order_by.expr {
+            Expr::Literal(sql::parser::Literal::Integer(n)) if *n >= 1 => {
+                let idx = (*n as usize) - 1;
+                if idx < plan_schema.fields().len() {
+                    let field = &plan_schema.fields()[idx];
+                    LogicalExpr::Column(crate::planner::logical_expr::Column {
+                        relation: None,
+                        name: field.name().to_string(),
+                    })
+                } else {
+                    return Err(BlazeError::analysis(format!(
+                        "ORDER BY position {} is out of range (query has {} columns)",
+                        n,
+                        plan_schema.fields().len()
+                    )));
+                }
+            }
+            _ => self.bind_expr(order_by.expr, ctx)?,
+        };
         Ok(SortExpr::new(
             expr,
             order_by.asc,
@@ -1979,6 +2085,402 @@ impl Binder {
     }
 
     /// Check if an expression is a group by column reference.
+    /// Extract GROUPING SETS/CUBE/ROLLUP from GROUP BY, returning expanded grouping sets.
+    /// Returns None if GROUP BY contains no grouping set syntax (plain GROUP BY).
+    fn extract_grouping_sets(
+        &self,
+        group_by: &[Expr],
+        ctx: &mut BindContext,
+    ) -> Result<Option<Vec<Vec<LogicalExpr>>>> {
+        let mut has_grouping_syntax = false;
+        let mut all_columns: Vec<LogicalExpr> = Vec::new();
+        let mut grouping_sets: Vec<Vec<LogicalExpr>> = Vec::new();
+
+        for expr in group_by {
+            match expr {
+                Expr::GroupingSets(sets) => {
+                    has_grouping_syntax = true;
+                    for set in sets {
+                        let bound_set: Vec<LogicalExpr> = set
+                            .iter()
+                            .map(|e| self.bind_expr(e.clone(), ctx))
+                            .collect::<Result<Vec<_>>>()?;
+                        for e in &bound_set {
+                            if !all_columns.iter().any(|c| format!("{:?}", c) == format!("{:?}", e))
+                            {
+                                all_columns.push(e.clone());
+                            }
+                        }
+                        grouping_sets.push(bound_set);
+                    }
+                }
+                Expr::Cube(sets) => {
+                    has_grouping_syntax = true;
+                    let columns: Vec<LogicalExpr> = sets
+                        .iter()
+                        .flat_map(|s| s.iter())
+                        .map(|e| self.bind_expr(e.clone(), ctx))
+                        .collect::<Result<Vec<_>>>()?;
+                    for c in &columns {
+                        if !all_columns.iter().any(|ac| format!("{:?}", ac) == format!("{:?}", c)) {
+                            all_columns.push(c.clone());
+                        }
+                    }
+                    // CUBE(a,b) = GROUPING SETS((a,b), (a), (b), ())
+                    let n = columns.len();
+                    for mask in 0..(1 << n) {
+                        let mut set = Vec::new();
+                        for (i, col) in columns.iter().enumerate() {
+                            if mask & (1 << i) != 0 {
+                                set.push(col.clone());
+                            }
+                        }
+                        grouping_sets.push(set);
+                    }
+                }
+                Expr::Rollup(sets) => {
+                    has_grouping_syntax = true;
+                    let columns: Vec<LogicalExpr> = sets
+                        .iter()
+                        .flat_map(|s| s.iter())
+                        .map(|e| self.bind_expr(e.clone(), ctx))
+                        .collect::<Result<Vec<_>>>()?;
+                    for c in &columns {
+                        if !all_columns.iter().any(|ac| format!("{:?}", ac) == format!("{:?}", c)) {
+                            all_columns.push(c.clone());
+                        }
+                    }
+                    // ROLLUP(a,b,c) = GROUPING SETS((a,b,c), (a,b), (a), ())
+                    for prefix_len in (0..=columns.len()).rev() {
+                        grouping_sets.push(columns[..prefix_len].to_vec());
+                    }
+                }
+                _ => {
+                    // Plain column — will be in every grouping set if mixed with CUBE/ROLLUP
+                }
+            }
+        }
+
+        if has_grouping_syntax {
+            Ok(Some(grouping_sets))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Expand GROUPING SETS into a UNION ALL of multiple aggregate plans.
+    fn expand_grouping_sets(
+        &self,
+        input: LogicalPlan,
+        grouping_sets: Vec<Vec<LogicalExpr>>,
+        projection: &[SelectItem],
+        _having: Option<&Expr>,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
+        use crate::planner::logical_plan::LogicalPlanBuilder;
+        use crate::types::{DataType, ScalarValue};
+
+        let input_schema = input.schema();
+
+        // Collect all unique group-by columns across all sets
+        let mut all_group_cols: Vec<LogicalExpr> = Vec::new();
+        for set in &grouping_sets {
+            for col in set {
+                let key = format!("{:?}", col);
+                if !all_group_cols.iter().any(|c| format!("{:?}", c) == key) {
+                    all_group_cols.push(col.clone());
+                }
+            }
+        }
+
+        let (_, aggr_exprs) = self.extract_aggregates(projection, ctx)?;
+
+        // Build one aggregate plan per grouping set
+        let mut plans: Vec<LogicalPlan> = Vec::new();
+
+        for set in &grouping_sets {
+            let group_by = set.clone();
+
+            let plan = LogicalPlanBuilder::from(input.clone())
+                .aggregate(group_by.clone(), aggr_exprs.clone())?
+                .build();
+
+            // Project to unified schema: all group-by cols (NULL for absent) + aggregates + __grouping_id
+            let mut proj_exprs: Vec<LogicalExpr> = Vec::new();
+
+            // Compute grouping bitmask: bit i is 1 if column i is NOT in this set
+            let mut grouping_id: i64 = 0;
+            for (i, col) in all_group_cols.iter().enumerate() {
+                let col_key = format!("{:?}", col);
+                let in_set = set.iter().any(|s| format!("{:?}", s) == col_key);
+                if in_set {
+                    proj_exprs.push(col.clone());
+                } else {
+                    grouping_id |= 1 << i;
+                    // Produce a typed NULL matching the column's data type
+                    let col_type = col.data_type(input_schema);
+                    let typed_null = match col_type {
+                        DataType::Int64 => ScalarValue::Int64(None),
+                        DataType::Float64 => ScalarValue::Float64(None),
+                        DataType::Boolean => ScalarValue::Boolean(None),
+                        DataType::Utf8 => ScalarValue::Utf8(None),
+                        DataType::Decimal128 { precision, scale } => {
+                            ScalarValue::Decimal128(None, precision, scale)
+                        }
+                        _ => ScalarValue::Utf8(None),
+                    };
+                    proj_exprs.push(LogicalExpr::Alias {
+                        expr: Box::new(LogicalExpr::Literal(typed_null)),
+                        alias: match col {
+                            LogicalExpr::Column(c) => c.name.clone(),
+                            _ => format!("{:?}", col),
+                        },
+                    });
+                }
+            }
+
+            // Add aggregate expressions as column references
+            for agg in &aggr_exprs {
+                proj_exprs.push(LogicalExpr::Column(crate::planner::logical_expr::Column {
+                    relation: None,
+                    name: agg.name(),
+                }));
+            }
+
+            // Add __grouping_id literal column
+            proj_exprs.push(LogicalExpr::Alias {
+                expr: Box::new(LogicalExpr::Literal(
+                    crate::types::ScalarValue::Int64(Some(grouping_id)),
+                )),
+                alias: "__grouping_id".to_string(),
+            });
+
+            let projected = LogicalPlanBuilder::from(plan)
+                .project(proj_exprs)?
+                .build();
+            plans.push(projected);
+        }
+
+        // Combine with UNION ALL
+        if plans.is_empty() {
+            return Err(crate::error::BlazeError::analysis(
+                "GROUPING SETS must contain at least one set",
+            ));
+        }
+
+        let mut result = plans.remove(0);
+        let result_schema = result.schema().clone();
+        for plan in plans {
+            result = LogicalPlan::SetOperation {
+                left: std::sync::Arc::new(result),
+                right: std::sync::Arc::new(plan),
+                op: SetOperation::Union,
+                all: true,
+                schema: result_schema.clone(),
+            };
+        }
+
+        Ok(result)
+    }
+
+    /// Bind a HAVING expression, rewriting aggregate functions to column references.
+    #[allow(clippy::only_used_in_recursion)]
+    fn bind_having_expr(
+        &self,
+        expr: Expr,
+        aggr_exprs: &[AggregateExpr],
+        ctx: &mut BindContext,
+    ) -> Result<LogicalExpr> {
+        match &expr {
+            Expr::Aggregate { function, args, distinct, filter } => {
+                let agg_func = self.convert_aggregate_func(function)?;
+                let bound_args: Vec<LogicalExpr> = args
+                    .iter()
+                    .map(|a| {
+                        if matches!(a, Expr::Wildcard) && matches!(function, sql::parser::AggregateFunction::Count) {
+                            Ok(LogicalExpr::Literal(ScalarValue::Int64(Some(1))))
+                        } else {
+                            self.bind_expr(a.clone(), ctx)
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut agg = AggregateExpr::new(agg_func, bound_args);
+                if *distinct {
+                    agg = agg.distinct();
+                }
+                if let Some(f) = filter {
+                    agg = agg.filter(self.bind_expr(*f.clone(), ctx)?);
+                }
+                Ok(LogicalExpr::Column(crate::planner::logical_expr::Column {
+                    relation: None,
+                    name: agg.name(),
+                }))
+            }
+            Expr::BinaryOp { left, op, right } => {
+                let bound_left = self.bind_having_expr(*left.clone(), aggr_exprs, ctx)?;
+                let bound_right = self.bind_having_expr(*right.clone(), aggr_exprs, ctx)?;
+                Ok(LogicalExpr::BinaryExpr {
+                    left: Box::new(bound_left),
+                    op: self.convert_binary_op(*op)?,
+                    right: Box::new(bound_right),
+                })
+            }
+            Expr::UnaryOp { op, expr: inner } => {
+                let bound = self.bind_having_expr(*inner.clone(), aggr_exprs, ctx)?;
+                match op {
+                    sql::parser::UnaryOperator::Not => Ok(LogicalExpr::Not(Box::new(bound))),
+                    _ => self.bind_expr(expr, ctx),
+                }
+            }
+            Expr::IsNull { expr: inner, negated } => {
+                let bound = self.bind_having_expr(*inner.clone(), aggr_exprs, ctx)?;
+                if *negated {
+                    Ok(LogicalExpr::IsNotNull(Box::new(bound)))
+                } else {
+                    Ok(LogicalExpr::IsNull(Box::new(bound)))
+                }
+            }
+            Expr::Between { expr: inner, low, high, negated } => {
+                let bound = self.bind_having_expr(*inner.clone(), aggr_exprs, ctx)?;
+                let bound_low = self.bind_having_expr(*low.clone(), aggr_exprs, ctx)?;
+                let bound_high = self.bind_having_expr(*high.clone(), aggr_exprs, ctx)?;
+                Ok(LogicalExpr::Between {
+                    expr: Box::new(bound),
+                    low: Box::new(bound_low),
+                    high: Box::new(bound_high),
+                    negated: *negated,
+                })
+            }
+            Expr::Nested(inner) => self.bind_having_expr(*inner.clone(), aggr_exprs, ctx),
+            Expr::Function(func) => {
+                let fname = func.name.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>().join(".");
+                if self.is_aggregate_function_name(&fname) {
+                    let bound = self.bind_expr(expr.clone(), ctx)?;
+                    return Ok(LogicalExpr::Column(crate::planner::logical_expr::Column {
+                        relation: None,
+                        name: bound.name(),
+                    }));
+                }
+                self.bind_expr(expr, ctx)
+            }
+            Expr::Case { operand, conditions, results, else_result } => {
+                let bound_operand = operand.as_ref()
+                    .map(|o| self.bind_having_expr(*o.clone(), aggr_exprs, ctx))
+                    .transpose()?;
+                let when_then: Vec<(LogicalExpr, LogicalExpr)> = conditions.iter().zip(results.iter())
+                    .map(|(c, r)| {
+                        let bc = self.bind_having_expr(c.clone(), aggr_exprs, ctx)?;
+                        let br = self.bind_having_expr(r.clone(), aggr_exprs, ctx)?;
+                        Ok((bc, br))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let bound_else = else_result.as_ref()
+                    .map(|e| self.bind_having_expr(*e.clone(), aggr_exprs, ctx))
+                    .transpose()?;
+                Ok(LogicalExpr::Case {
+                    expr: bound_operand.map(Box::new),
+                    when_then_exprs: when_then,
+                    else_expr: bound_else.map(Box::new),
+                })
+            }
+            _ => self.bind_expr(expr, ctx),
+        }
+    }
+
+    /// Bind an expression in GROUPING SETS context, resolving GROUPING() calls to __grouping_id.
+    fn bind_grouping_expr(
+        &self,
+        expr: Expr,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalExpr> {
+        match &expr {
+            Expr::Function(func) => {
+                let fname = func.name.iter().map(|s| s.to_uppercase()).collect::<Vec<_>>().join(".");
+                if fname == "GROUPING" {
+                    return Ok(LogicalExpr::Column(crate::planner::logical_expr::Column {
+                        relation: None,
+                        name: "__grouping_id".to_string(),
+                    }));
+                }
+                // Check if it's an aggregate function — resolve to column reference
+                if self.is_aggregate_function_name(&fname) {
+                    let agg = self.bind_expr(expr, ctx)?;
+                    return Ok(LogicalExpr::Column(crate::planner::logical_expr::Column {
+                        relation: None,
+                        name: agg.name(),
+                    }));
+                }
+                self.bind_expr(expr, ctx)
+            }
+            Expr::Aggregate { .. } => {
+                // Aggregate in projection — resolve to column reference
+                let agg = self.bind_expr(expr, ctx)?;
+                Ok(LogicalExpr::Column(crate::planner::logical_expr::Column {
+                    relation: None,
+                    name: agg.name(),
+                }))
+            }
+            _ => self.bind_expr(expr, ctx),
+        }
+    }
+
+    fn is_aggregate_function_name(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "FIRST" | "LAST"
+                | "ARRAY_AGG" | "STRING_AGG" | "BOOL_AND" | "BOOL_OR"
+                | "ANY_VALUE" | "VARIANCE" | "VAR_POP" | "VAR_SAMP"
+                | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP"
+                | "APPROX_COUNT_DISTINCT" | "APPROX_PERCENTILE"
+                | "PERCENTILE_CONT" | "PERCENTILE_DISC" | "MEDIAN"
+        )
+    }
+
+    /// Compute a unified schema for set operations (UNION/INTERSECT/EXCEPT),
+    /// widening types when left and right have compatible but different types.
+    fn coerce_set_schema(left: &Schema, right: &Schema) -> Result<Schema> {
+        use crate::types::Field;
+
+        if left.fields().len() != right.fields().len() {
+            return Err(BlazeError::analysis(format!(
+                "Set operation requires equal number of columns: left has {}, right has {}",
+                left.fields().len(),
+                right.fields().len()
+            )));
+        }
+
+        let fields: Vec<Field> = left
+            .fields()
+            .iter()
+            .zip(right.fields().iter())
+            .map(|(lf, rf)| {
+                let widened = Self::widen_type(lf.data_type(), rf.data_type());
+                Field::new(lf.name(), widened, lf.is_nullable() || rf.is_nullable())
+            })
+            .collect();
+
+        Ok(Schema::new(fields))
+    }
+
+    /// Determine the widest compatible type for set operation coercion.
+    fn widen_type(left: &crate::types::DataType, right: &crate::types::DataType) -> crate::types::DataType {
+        use crate::types::DataType;
+        if left == right {
+            return left.clone();
+        }
+        match (left, right) {
+            // Integer → Float promotion
+            (DataType::Int32 | DataType::Int64, DataType::Float64)
+            | (DataType::Float64, DataType::Int32 | DataType::Int64) => DataType::Float64,
+            // Int32 → Int64 promotion
+            (DataType::Int32, DataType::Int64) | (DataType::Int64, DataType::Int32) => {
+                DataType::Int64
+            }
+            // Fallback: use left type (Arrow cast will handle or error)
+            _ => left.clone(),
+        }
+    }
+
     fn is_group_by_column(&self, expr: &LogicalExpr, group_by: &[LogicalExpr]) -> bool {
         match expr {
             LogicalExpr::Column(col) => group_by.iter().any(|gb| {
