@@ -144,7 +144,8 @@ File paths must be valid UTF-8 and accessible from the current process.
 ### Implemented
 
 - String: `UPPER`, `LOWER`, `TRIM`, `LTRIM`, `RTRIM`, `LENGTH`, `CONCAT`, `SUBSTRING`, `REPLACE`, `REVERSE`, `LPAD`, `RPAD`, `SPLIT_PART`, `LEFT`, `RIGHT`, `INITCAP`, `REPEAT`, `TRANSLATE`, `ASCII`, `CHR`, `POSITION`/`STRPOS`, `STARTS_WITH`, `ENDS_WITH`
-- Math: `ABS`, `ROUND`, `CEIL`/`CEILING`, `FLOOR`, `POWER`/`POW`, `SQRT`, `EXP`, `LN`, `LOG`, `SIGN`, `MOD`/`MODULO`
+- Math: `ABS`, `ROUND`, `CEIL`/`CEILING`, `FLOOR`, `POWER`/`POW`, `SQRT`, `EXP`, `LN`, `LOG`, `LOG2`, `LOG10`, `SIGN`, `MOD`/`MODULO`, `TRUNC`/`TRUNCATE`, `CBRT`, `PI`, `RANDOM`
+- Trigonometric: `SIN`, `COS`, `TAN`, `ASIN`, `ACOS`, `ATAN`, `ATAN2`, `DEGREES`, `RADIANS`
 - Regex: `REGEXP_MATCH`, `REGEXP_REPLACE`, `REGEXP_EXTRACT`
 - Hash: `MD5`, `SHA256`/`SHA2`
 - Null handling: `COALESCE`, `NULLIF`, `IFNULL`/`NVL`, `GREATEST`, `LEAST`
