@@ -359,3 +359,273 @@ fn test_values_insert_roundtrip() {
     let r = c.query("SELECT * FROM test_vals").unwrap();
     assert_eq!(total_rows(&r), 3);
 }
+
+// --- Trigonometric functions ---
+
+#[test]
+fn test_sin() {
+    let conn = setup();
+    let r = conn.query("SELECT SIN(0)").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((val - 0.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_cos() {
+    let conn = setup();
+    let r = conn.query("SELECT COS(0)").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((val - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_tan() {
+    let conn = setup();
+    let r = conn.query("SELECT TAN(0)").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((val - 0.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_asin_acos_atan() {
+    let conn = setup();
+    let r = conn.query("SELECT ASIN(0), ACOS(1), ATAN(0)").unwrap();
+    let c0 = r[0].column(0).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap().value(0);
+    let c1 = r[0].column(1).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap().value(0);
+    let c2 = r[0].column(2).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap().value(0);
+    assert!((c0 - 0.0).abs() < 1e-10);
+    assert!((c1 - 0.0).abs() < 1e-10);
+    assert!((c2 - 0.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_atan2() {
+    let conn = setup();
+    let r = conn.query("SELECT ATAN2(1, 1)").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    // atan2(1,1) = pi/4 ≈ 0.7854
+    assert!((val - std::f64::consts::FRAC_PI_4).abs() < 1e-10);
+}
+
+#[test]
+fn test_degrees_radians() {
+    let conn = setup();
+    let r = conn.query("SELECT DEGREES(3.141592653589793), RADIANS(180)").unwrap();
+    let deg = r[0].column(0).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap().value(0);
+    let rad = r[0].column(1).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap().value(0);
+    assert!((deg - 180.0).abs() < 1e-6);
+    assert!((rad - std::f64::consts::PI).abs() < 1e-6);
+}
+
+#[test]
+fn test_pi() {
+    let conn = setup();
+    let r = conn.query("SELECT PI()").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((val - std::f64::consts::PI).abs() < 1e-15);
+}
+
+#[test]
+fn test_log2_log10() {
+    let conn = setup();
+    let r = conn.query("SELECT LOG2(8), LOG10(1000)").unwrap();
+    let l2 = r[0].column(0).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap().value(0);
+    let l10 = r[0].column(1).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap().value(0);
+    assert!((l2 - 3.0).abs() < 1e-10);
+    assert!((l10 - 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_cbrt() {
+    let conn = setup();
+    let r = conn.query("SELECT CBRT(27)").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((val - 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_trunc() {
+    let conn = setup();
+    let r = conn.query("SELECT TRUNC(3.14159, 2)").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((val - 3.14).abs() < 1e-10);
+}
+
+#[test]
+fn test_trunc_no_scale() {
+    let conn = setup();
+    let r = conn.query("SELECT TRUNC(3.14159)").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!((val - 3.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_random() {
+    let conn = setup();
+    let r = conn.query("SELECT RANDOM()").unwrap();
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    assert!(val >= 0.0 && val < 1.0, "RANDOM() should be in [0, 1), got {}", val);
+}
+
+#[test]
+fn test_trig_with_column() {
+    let conn = setup();
+    let r = conn.query("SELECT SIN(salary / 10000.0) FROM employees LIMIT 1").unwrap();
+    assert_eq!(total_rows(&r), 1);
+    let val = r[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap()
+        .value(0);
+    // SIN(9.0) ≈ 0.4121
+    assert!((val - (9.0_f64).sin()).abs() < 1e-6);
+}
+
+// --- GENERATE_SERIES table function ---
+
+#[test]
+fn test_generate_series_basic() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series(1, 5)")
+        .unwrap();
+    assert_eq!(total_rows(&r), 5);
+}
+
+#[test]
+fn test_generate_series_with_step() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series(0, 10, 2)")
+        .unwrap();
+    assert_eq!(total_rows(&r), 6); // 0, 2, 4, 6, 8, 10
+}
+
+#[test]
+fn test_generate_series_descending() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series(5, 1, -1)")
+        .unwrap();
+    assert_eq!(total_rows(&r), 5); // 5, 4, 3, 2, 1
+}
+
+#[test]
+fn test_generate_series_with_alias() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT value FROM generate_series(1, 3) AS s")
+        .unwrap();
+    assert_eq!(total_rows(&r), 3);
+}
+
+#[test]
+fn test_generate_series_in_where() {
+    let conn = setup();
+    let r = conn
+        .query("SELECT * FROM generate_series(1, 5) AS s WHERE s.value > 3")
+        .unwrap();
+    assert_eq!(total_rows(&r), 2); // 4, 5
+}
+
+#[test]
+fn test_generate_series_single_value() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series(42, 42)")
+        .unwrap();
+    assert_eq!(total_rows(&r), 1);
+}
+
+#[test]
+fn test_generate_series_empty() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series(5, 1, 1)")
+        .unwrap();
+    assert_eq!(total_rows(&r), 0);
+}
+
+#[test]
+fn test_generate_series_date() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series('2024-01-01', '2024-01-05')")
+        .unwrap();
+    assert_eq!(total_rows(&r), 5);
+}
+
+#[test]
+fn test_generate_series_date_weekly() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series('2024-01-01', '2024-01-31', '1 week')")
+        .unwrap();
+    // Jan 1, 8, 15, 22, 29 = 5 weeks
+    assert_eq!(total_rows(&r), 5);
+}
+
+#[test]
+fn test_generate_series_date_monthly() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series('2024-01-01', '2024-12-31', '1 month')")
+        .unwrap();
+    // ~12 months with 30-day approximation
+    assert!(total_rows(&r) >= 12, "Expected at least 12 months");
+}
+
+#[test]
+fn test_generate_series_date_descending() {
+    let conn = Connection::in_memory().unwrap();
+    let r = conn
+        .query("SELECT * FROM generate_series('2024-01-05', '2024-01-01', '-1 day')")
+        .unwrap();
+    assert_eq!(total_rows(&r), 5);
+}

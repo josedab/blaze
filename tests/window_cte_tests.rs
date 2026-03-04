@@ -139,14 +139,12 @@ fn test_lead_function() {
 #[test]
 fn test_window_aggregate_sum() {
     let conn = create_test_connection();
-    // Test SUM window aggregate - result may be single row per partition or all rows
     let results = conn
-        .query("SELECT *, SUM(amount) OVER (PARTITION BY user_id) AS total FROM orders")
+        .query("SELECT id, user_id, amount, SUM(amount) OVER (PARTITION BY user_id) AS total FROM orders")
         .unwrap();
     assert!(!results.is_empty(), "Should return results");
     let batch = &results[0];
     assert!(batch.num_rows() > 0, "Should have at least one row");
-    // The window total column should exist and have non-null values
     let last_col = batch.num_columns() - 1;
     let total = batch.column(last_col);
     assert!(total.len() > 0, "Total column should have values");
@@ -156,7 +154,7 @@ fn test_window_aggregate_sum() {
 fn test_window_aggregate_count() {
     let conn = create_test_connection();
     let results = conn
-        .query("SELECT *, COUNT(*) OVER (PARTITION BY user_id) AS cnt FROM orders")
+        .query("SELECT id, user_id, COUNT(id) OVER (PARTITION BY user_id) AS cnt FROM orders")
         .unwrap();
     assert!(!results.is_empty(), "Should return results");
     let batch = &results[0];
@@ -211,4 +209,104 @@ fn test_union_all() {
         .unwrap();
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 4);
+}
+
+#[test]
+fn test_window_sum_unfiltered() {
+    let conn = create_test_connection();
+    let results = conn
+        .query("SELECT id, SUM(amount) OVER () as total_amount FROM orders")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6);
+}
+
+#[test]
+fn test_window_count_filter() {
+    let conn = create_test_connection();
+    let results = conn
+        .query("SELECT id, COUNT(amount) FILTER (WHERE amount > 150.0) OVER () as big_orders FROM orders")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6);
+    // Orders > 150: 200.0, 300.0, 250.0 = 3
+    let last_col = results[0].num_columns() - 1;
+    let col = results[0]
+        .column(last_col)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    assert!((col.value(0) - 3.0).abs() < 0.01, "Expected 3 big orders, got {}", col.value(0));
+}
+
+#[test]
+fn test_window_sum_filter() {
+    let conn = create_test_connection();
+    let results = conn
+        .query("SELECT id, SUM(amount) FILTER (WHERE amount >= 200.0) OVER () as big_sum FROM orders")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6);
+    // Orders >= 200: 200.0 + 300.0 + 250.0 = 750.0
+    let last_col = results[0].num_columns() - 1;
+    let col = results[0]
+        .column(last_col)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    assert!((col.value(0) - 750.0).abs() < 0.01, "Expected 750, got {}", col.value(0));
+}
+
+#[test]
+fn test_window_rows_between_preceding_and_current() {
+    let conn = create_test_connection();
+    // Running sum over a 2-row window: current row + 1 preceding
+    let results = conn
+        .query("SELECT id, amount, SUM(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) as running FROM orders")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6);
+    // First row: only itself; second row: sum of first two, etc.
+    let last_col = results[0].num_columns() - 1;
+    let running = results[0]
+        .column(last_col)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    // First value should be just the first amount (100.0)
+    assert!((running.value(0) - 100.0).abs() < 0.01, "First row should be 100.0, got {}", running.value(0));
+    // Second value should be 100.0 + 200.0 = 300.0
+    assert!((running.value(1) - 300.0).abs() < 0.01, "Second row should be 300.0, got {}", running.value(1));
+}
+
+#[test]
+fn test_window_rows_unbounded_preceding_to_current() {
+    let conn = create_test_connection();
+    // Cumulative sum
+    let results = conn
+        .query("SELECT id, amount, SUM(amount) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as cumsum FROM orders")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6);
+    let last_col = results[0].num_columns() - 1;
+    let cumsum = results[0]
+        .column(last_col)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    // amounts by id: 100, 200, 150, 300, 50, 250
+    assert!((cumsum.value(0) - 100.0).abs() < 0.01);
+    assert!((cumsum.value(1) - 300.0).abs() < 0.01);
+    assert!((cumsum.value(2) - 450.0).abs() < 0.01);
+}
+
+#[test]
+fn test_window_rows_between_symmetric() {
+    let conn = create_test_connection();
+    // 3-row moving average: 1 preceding, current, 1 following
+    let results = conn
+        .query("SELECT id, amount, AVG(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) as moving_avg FROM orders")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6);
 }

@@ -134,3 +134,71 @@ fn test_offset_larger_than_rows() {
     let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 0);
 }
+
+#[test]
+fn test_in_subquery_decorrelation() {
+    let conn = create_test_connection();
+    let results = conn
+        .query("SELECT id, name FROM users WHERE id IN (SELECT user_id FROM orders)")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    // Users 1, 2, 3, 4 have orders
+    assert_eq!(total_rows, 4);
+}
+
+#[test]
+fn test_not_in_subquery_decorrelation() {
+    let conn = create_test_connection();
+    let results = conn
+        .query("SELECT id, name FROM users WHERE id NOT IN (SELECT user_id FROM orders)")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    // User 5 (Eve) has no orders
+    assert_eq!(total_rows, 1);
+}
+
+#[test]
+fn test_exists_subquery() {
+    let conn = create_test_connection();
+    // Uncorrelated EXISTS: checks if orders table has any rows
+    let results = conn
+        .query("SELECT id, name FROM users WHERE EXISTS (SELECT 1 FROM orders)")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    // Since orders has rows, all users should be returned
+    assert_eq!(total_rows, 5);
+}
+
+#[test]
+fn test_not_exists_subquery() {
+    let conn = create_test_connection();
+    conn.execute("CREATE TABLE empty_table (id BIGINT)").unwrap();
+    let results = conn
+        .query("SELECT id, name FROM users WHERE NOT EXISTS (SELECT 1 FROM empty_table)")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    // empty_table has no rows, so NOT EXISTS is true for all users
+    assert_eq!(total_rows, 5);
+}
+
+#[test]
+fn test_scalar_subquery_in_select() {
+    let conn = create_test_connection();
+    let results = conn
+        .query("SELECT id, name, (SELECT COUNT(id) FROM orders) as total_orders FROM users")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 5);
+}
+
+#[test]
+fn test_scalar_subquery_in_where() {
+    let conn = create_test_connection();
+    // Auto-coercion handles Int64 > Float64 comparison
+    let results = conn
+        .query("SELECT id, name FROM users WHERE age > (SELECT AVG(age) FROM users)")
+        .unwrap();
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    // avg age = 30.0, users > 30: Charlie(35), Eve(32) = 2
+    assert_eq!(total_rows, 2);
+}
