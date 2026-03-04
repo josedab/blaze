@@ -215,11 +215,25 @@ impl Accumulator for CountAccumulator {
 /// SUM accumulator for numeric types.
 pub struct SumAccumulator {
     sum: Option<f64>,
+    int_sum: Option<i128>,
+    is_int: bool,
+    decimal_sum: Option<i128>,
+    decimal_precision: u8,
+    decimal_scale: i8,
+    is_decimal: bool,
 }
 
 impl SumAccumulator {
     pub fn new() -> Self {
-        Self { sum: None }
+        Self {
+            sum: None,
+            int_sum: None,
+            is_int: false,
+            decimal_sum: None,
+            decimal_precision: 38,
+            decimal_scale: 0,
+            is_decimal: false,
+        }
     }
 }
 
@@ -231,28 +245,58 @@ impl Default for SumAccumulator {
 
 impl Accumulator for SumAccumulator {
     fn update(&mut self, values: &ArrayRef) -> Result<()> {
-        let sum = match values.data_type() {
+        match values.data_type() {
             DataType::Int64 => {
+                self.is_int = true;
                 let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
-                compute::sum(arr).map(|v| v as f64)
+                if let Some(s) = compute::sum(arr) {
+                    self.int_sum = Some(self.int_sum.unwrap_or(0) + s as i128);
+                }
             }
             DataType::Float64 => {
                 let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
-                compute::sum(arr)
+                if let Some(s) = compute::sum(arr) {
+                    self.sum = Some(self.sum.unwrap_or(0.0) + s);
+                }
             }
-            _ => None,
-        };
-
-        if let Some(s) = sum {
-            self.sum = Some(self.sum.unwrap_or(0.0) + s);
+            DataType::Int32 => {
+                self.is_int = true;
+                let arr = try_downcast::<Int32Array>(values, "Int32Array")?;
+                if let Some(s) = compute::sum(arr) {
+                    self.int_sum = Some(self.int_sum.unwrap_or(0) + s as i128);
+                }
+            }
+            DataType::Decimal128(p, s) => {
+                self.is_decimal = true;
+                self.decimal_precision = *p;
+                self.decimal_scale = *s;
+                let arr = try_downcast::<Decimal128Array>(values, "Decimal128Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        self.decimal_sum = Some(self.decimal_sum.unwrap_or(0) + arr.value(i));
+                    }
+                }
+            }
+            _ => {}
         }
-
         Ok(())
     }
 
     fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
         if let Some(other) = other.as_any().downcast_ref::<SumAccumulator>() {
-            if let Some(s) = other.sum {
+            if other.is_decimal {
+                self.is_decimal = true;
+                self.decimal_precision = other.decimal_precision;
+                self.decimal_scale = other.decimal_scale;
+                if let Some(s) = other.decimal_sum {
+                    self.decimal_sum = Some(self.decimal_sum.unwrap_or(0) + s);
+                }
+            } else if other.is_int {
+                self.is_int = true;
+                if let Some(s) = other.int_sum {
+                    self.int_sum = Some(self.int_sum.unwrap_or(0) + s);
+                }
+            } else if let Some(s) = other.sum {
                 self.sum = Some(self.sum.unwrap_or(0.0) + s);
             }
         }
@@ -260,11 +304,211 @@ impl Accumulator for SumAccumulator {
     }
 
     fn finalize(&self) -> Result<ArrayRef> {
-        Ok(Arc::new(Float64Array::from(vec![self.sum])))
+        if self.is_decimal {
+            let arr = match self.decimal_sum {
+                Some(v) => Decimal128Array::from(vec![Some(v)]),
+                None => Decimal128Array::from(vec![Option::<i128>::None]),
+            };
+            Ok(Arc::new(
+                arr.with_precision_and_scale(self.decimal_precision, self.decimal_scale)
+                    .map_err(|e| {
+                        BlazeError::execution(format!("Decimal precision error: {}", e))
+                    })?,
+            ))
+        } else if self.is_int {
+            Ok(Arc::new(Int64Array::from(vec![
+                self.int_sum.map(|v| v as i64),
+            ])))
+        } else {
+            Ok(Arc::new(Float64Array::from(vec![self.sum])))
+        }
     }
 
     fn reset(&mut self) {
         self.sum = None;
+        self.int_sum = None;
+        self.is_int = false;
+        self.decimal_sum = None;
+        self.is_decimal = false;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Decimal-preserving SUM accumulator. Accumulates as i128 and returns Decimal128.
+pub struct DecimalSumAccumulator {
+    sum: Option<i128>,
+    precision: u8,
+    scale: i8,
+}
+
+impl DecimalSumAccumulator {
+    pub fn new(precision: u8, scale: i8) -> Self {
+        Self {
+            sum: None,
+            precision,
+            scale,
+        }
+    }
+}
+
+impl Accumulator for DecimalSumAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        if let DataType::Decimal128(_, _) = values.data_type() {
+            let arr = try_downcast::<Decimal128Array>(values, "Decimal128Array")?;
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    self.sum = Some(self.sum.unwrap_or(0) + arr.value(i));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<DecimalSumAccumulator>() {
+            if let Some(s) = other.sum {
+                self.sum = Some(self.sum.unwrap_or(0) + s);
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        let arr = match self.sum {
+            Some(v) => Decimal128Array::from(vec![Some(v)]),
+            None => Decimal128Array::from(vec![Option::<i128>::None]),
+        };
+        Ok(Arc::new(
+            arr.with_precision_and_scale(self.precision, self.scale)
+                .map_err(|e| BlazeError::execution(format!("Decimal precision error: {}", e)))?,
+        ))
+    }
+
+    fn reset(&mut self) {
+        self.sum = None;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Decimal-preserving MIN accumulator.
+pub struct DecimalMinAccumulator {
+    min: Option<i128>,
+    precision: u8,
+    scale: i8,
+}
+
+impl DecimalMinAccumulator {
+    pub fn new(precision: u8, scale: i8) -> Self {
+        Self {
+            min: None,
+            precision,
+            scale,
+        }
+    }
+}
+
+impl Accumulator for DecimalMinAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        if let DataType::Decimal128(_, _) = values.data_type() {
+            let arr = try_downcast::<Decimal128Array>(values, "Decimal128Array")?;
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let v = arr.value(i);
+                    self.min = Some(self.min.map(|m| m.min(v)).unwrap_or(v));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<DecimalMinAccumulator>() {
+            if let Some(m) = other.min {
+                self.min = Some(self.min.map(|curr| curr.min(m)).unwrap_or(m));
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        let arr = match self.min {
+            Some(v) => Decimal128Array::from(vec![Some(v)]),
+            None => Decimal128Array::from(vec![Option::<i128>::None]),
+        };
+        Ok(Arc::new(
+            arr.with_precision_and_scale(self.precision, self.scale)
+                .map_err(|e| BlazeError::execution(format!("Decimal precision error: {}", e)))?,
+        ))
+    }
+
+    fn reset(&mut self) {
+        self.min = None;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Decimal-preserving MAX accumulator.
+pub struct DecimalMaxAccumulator {
+    max: Option<i128>,
+    precision: u8,
+    scale: i8,
+}
+
+impl DecimalMaxAccumulator {
+    pub fn new(precision: u8, scale: i8) -> Self {
+        Self {
+            max: None,
+            precision,
+            scale,
+        }
+    }
+}
+
+impl Accumulator for DecimalMaxAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        if let DataType::Decimal128(_, _) = values.data_type() {
+            let arr = try_downcast::<Decimal128Array>(values, "Decimal128Array")?;
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let v = arr.value(i);
+                    self.max = Some(self.max.map(|m| m.max(v)).unwrap_or(v));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<DecimalMaxAccumulator>() {
+            if let Some(m) = other.max {
+                self.max = Some(self.max.map(|curr| curr.max(m)).unwrap_or(m));
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        let arr = match self.max {
+            Some(v) => Decimal128Array::from(vec![Some(v)]),
+            None => Decimal128Array::from(vec![Option::<i128>::None]),
+        };
+        Ok(Arc::new(
+            arr.with_precision_and_scale(self.precision, self.scale)
+                .map_err(|e| BlazeError::execution(format!("Decimal precision error: {}", e)))?,
+        ))
+    }
+
+    fn reset(&mut self) {
+        self.max = None;
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -303,6 +547,18 @@ impl Accumulator for AvgAccumulator {
                 let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
                 let sum = compute::sum(arr).unwrap_or(0.0);
                 let count = (arr.len() - arr.null_count()) as u64;
+                (sum, count)
+            }
+            DataType::Decimal128(_, _) => {
+                let arr = try_downcast::<Decimal128Array>(values, "Decimal128Array")?;
+                let mut sum: f64 = 0.0;
+                let mut count: u64 = 0;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        sum += arr.value(i) as f64;
+                        count += 1;
+                    }
+                }
                 (sum, count)
             }
             _ => (0.0, 0),
@@ -344,11 +600,21 @@ impl Accumulator for AvgAccumulator {
 /// MIN accumulator.
 pub struct MinAccumulator {
     min: Option<f64>,
+    decimal_min: Option<i128>,
+    decimal_precision: u8,
+    decimal_scale: i8,
+    is_decimal: bool,
 }
 
 impl MinAccumulator {
     pub fn new() -> Self {
-        Self { min: None }
+        Self {
+            min: None,
+            decimal_min: None,
+            decimal_precision: 38,
+            decimal_scale: 0,
+            is_decimal: false,
+        }
     }
 }
 
@@ -360,28 +626,47 @@ impl Default for MinAccumulator {
 
 impl Accumulator for MinAccumulator {
     fn update(&mut self, values: &ArrayRef) -> Result<()> {
-        let min = match values.data_type() {
+        match values.data_type() {
             DataType::Int64 => {
                 let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
-                compute::min(arr).map(|v| v as f64)
+                if let Some(m) = compute::min(arr).map(|v| v as f64) {
+                    self.min = Some(self.min.map(|curr| curr.min(m)).unwrap_or(m));
+                }
             }
             DataType::Float64 => {
                 let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
-                compute::min(arr)
+                if let Some(m) = compute::min(arr) {
+                    self.min = Some(self.min.map(|curr| curr.min(m)).unwrap_or(m));
+                }
             }
-            _ => None,
-        };
-
-        if let Some(m) = min {
-            self.min = Some(self.min.map(|curr| curr.min(m)).unwrap_or(m));
+            DataType::Decimal128(p, s) => {
+                self.is_decimal = true;
+                self.decimal_precision = *p;
+                self.decimal_scale = *s;
+                let arr = try_downcast::<Decimal128Array>(values, "Decimal128Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        let v = arr.value(i);
+                        self.decimal_min =
+                            Some(self.decimal_min.map(|m| m.min(v)).unwrap_or(v));
+                    }
+                }
+            }
+            _ => {}
         }
-
         Ok(())
     }
 
     fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
         if let Some(other) = other.as_any().downcast_ref::<MinAccumulator>() {
-            if let Some(m) = other.min {
+            if other.is_decimal {
+                self.is_decimal = true;
+                self.decimal_precision = other.decimal_precision;
+                self.decimal_scale = other.decimal_scale;
+                if let Some(m) = other.decimal_min {
+                    self.decimal_min = Some(self.decimal_min.map(|c| c.min(m)).unwrap_or(m));
+                }
+            } else if let Some(m) = other.min {
                 self.min = Some(self.min.map(|curr| curr.min(m)).unwrap_or(m));
             }
         }
@@ -389,11 +674,26 @@ impl Accumulator for MinAccumulator {
     }
 
     fn finalize(&self) -> Result<ArrayRef> {
-        Ok(Arc::new(Float64Array::from(vec![self.min])))
+        if self.is_decimal {
+            let arr = match self.decimal_min {
+                Some(v) => Decimal128Array::from(vec![Some(v)]),
+                None => Decimal128Array::from(vec![Option::<i128>::None]),
+            };
+            Ok(Arc::new(
+                arr.with_precision_and_scale(self.decimal_precision, self.decimal_scale)
+                    .map_err(|e| {
+                        BlazeError::execution(format!("Decimal precision error: {}", e))
+                    })?,
+            ))
+        } else {
+            Ok(Arc::new(Float64Array::from(vec![self.min])))
+        }
     }
 
     fn reset(&mut self) {
         self.min = None;
+        self.decimal_min = None;
+        self.is_decimal = false;
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -404,11 +704,21 @@ impl Accumulator for MinAccumulator {
 /// MAX accumulator.
 pub struct MaxAccumulator {
     max: Option<f64>,
+    decimal_max: Option<i128>,
+    decimal_precision: u8,
+    decimal_scale: i8,
+    is_decimal: bool,
 }
 
 impl MaxAccumulator {
     pub fn new() -> Self {
-        Self { max: None }
+        Self {
+            max: None,
+            decimal_max: None,
+            decimal_precision: 38,
+            decimal_scale: 0,
+            is_decimal: false,
+        }
     }
 }
 
@@ -420,28 +730,47 @@ impl Default for MaxAccumulator {
 
 impl Accumulator for MaxAccumulator {
     fn update(&mut self, values: &ArrayRef) -> Result<()> {
-        let max = match values.data_type() {
+        match values.data_type() {
             DataType::Int64 => {
                 let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
-                compute::max(arr).map(|v| v as f64)
+                if let Some(m) = compute::max(arr).map(|v| v as f64) {
+                    self.max = Some(self.max.map(|curr| curr.max(m)).unwrap_or(m));
+                }
             }
             DataType::Float64 => {
                 let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
-                compute::max(arr)
+                if let Some(m) = compute::max(arr) {
+                    self.max = Some(self.max.map(|curr| curr.max(m)).unwrap_or(m));
+                }
             }
-            _ => None,
-        };
-
-        if let Some(m) = max {
-            self.max = Some(self.max.map(|curr| curr.max(m)).unwrap_or(m));
+            DataType::Decimal128(p, s) => {
+                self.is_decimal = true;
+                self.decimal_precision = *p;
+                self.decimal_scale = *s;
+                let arr = try_downcast::<Decimal128Array>(values, "Decimal128Array")?;
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        let v = arr.value(i);
+                        self.decimal_max =
+                            Some(self.decimal_max.map(|m| m.max(v)).unwrap_or(v));
+                    }
+                }
+            }
+            _ => {}
         }
-
         Ok(())
     }
 
     fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
         if let Some(other) = other.as_any().downcast_ref::<MaxAccumulator>() {
-            if let Some(m) = other.max {
+            if other.is_decimal {
+                self.is_decimal = true;
+                self.decimal_precision = other.decimal_precision;
+                self.decimal_scale = other.decimal_scale;
+                if let Some(m) = other.decimal_max {
+                    self.decimal_max = Some(self.decimal_max.map(|c| c.max(m)).unwrap_or(m));
+                }
+            } else if let Some(m) = other.max {
                 self.max = Some(self.max.map(|curr| curr.max(m)).unwrap_or(m));
             }
         }
@@ -449,11 +778,254 @@ impl Accumulator for MaxAccumulator {
     }
 
     fn finalize(&self) -> Result<ArrayRef> {
-        Ok(Arc::new(Float64Array::from(vec![self.max])))
+        if self.is_decimal {
+            let arr = match self.decimal_max {
+                Some(v) => Decimal128Array::from(vec![Some(v)]),
+                None => Decimal128Array::from(vec![Option::<i128>::None]),
+            };
+            Ok(Arc::new(
+                arr.with_precision_and_scale(self.decimal_precision, self.decimal_scale)
+                    .map_err(|e| {
+                        BlazeError::execution(format!("Decimal precision error: {}", e))
+                    })?,
+            ))
+        } else {
+            Ok(Arc::new(Float64Array::from(vec![self.max])))
+        }
     }
 
     fn reset(&mut self) {
         self.max = None;
+        self.decimal_max = None;
+        self.is_decimal = false;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// COUNT(DISTINCT) accumulator using type-specific hashing for performance.
+/// Uses i64 HashSet for integers, u64 bits for floats, String for others.
+pub struct CountDistinctAccumulator {
+    int_seen: Option<std::collections::HashSet<i64>>,
+    float_seen: Option<std::collections::HashSet<u64>>,
+    str_seen: Option<std::collections::HashSet<String>>,
+}
+
+impl CountDistinctAccumulator {
+    pub fn new() -> Self {
+        Self {
+            int_seen: None,
+            float_seen: None,
+            str_seen: None,
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.int_seen.as_ref().map(|s| s.len()).unwrap_or(0)
+            + self.float_seen.as_ref().map(|s| s.len()).unwrap_or(0)
+            + self.str_seen.as_ref().map(|s| s.len()).unwrap_or(0)
+    }
+}
+
+impl Default for CountDistinctAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Accumulator for CountDistinctAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        match values.data_type() {
+            DataType::Int64 => {
+                let arr = try_downcast::<Int64Array>(values, "Int64Array")?;
+                let set = self.int_seen.get_or_insert_with(std::collections::HashSet::new);
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        set.insert(arr.value(i));
+                    }
+                }
+            }
+            DataType::Int32 => {
+                let arr = try_downcast::<Int32Array>(values, "Int32Array")?;
+                let set = self.int_seen.get_or_insert_with(std::collections::HashSet::new);
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        set.insert(arr.value(i) as i64);
+                    }
+                }
+            }
+            DataType::Float64 => {
+                let arr = try_downcast::<Float64Array>(values, "Float64Array")?;
+                let set = self.float_seen.get_or_insert_with(std::collections::HashSet::new);
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        set.insert(arr.value(i).to_bits());
+                    }
+                }
+            }
+            _ => {
+                let set = self.str_seen.get_or_insert_with(std::collections::HashSet::new);
+                for i in 0..values.len() {
+                    if !values.is_null(i) {
+                        let s = arrow::util::display::array_value_to_string(values, i)
+                            .unwrap_or_default();
+                        set.insert(s);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<CountDistinctAccumulator>() {
+            if let Some(other_ints) = &other.int_seen {
+                let set = self.int_seen.get_or_insert_with(std::collections::HashSet::new);
+                set.extend(other_ints);
+            }
+            if let Some(other_floats) = &other.float_seen {
+                let set = self.float_seen.get_or_insert_with(std::collections::HashSet::new);
+                set.extend(other_floats);
+            }
+            if let Some(other_strs) = &other.str_seen {
+                let set = self.str_seen.get_or_insert_with(std::collections::HashSet::new);
+                set.extend(other_strs.iter().cloned());
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        Ok(Arc::new(Int64Array::from(vec![self.count() as i64])))
+    }
+
+    fn reset(&mut self) {
+        self.int_seen = None;
+        self.float_seen = None;
+        self.str_seen = None;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// STRING_AGG accumulator — concatenates string values with a separator.
+pub struct StringAggAccumulator {
+    values: Vec<String>,
+    separator: String,
+}
+
+impl StringAggAccumulator {
+    pub fn new(separator: String) -> Self {
+        Self {
+            values: Vec::new(),
+            separator,
+        }
+    }
+}
+
+impl Accumulator for StringAggAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        if let Some(arr) = values.as_any().downcast_ref::<StringArray>() {
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    self.values.push(arr.value(i).to_string());
+                }
+            }
+        } else {
+            // For non-string types, convert to string representation
+            for i in 0..values.len() {
+                if !values.is_null(i) {
+                    let s = arrow::util::display::array_value_to_string(values, i)
+                        .unwrap_or_default();
+                    self.values.push(s);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<StringAggAccumulator>() {
+            self.values.extend(other.values.iter().cloned());
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        if self.values.is_empty() {
+            Ok(Arc::new(StringArray::from(vec![Option::<&str>::None])))
+        } else {
+            let result = self.values.join(&self.separator);
+            Ok(Arc::new(StringArray::from(vec![Some(result.as_str())])))
+        }
+    }
+
+    fn reset(&mut self) {
+        self.values.clear();
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// ARRAY_AGG accumulator — collects values into a JSON array string.
+pub struct ArrayAggAccumulator {
+    values: Vec<String>,
+}
+
+impl ArrayAggAccumulator {
+    pub fn new() -> Self {
+        Self { values: Vec::new() }
+    }
+}
+
+impl Default for ArrayAggAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Accumulator for ArrayAggAccumulator {
+    fn update(&mut self, values: &ArrayRef) -> Result<()> {
+        for i in 0..values.len() {
+            if !values.is_null(i) {
+                let s = arrow::util::display::array_value_to_string(values, i)
+                    .unwrap_or_default();
+                self.values.push(s);
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &dyn Accumulator) -> Result<()> {
+        if let Some(other) = other.as_any().downcast_ref::<ArrayAggAccumulator>() {
+            self.values.extend(other.values.iter().cloned());
+        }
+        Ok(())
+    }
+
+    fn finalize(&self) -> Result<ArrayRef> {
+        use arrow::array::ListArray;
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::Field as ArrowField;
+
+        // Build a ListArray with a single list element containing all values
+        let values_array = StringArray::from(
+            self.values.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        );
+        let field = Arc::new(ArrowField::new("item", arrow::datatypes::DataType::Utf8, true));
+        let offsets = OffsetBuffer::from_lengths([self.values.len()]);
+        let list_array = ListArray::new(field, offsets, Arc::new(values_array), None);
+        Ok(Arc::new(list_array))
+    }
+
+    fn reset(&mut self) {
+        self.values.clear();
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1376,7 +1948,13 @@ impl HashAggregateOperator {
         use crate::planner::AggregateFunc;
 
         match &agg.func {
-            AggregateFunc::Count => Box::new(CountAccumulator::new()),
+            AggregateFunc::Count => {
+                if agg.distinct {
+                    Box::new(CountDistinctAccumulator::new())
+                } else {
+                    Box::new(CountAccumulator::new())
+                }
+            }
             AggregateFunc::Sum => Box::new(SumAccumulator::new()),
             AggregateFunc::Avg => Box::new(AvgAccumulator::new()),
             AggregateFunc::Min => Box::new(MinAccumulator::new()),
@@ -1402,8 +1980,21 @@ impl HashAggregateOperator {
                 Box::new(PercentileDiscAccumulator::new(frac))
             }
             AggregateFunc::Median => Box::new(PercentileContAccumulator::new(0.5)),
-            AggregateFunc::CountDistinct | AggregateFunc::ArrayAgg | AggregateFunc::StringAgg => {
-                Box::new(CountAccumulator::new())
+            AggregateFunc::CountDistinct => Box::new(CountDistinctAccumulator::new()),
+            AggregateFunc::ArrayAgg => Box::new(ArrayAggAccumulator::new()),
+            AggregateFunc::StringAgg => {
+                // STRING_AGG separator defaults to comma
+                let sep = agg.args.get(1).and_then(|arg| {
+                    use crate::planner::physical_expr::LiteralExpr;
+                    arg.as_any().downcast_ref::<LiteralExpr>().and_then(|lit| {
+                        if let crate::types::ScalarValue::Utf8(Some(s)) = lit.value() {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                }).unwrap_or_else(|| ",".to_string());
+                Box::new(StringAggAccumulator::new(sep))
             }
         }
     }
@@ -1563,8 +2154,8 @@ mod tests {
         acc.update(&int64_array(&[Some(10), Some(20), Some(30)]))
             .unwrap();
         let result = acc.finalize().unwrap();
-        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(arr.value(0), 60.0);
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 60);
     }
 
     #[test]
@@ -1583,8 +2174,8 @@ mod tests {
         acc.update(&int64_array(&[Some(10), None, Some(30)]))
             .unwrap();
         let result = acc.finalize().unwrap();
-        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(arr.value(0), 40.0);
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 40);
     }
 
     #[test]
@@ -1592,7 +2183,8 @@ mod tests {
         let mut acc = SumAccumulator::new();
         acc.update(&int64_array(&[None, None])).unwrap();
         let result = acc.finalize().unwrap();
-        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
+        // All nulls input with Int64 → returns Int64 array with null
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert!(arr.is_null(0), "SUM of all NULLs should be NULL");
     }
 
@@ -1612,8 +2204,8 @@ mod tests {
         acc2.update(&int64_array(&[Some(20)])).unwrap();
         acc1.merge(&acc2).unwrap();
         let result = acc1.finalize().unwrap();
-        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(arr.value(0), 30.0);
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 30);
     }
 
     // --- AvgAccumulator ---

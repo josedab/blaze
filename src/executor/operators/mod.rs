@@ -401,8 +401,8 @@ mod tests {
         acc.update(&values).unwrap();
 
         let result = acc.finalize().unwrap();
-        let arr = result.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(arr.value(0), 15.0);
+        let arr = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(arr.value(0), 15);
     }
 
     #[test]
