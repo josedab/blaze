@@ -17,6 +17,8 @@ pub enum PhysicalPlan {
     Scan {
         /// Table name
         table_name: String,
+        /// Schema name (e.g. "main", "information_schema")
+        schema_name: Option<String>,
         /// Projected columns (indices)
         projection: Option<Vec<usize>>,
         /// Output schema
@@ -123,6 +125,24 @@ pub enum PhysicalPlan {
         inputs: Vec<PhysicalPlan>,
         /// Output schema
         schema: Arc<ArrowSchema>,
+    },
+
+    /// Intersect (returns rows present in both inputs)
+    Intersect {
+        left: Box<PhysicalPlan>,
+        right: Box<PhysicalPlan>,
+        schema: Arc<ArrowSchema>,
+        /// If true, preserve duplicates (INTERSECT ALL)
+        all: bool,
+    },
+
+    /// Except (returns rows in left but not in right)
+    Except {
+        left: Box<PhysicalPlan>,
+        right: Box<PhysicalPlan>,
+        schema: Arc<ArrowSchema>,
+        /// If true, preserve duplicates (EXCEPT ALL)
+        all: bool,
     },
 
     /// Values (inline data)
@@ -239,6 +259,8 @@ impl PhysicalPlan {
             PhysicalPlan::CrossJoin { schema, .. } => schema.clone(),
             PhysicalPlan::SortMergeJoin { schema, .. } => schema.clone(),
             PhysicalPlan::Union { schema, .. } => schema.clone(),
+            PhysicalPlan::Intersect { schema, .. } => schema.clone(),
+            PhysicalPlan::Except { schema, .. } => schema.clone(),
             PhysicalPlan::Values { schema, .. } => schema.clone(),
             PhysicalPlan::Empty { schema, .. } => schema.clone(),
             PhysicalPlan::Explain { schema, .. } => schema.clone(),
@@ -263,6 +285,8 @@ impl PhysicalPlan {
             PhysicalPlan::CrossJoin { left, right, .. } => vec![left.as_ref(), right.as_ref()],
             PhysicalPlan::SortMergeJoin { left, right, .. } => vec![left.as_ref(), right.as_ref()],
             PhysicalPlan::Union { inputs, .. } => inputs.iter().collect(),
+            PhysicalPlan::Intersect { left, right, .. } => vec![left.as_ref(), right.as_ref()],
+            PhysicalPlan::Except { left, right, .. } => vec![left.as_ref(), right.as_ref()],
             PhysicalPlan::Values { .. } => vec![],
             PhysicalPlan::Empty { .. } => vec![],
             PhysicalPlan::Explain { input, .. } => vec![input.as_ref()],
@@ -370,6 +394,16 @@ impl PhysicalPlan {
                 for input in inputs {
                     input.format_indent(f, indent + 1);
                 }
+            }
+            PhysicalPlan::Intersect { left, right, .. } => {
+                f.push_str(&format!("{}Intersect\n", prefix));
+                left.format_indent(f, indent + 1);
+                right.format_indent(f, indent + 1);
+            }
+            PhysicalPlan::Except { left, right, .. } => {
+                f.push_str(&format!("{}Except\n", prefix));
+                left.format_indent(f, indent + 1);
+                right.format_indent(f, indent + 1);
             }
             PhysicalPlan::Values { data, .. } => {
                 f.push_str(&format!("{}Values: {} batch(es)\n", prefix, data.len()));
@@ -729,6 +763,7 @@ mod tests {
     fn scan_plan() -> PhysicalPlan {
         PhysicalPlan::Scan {
             table_name: "test".to_string(),
+            schema_name: None,
             projection: None,
             schema: test_schema(),
             filters: vec![],
@@ -901,6 +936,7 @@ mod tests {
     fn test_display_indent_scan() {
         let plan = PhysicalPlan::Scan {
             table_name: "orders".to_string(),
+            schema_name: None,
             projection: Some(vec![0, 1]),
             schema: test_schema(),
             filters: vec![],

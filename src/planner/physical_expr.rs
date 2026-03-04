@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Int64Array, RecordBatch,
+    StringArray,
 };
 use arrow::compute::kernels::boolean;
 use arrow::compute::kernels::cmp;
@@ -174,6 +175,20 @@ impl PhysicalExpr for BinaryExpr {
         let left = self.left.evaluate(batch)?;
         let right = self.right.evaluate(batch)?;
 
+        // SQL NULL propagation: any comparison with NULL yields NULL (not true/false)
+        let is_comparison = matches!(
+            self.op.as_str(),
+            "eq" | "neq" | "lt" | "lte" | "gt" | "gte"
+        );
+        if is_comparison
+            && (*left.data_type() == ArrowDataType::Null
+                || *right.data_type() == ArrowDataType::Null)
+        {
+            let len = left.len().max(right.len());
+            let null_bools: BooleanArray = (0..len).map(|_| Option::<bool>::None).collect();
+            return Ok(Arc::new(null_bools));
+        }
+
         // Auto-coerce numeric types for comparisons and arithmetic
         let (left, right) = Self::coerce_numeric_types(left, right)?;
 
@@ -227,8 +242,30 @@ impl PhysicalExpr for BinaryExpr {
                 Ok(Arc::new(result))
             }
             "plus" | "minus" | "multiply" | "divide" => self.evaluate_arithmetic(&left, &right),
+            "concat" => {
+                // String concatenation: convert both sides to strings and concatenate
+                let left_strings = arrow::compute::cast(&left, &ArrowDataType::Utf8)?;
+                let right_strings = arrow::compute::cast(&right, &ArrowDataType::Utf8)?;
+                let left_arr = left_strings
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("Expected string array for concat"))?;
+                let right_arr = right_strings
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| BlazeError::type_error("Expected string array for concat"))?;
+                let result: StringArray = left_arr
+                    .iter()
+                    .zip(right_arr.iter())
+                    .map(|(l, r)| match (l, r) {
+                        (Some(l), Some(r)) => Some(format!("{}{}", l, r)),
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(result) as ArrayRef)
+            }
             _ => Err(BlazeError::not_implemented(format!(
-                "Binary operator '{}' is not supported. Supported: eq, neq, lt, lteq, gt, gteq, and, or, plus, minus, multiply, divide.",
+                "Binary operator '{}' is not supported. Supported: eq, neq, lt, lteq, gt, gteq, and, or, plus, minus, multiply, divide, concat.",
                 self.op
             ))),
         }
@@ -290,7 +327,17 @@ impl BinaryExpr {
                     "plus" => numeric::add(left, right)?,
                     "minus" => numeric::sub(left, right)?,
                     "multiply" => numeric::mul(left, right)?,
-                    "divide" => numeric::div(left, right)?,
+                    "divide" => {
+                        // Check for division by zero in integer arithmetic
+                        for i in 0..right.len() {
+                            if !right.is_null(i) && right.value(i) == 0 {
+                                return Err(BlazeError::execution(
+                                    "Division by zero",
+                                ));
+                            }
+                        }
+                        numeric::div(left, right)?
+                    }
                     _ => return Err(BlazeError::internal("Invalid arithmetic op")),
                 };
                 Ok(Arc::new(result))
@@ -556,8 +603,14 @@ impl PhysicalExpr for CastExpr {
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ArrayRef> {
         let value = self.expr.evaluate(batch)?;
-        let cast_result = arrow::compute::cast(&value, &self.target_type)?;
-        Ok(cast_result)
+        arrow::compute::cast(&value, &self.target_type).map_err(|e| {
+            BlazeError::execution(format!(
+                "CAST failed: cannot convert {:?} to {:?}: {}",
+                value.data_type(),
+                self.target_type,
+                e
+            ))
+        })
     }
 
     fn name(&self) -> &str {
@@ -976,6 +1029,8 @@ impl PhysicalExpr for ScalarFunctionExpr {
                     ArrowDataType::Null
                 }
             }
+            // GROUPING function returns integer bitmask
+            "GROUPING" => ArrowDataType::Int64,
             // Date/Time functions
             "CURRENT_DATE" | "TO_DATE" => ArrowDataType::Date32,
             "CURRENT_TIMESTAMP" | "NOW" | "DATE_TRUNC" | "TO_TIMESTAMP" | "DATE_ADD"
@@ -3250,6 +3305,20 @@ impl PhysicalExpr for ScalarFunctionExpr {
                     .map(|_| Some(rand_f64()))
                     .collect();
                 Ok(Arc::new(result) as ArrayRef)
+            }
+
+            "GROUPING" => {
+                // GROUPING() reads __grouping_id column from the batch
+                let schema = batch.schema();
+                let gid_idx = schema.fields().iter().position(|f| f.name() == "__grouping_id");
+                match gid_idx {
+                    Some(idx) => Ok(batch.column(idx).clone()),
+                    None => {
+                        // Outside GROUPING SETS context — return 0
+                        let num_rows = batch.num_rows();
+                        Ok(Arc::new(Int64Array::from(vec![0i64; num_rows])) as ArrayRef)
+                    }
+                }
             }
 
             _ => Err(BlazeError::not_implemented(format!(

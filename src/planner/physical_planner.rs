@@ -8,7 +8,7 @@ use arrow::datatypes::Schema as ArrowSchema;
 
 use crate::error::{BlazeError, Result};
 use crate::planner::logical_expr::{BinaryOp, LogicalExpr, UnaryOp};
-use crate::planner::logical_plan::LogicalPlan;
+use crate::planner::logical_plan::{LogicalPlan, SetOperation};
 use crate::planner::physical_expr::{
     BetweenExpr, BinaryExpr, BitwiseNotExpr, CaseExpr, CastExpr, ColumnExpr, ExistsExpr,
     InListExpr, InSubqueryExpr, IsNotNullExpr, IsNullExpr, LikeExpr, LiteralExpr, NotExpr,
@@ -86,6 +86,11 @@ impl PhysicalPlanner {
 
                 Ok(PhysicalPlan::Scan {
                     table_name: table_ref.table.clone(),
+                    schema_name: if table_ref.schema == "main" {
+                        None
+                    } else {
+                        Some(table_ref.schema.clone())
+                    },
                     projection: projection.clone(),
                     schema: output_schema,
                     filters: physical_filters,
@@ -258,20 +263,34 @@ impl PhysicalPlanner {
             }
 
             LogicalPlan::SetOperation {
-                op: _,
+                op,
                 left,
                 right,
                 schema,
-                ..
+                all,
             } => {
                 let left_plan = self.create_physical_plan(left)?;
                 let right_plan = self.create_physical_plan(right)?;
                 let output_schema = Arc::new(schema.to_arrow());
 
-                Ok(PhysicalPlan::Union {
-                    inputs: vec![left_plan, right_plan],
-                    schema: output_schema,
-                })
+                match op {
+                    SetOperation::Union => Ok(PhysicalPlan::Union {
+                        inputs: vec![left_plan, right_plan],
+                        schema: output_schema,
+                    }),
+                    SetOperation::Intersect => Ok(PhysicalPlan::Intersect {
+                        left: Box::new(left_plan),
+                        right: Box::new(right_plan),
+                        schema: output_schema,
+                        all: *all,
+                    }),
+                    SetOperation::Except => Ok(PhysicalPlan::Except {
+                        left: Box::new(left_plan),
+                        right: Box::new(right_plan),
+                        schema: output_schema,
+                        all: *all,
+                    }),
+                }
             }
 
             LogicalPlan::SubqueryAlias { input, .. } => {
@@ -947,6 +966,8 @@ impl PhysicalPlanner {
             PhysicalPlan::CrossJoin { schema, .. } => schema.clone(),
             PhysicalPlan::SortMergeJoin { schema, .. } => schema.clone(),
             PhysicalPlan::Union { schema, .. } => schema.clone(),
+            PhysicalPlan::Intersect { schema, .. } => schema.clone(),
+            PhysicalPlan::Except { schema, .. } => schema.clone(),
             PhysicalPlan::Values { schema, .. } => schema.clone(),
             PhysicalPlan::Empty { schema, .. } => schema.clone(),
             PhysicalPlan::Explain { schema, .. } => schema.clone(),
