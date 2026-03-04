@@ -865,8 +865,21 @@ impl LogicalPlanBuilder {
                 AggregateFunc::Count
                 | AggregateFunc::CountDistinct
                 | AggregateFunc::ApproxCountDistinct => DataType::Int64,
-                AggregateFunc::Sum
-                | AggregateFunc::Avg
+                AggregateFunc::Sum => {
+                    // SUM preserves input type for Decimal and integer types
+                    if let Some(arg) = agg.args.first() {
+                        let dt = arg.data_type(input_schema);
+                        match dt {
+                            DataType::Decimal128 { .. }
+                            | DataType::Int64
+                            | DataType::Int32 => dt,
+                            _ => DataType::Float64,
+                        }
+                    } else {
+                        DataType::Float64
+                    }
+                }
+                AggregateFunc::Avg
                 | AggregateFunc::ApproxPercentile
                 | AggregateFunc::ApproxMedian
                 | AggregateFunc::VariancePop
@@ -888,7 +901,8 @@ impl LogicalPlanBuilder {
                     }
                 }
                 AggregateFunc::BoolAnd | AggregateFunc::BoolOr => DataType::Boolean,
-                AggregateFunc::ArrayAgg | AggregateFunc::StringAgg => DataType::Utf8,
+                AggregateFunc::ArrayAgg => DataType::List(Box::new(DataType::Utf8)),
+                AggregateFunc::StringAgg => DataType::Utf8,
             };
             fields.push(Field::new(agg.name(), data_type, true));
         }

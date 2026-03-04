@@ -457,8 +457,21 @@ impl LogicalExpr {
                     AggregateFunc::Count
                     | AggregateFunc::CountDistinct
                     | AggregateFunc::ApproxCountDistinct => DataType::Int64,
-                    AggregateFunc::Sum
-                    | AggregateFunc::Avg
+                    AggregateFunc::Sum => {
+                        // SUM preserves input type for Decimal and integer types
+                        if let Some(arg) = agg.args.first() {
+                            let dt = arg.data_type(schema);
+                            match dt {
+                                DataType::Decimal128 { .. }
+                                | DataType::Int64
+                                | DataType::Int32 => dt,
+                                _ => DataType::Float64,
+                            }
+                        } else {
+                            DataType::Float64
+                        }
+                    }
+                    AggregateFunc::Avg
                     | AggregateFunc::ApproxPercentile
                     | AggregateFunc::ApproxMedian
                     | AggregateFunc::VariancePop
@@ -480,7 +493,7 @@ impl LogicalExpr {
                         }
                     }
                     AggregateFunc::BoolAnd | AggregateFunc::BoolOr => DataType::Boolean,
-                    AggregateFunc::ArrayAgg => DataType::Utf8, // Simplified - should be List
+                    AggregateFunc::ArrayAgg => DataType::List(Box::new(DataType::Utf8)),
                     AggregateFunc::StringAgg => DataType::Utf8,
                 }
             }
@@ -520,6 +533,8 @@ impl LogicalExpr {
                     "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" | "DEGREES"
                     | "RADIANS" | "PI" | "LOG2" | "LOG10" | "CBRT" | "RANDOM"
                     | "JSON_EXTRACT_FLOAT" => DataType::Float64,
+                    // GROUPING function returns integer bitmask
+                    "GROUPING" => DataType::Int64,
                     // Date/Time functions
                     "CURRENT_DATE" | "TO_DATE" => DataType::Date32,
                     "CURRENT_TIMESTAMP" | "NOW" | "DATE_TRUNC" | "TO_TIMESTAMP" | "DATE_ADD"
@@ -1256,7 +1271,8 @@ mod tests {
     fn test_data_type_aggregate_sum() {
         let agg = AggregateExpr::sum(LogicalExpr::column("age"));
         let expr = LogicalExpr::Aggregate(agg);
-        assert_eq!(expr.data_type(&test_schema()), DataType::Float64);
+        // SUM(Int64) preserves Int64 type
+        assert_eq!(expr.data_type(&test_schema()), DataType::Int64);
     }
 
     #[test]
