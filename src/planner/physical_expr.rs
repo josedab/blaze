@@ -14,6 +14,29 @@ use arrow::datatypes::DataType as ArrowDataType;
 use crate::error::{BlazeError, Result};
 use crate::types::ScalarValue;
 
+/// Generate a pseudo-random f64 in [0.0, 1.0) using thread-local state.
+fn rand_f64() -> f64 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = const { Cell::new(0) };
+    }
+    STATE.with(|s| {
+        let mut state = s.get();
+        if state == 0 {
+            state = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+        }
+        // xorshift64
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        s.set(state);
+        (state as f64) / (u64::MAX as f64)
+    })
+}
+
 /// A physical expression that can be evaluated against a RecordBatch.
 pub trait PhysicalExpr: Debug + Send + Sync {
     /// Return self as Any for downcasting.
@@ -151,6 +174,9 @@ impl PhysicalExpr for BinaryExpr {
         let left = self.left.evaluate(batch)?;
         let right = self.right.evaluate(batch)?;
 
+        // Auto-coerce numeric types for comparisons and arithmetic
+        let (left, right) = Self::coerce_numeric_types(left, right)?;
+
         match self.op.as_str() {
             "eq" => {
                 let result = cmp::eq(&left, &right)?;
@@ -214,6 +240,38 @@ impl PhysicalExpr for BinaryExpr {
 }
 
 impl BinaryExpr {
+    /// Coerce numeric types when left and right have different numeric types.
+    /// Promotes Int types to Float64 when the other side is Float64.
+    fn coerce_numeric_types(left: ArrayRef, right: ArrayRef) -> Result<(ArrayRef, ArrayRef)> {
+        use arrow::compute::cast;
+
+        match (left.data_type(), right.data_type()) {
+            (ArrowDataType::Int64, ArrowDataType::Float64)
+            | (ArrowDataType::Int32, ArrowDataType::Float64)
+            | (ArrowDataType::Int16, ArrowDataType::Float64)
+            | (ArrowDataType::Int8, ArrowDataType::Float64) => {
+                let casted = cast(&left, &ArrowDataType::Float64)?;
+                Ok((casted, right))
+            }
+            (ArrowDataType::Float64, ArrowDataType::Int64)
+            | (ArrowDataType::Float64, ArrowDataType::Int32)
+            | (ArrowDataType::Float64, ArrowDataType::Int16)
+            | (ArrowDataType::Float64, ArrowDataType::Int8) => {
+                let casted = cast(&right, &ArrowDataType::Float64)?;
+                Ok((left, casted))
+            }
+            (ArrowDataType::Int32, ArrowDataType::Int64) => {
+                let casted = cast(&left, &ArrowDataType::Int64)?;
+                Ok((casted, right))
+            }
+            (ArrowDataType::Int64, ArrowDataType::Int32) => {
+                let casted = cast(&right, &ArrowDataType::Int64)?;
+                Ok((left, casted))
+            }
+            _ => Ok((left, right)),
+        }
+    }
+
     fn evaluate_arithmetic(&self, left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef> {
         use arrow::compute::kernels::numeric;
 
@@ -901,13 +959,16 @@ impl PhysicalExpr for ScalarFunctionExpr {
             "REGEXP_MATCH" | "STARTS_WITH" | "ENDS_WITH" => ArrowDataType::Boolean,
             // Math functions
             "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" | "POWER" | "POW" | "SQRT" | "EXP"
-            | "LN" | "LOG" | "SIGN" | "MOD" | "MODULO" => {
+            | "LN" | "LOG" | "SIGN" | "MOD" | "MODULO" | "TRUNC" | "TRUNCATE" => {
                 if !self.args.is_empty() {
                     self.args[0].data_type()
                 } else {
                     ArrowDataType::Float64
                 }
             }
+            // Trigonometric and transcendental functions (always return Float64)
+            "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" | "DEGREES"
+            | "RADIANS" | "PI" | "LOG2" | "LOG10" | "CBRT" | "RANDOM" => ArrowDataType::Float64,
             "COALESCE" | "NULLIF" | "IFNULL" | "NVL" | "GREATEST" | "LEAST" => {
                 if !self.args.is_empty() {
                     self.args[0].data_type()
@@ -3065,8 +3126,134 @@ impl PhysicalExpr for ScalarFunctionExpr {
                 }
             }
 
+            "SIN" => {
+                self.evaluate_unary_float_fn(batch, "SIN", f64::sin)
+            }
+
+            "COS" => {
+                self.evaluate_unary_float_fn(batch, "COS", f64::cos)
+            }
+
+            "TAN" => {
+                self.evaluate_unary_float_fn(batch, "TAN", f64::tan)
+            }
+
+            "ASIN" => {
+                self.evaluate_unary_float_fn(batch, "ASIN", f64::asin)
+            }
+
+            "ACOS" => {
+                self.evaluate_unary_float_fn(batch, "ACOS", f64::acos)
+            }
+
+            "ATAN" => {
+                self.evaluate_unary_float_fn(batch, "ATAN", f64::atan)
+            }
+
+            "ATAN2" => {
+                if self.args.len() < 2 {
+                    return Err(BlazeError::analysis("ATAN2 requires 2 arguments"));
+                }
+                let y_arr = self.args[0].evaluate(batch)?;
+                let x_arr = self.args[1].evaluate(batch)?;
+                let y_vals = self.array_to_f64(&y_arr)?;
+                let x_vals = self.array_to_f64(&x_arr)?;
+                let result: Float64Array = y_vals
+                    .iter()
+                    .zip(x_vals.iter())
+                    .map(|(y, x)| match (y, x) {
+                        (Some(y), Some(x)) => Some(y.atan2(x)),
+                        _ => None,
+                    })
+                    .collect();
+                Ok(Arc::new(result) as ArrayRef)
+            }
+
+            "DEGREES" => {
+                self.evaluate_unary_float_fn(batch, "DEGREES", f64::to_degrees)
+            }
+
+            "RADIANS" => {
+                self.evaluate_unary_float_fn(batch, "RADIANS", f64::to_radians)
+            }
+
+            "PI" => {
+                let num_rows = batch.num_rows();
+                let result = Float64Array::from(vec![std::f64::consts::PI; num_rows]);
+                Ok(Arc::new(result) as ArrayRef)
+            }
+
+            "LOG2" => {
+                self.evaluate_unary_float_fn(batch, "LOG2", f64::log2)
+            }
+
+            "LOG10" => {
+                self.evaluate_unary_float_fn(batch, "LOG10", f64::log10)
+            }
+
+            "CBRT" => {
+                self.evaluate_unary_float_fn(batch, "CBRT", f64::cbrt)
+            }
+
+            "TRUNC" | "TRUNCATE" => {
+                if self.args.is_empty() {
+                    return Err(BlazeError::analysis("TRUNC requires at least 1 argument"));
+                }
+                let arg = self.args[0].evaluate(batch)?;
+                let scale = if self.args.len() > 1 {
+                    let scale_arr = self.args[1].evaluate(batch)?;
+                    let scale_arr = scale_arr
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .ok_or_else(|| BlazeError::type_error("TRUNC scale must be integer"))?;
+                    if scale_arr.is_null(0) {
+                        0
+                    } else {
+                        scale_arr.value(0)
+                    }
+                } else {
+                    0
+                };
+
+                match arg.data_type() {
+                    ArrowDataType::Float64 => {
+                        let arr = arg.as_any().downcast_ref::<Float64Array>()
+                            .ok_or_else(|| BlazeError::type_error("Expected Float64Array for TRUNC"))?;
+                        let factor = 10_f64.powi(scale as i32);
+                        let result: Float64Array = arr
+                            .iter()
+                            .map(|opt| opt.map(|v| (v * factor).trunc() / factor))
+                            .collect();
+                        Ok(Arc::new(result) as ArrayRef)
+                    }
+                    ArrowDataType::Int64 => {
+                        if scale >= 0 {
+                            Ok(arg)
+                        } else {
+                            let arr = arg.as_any().downcast_ref::<Int64Array>()
+                                .ok_or_else(|| BlazeError::type_error("Expected Int64Array for TRUNC"))?;
+                            let factor = 10_i64.pow((-scale) as u32);
+                            let result: Int64Array = arr
+                                .iter()
+                                .map(|opt| opt.map(|v| (v / factor) * factor))
+                                .collect();
+                            Ok(Arc::new(result) as ArrayRef)
+                        }
+                    }
+                    _ => Err(BlazeError::type_error("TRUNC requires numeric argument")),
+                }
+            }
+
+            "RANDOM" => {
+                let num_rows = batch.num_rows();
+                let result: Float64Array = (0..num_rows)
+                    .map(|_| Some(rand_f64()))
+                    .collect();
+                Ok(Arc::new(result) as ArrayRef)
+            }
+
             _ => Err(BlazeError::not_implemented(format!(
-                "Scalar function '{}' is not supported. Supported functions: UPPER, LOWER, LENGTH, TRIM, LTRIM, RTRIM, SUBSTR, CONCAT, COALESCE, NULLIF, ABS, CEIL, FLOOR, ROUND, POWER, SQRT, MOD, and more.",
+                "Scalar function '{}' is not supported. Supported functions: UPPER, LOWER, LENGTH, TRIM, LTRIM, RTRIM, SUBSTR, CONCAT, COALESCE, NULLIF, ABS, CEIL, FLOOR, ROUND, POWER, SQRT, MOD, SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, DEGREES, RADIANS, PI, LOG2, LOG10, TRUNC, CBRT, RANDOM, and more.",
                 self.name
             ))),
         }
@@ -3078,6 +3265,59 @@ impl PhysicalExpr for ScalarFunctionExpr {
 }
 
 impl ScalarFunctionExpr {
+    /// Helper to evaluate a unary float function (e.g., SIN, COS, SQRT).
+    fn evaluate_unary_float_fn(
+        &self,
+        batch: &RecordBatch,
+        name: &str,
+        f: fn(f64) -> f64,
+    ) -> Result<ArrayRef> {
+        if self.args.is_empty() {
+            return Err(BlazeError::analysis(format!("{} requires 1 argument", name)));
+        }
+        let arg = self.args[0].evaluate(batch)?;
+        let f64_arr = self.array_to_f64(&arg)?;
+        let result: Float64Array = f64_arr.iter().map(|opt| opt.map(f)).collect();
+        Ok(Arc::new(result) as ArrayRef)
+    }
+
+    /// Convert any numeric array to Float64Array for math operations.
+    fn array_to_f64(&self, arr: &ArrayRef) -> Result<Float64Array> {
+        match arr.data_type() {
+            ArrowDataType::Float64 => {
+                let a = arr
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Float64Array"))?;
+                Ok(a.clone())
+            }
+            ArrowDataType::Float32 => {
+                let a = arr
+                    .as_any()
+                    .downcast_ref::<arrow::array::Float32Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Float32Array"))?;
+                Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+            }
+            ArrowDataType::Int64 => {
+                let a = arr
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int64Array"))?;
+                Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+            }
+            ArrowDataType::Int32 => {
+                let a = arr
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int32Array>()
+                    .ok_or_else(|| BlazeError::type_error("Expected Int32Array"))?;
+                Ok(a.iter().map(|v| v.map(|x| x as f64)).collect())
+            }
+            _ => Err(BlazeError::type_error(
+                "Expected numeric argument for math function",
+            )),
+        }
+    }
+
     /// Helper function to extract date parts from date/timestamp arrays
     fn extract_date_part(&self, arr: &ArrayRef, part: &str, _num_rows: usize) -> Result<ArrayRef> {
         use chrono::{Datelike, Timelike};

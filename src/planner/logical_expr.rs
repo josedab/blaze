@@ -460,17 +460,26 @@ impl LogicalExpr {
                     AggregateFunc::Sum
                     | AggregateFunc::Avg
                     | AggregateFunc::ApproxPercentile
-                    | AggregateFunc::ApproxMedian => DataType::Float64,
+                    | AggregateFunc::ApproxMedian
+                    | AggregateFunc::VariancePop
+                    | AggregateFunc::VarianceSamp
+                    | AggregateFunc::StddevPop
+                    | AggregateFunc::StddevSamp
+                    | AggregateFunc::PercentileCont
+                    | AggregateFunc::PercentileDisc
+                    | AggregateFunc::Median => DataType::Float64,
                     AggregateFunc::Min
                     | AggregateFunc::Max
                     | AggregateFunc::First
-                    | AggregateFunc::Last => {
+                    | AggregateFunc::Last
+                    | AggregateFunc::AnyValue => {
                         if let Some(arg) = agg.args.first() {
                             arg.data_type(schema)
                         } else {
                             DataType::Null
                         }
                     }
+                    AggregateFunc::BoolAnd | AggregateFunc::BoolOr => DataType::Boolean,
                     AggregateFunc::ArrayAgg => DataType::Utf8, // Simplified - should be List
                     AggregateFunc::StringAgg => DataType::Utf8,
                 }
@@ -479,33 +488,89 @@ impl LogicalExpr {
                 // Return types for common scalar functions
                 match name.to_uppercase().as_str() {
                     "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "CONCAT" | "SUBSTRING"
-                    | "REPLACE" => DataType::Utf8,
-                    "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => DataType::Int64,
-                    "ABS" | "CEIL" | "FLOOR" | "ROUND" => {
+                    | "REPLACE" | "LEFT" | "RIGHT" | "LPAD" | "RPAD" | "REVERSE" | "SPLIT_PART"
+                    | "REGEXP_REPLACE" | "INITCAP" | "REPEAT" | "TRANSLATE" | "REGEXP_EXTRACT"
+                    | "CHR" | "MD5" | "SHA256" | "SHA2" | "SUBSTR" | "JSON_EXTRACT"
+                    | "JSON_VALUE" | "JSON_OBJECT" | "JSON_ARRAY" | "JSON_TYPE" | "JSON_KEYS" => {
+                        DataType::Utf8
+                    }
+                    "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "ASCII" | "POSITION"
+                    | "STRPOS" | "EXTRACT" | "DATE_PART" | "YEAR" | "MONTH" | "DAY" | "HOUR"
+                    | "MINUTE" | "SECOND" | "DATE_DIFF" | "DATEDIFF" | "JSON_EXTRACT_INT"
+                    | "JSON_LENGTH" => DataType::Int64,
+                    "REGEXP_MATCH" | "STARTS_WITH" | "ENDS_WITH" | "JSON_EXTRACT_BOOL"
+                    | "JSON_VALID" | "JSON_CONTAINS_KEY" => DataType::Boolean,
+                    "ABS" | "CEIL" | "CEILING" | "FLOOR" | "ROUND" | "POWER" | "POW" | "SQRT"
+                    | "EXP" | "LN" | "LOG" | "SIGN" | "MOD" | "MODULO" | "TRUNC"
+                    | "TRUNCATE" => {
                         if let Some(arg) = args.first() {
                             arg.data_type(schema)
                         } else {
                             DataType::Float64
                         }
                     }
-                    "COALESCE" | "NULLIF" | "NVL" => {
+                    "COALESCE" | "NULLIF" | "NVL" | "IFNULL" | "GREATEST" | "LEAST" => {
                         if let Some(arg) = args.first() {
                             arg.data_type(schema)
                         } else {
                             DataType::Null
                         }
                     }
-                    _ => DataType::Utf8, // Default fallback
+                    // Trig, transcendental, and constant functions always return Float64
+                    "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN" | "ATAN2" | "DEGREES"
+                    | "RADIANS" | "PI" | "LOG2" | "LOG10" | "CBRT" | "RANDOM"
+                    | "JSON_EXTRACT_FLOAT" => DataType::Float64,
+                    // Date/Time functions
+                    "CURRENT_DATE" | "TO_DATE" => DataType::Date32,
+                    "CURRENT_TIMESTAMP" | "NOW" | "DATE_TRUNC" | "TO_TIMESTAMP" | "DATE_ADD"
+                    | "DATEADD" | "DATE_SUB" | "DATESUB" => {
+                        if let Some(arg) = args.first() {
+                            arg.data_type(schema)
+                        } else {
+                            DataType::Timestamp {
+                                unit: crate::types::TimeUnit::Microsecond,
+                                timezone: None,
+                            }
+                        }
+                    }
+                    _ => DataType::Utf8, // Default fallback for unknown functions
                 }
             }
             Self::Window(w) => {
-                // Window function type depends on inner function expression
-                // The function field is a LogicalExpr (often a ScalarFunction name or aggregate)
-                w.function.data_type(schema)
+                // Check if the inner function is a known window function
+                if let LogicalExpr::ScalarFunction { name, args, .. } = &w.function {
+                    match name.to_uppercase().as_str() {
+                        "ROW_NUMBER" | "RANK" | "DENSE_RANK" | "NTILE" | "COUNT" => {
+                            return DataType::Int64;
+                        }
+                        "PERCENT_RANK" | "CUME_DIST" => return DataType::Float64,
+                        "LAG" | "LEAD" | "FIRST_VALUE" | "LAST_VALUE" | "NTH_VALUE" => {
+                            // Returns the same type as the first argument
+                            if let Some(arg) = args.first() {
+                                return arg.data_type(schema);
+                            }
+                            return DataType::Int64;
+                        }
+                        _ => {}
+                    }
+                }
+                // For aggregate-based window functions, always Float64
+                // (the window operator produces Float64 for all aggregates)
+                match &w.function {
+                    LogicalExpr::Aggregate(_) => DataType::Float64,
+                    other => other.data_type(schema),
+                }
             }
-            Self::ScalarSubquery(_) | Self::Exists { .. } | Self::InSubquery { .. } => {
-                DataType::Boolean
+            Self::ScalarSubquery(plan) => {
+                // Scalar subquery returns the type of its first output column
+                let sub_schema = plan.schema();
+                if let Some(first_field) = sub_schema.fields().first() {
+                    first_field.data_type().clone()
+                } else {
+                    DataType::Null
+                }
             }
+            Self::Exists { .. } | Self::InSubquery { .. } => DataType::Boolean,
             Self::Wildcard | Self::QualifiedWildcard { .. } | Self::Placeholder { .. } => {
                 DataType::Utf8 // Placeholder
             }
@@ -634,6 +699,26 @@ pub enum AggregateFunc {
     ApproxPercentile,
     /// Approximate median using T-Digest
     ApproxMedian,
+    /// Population variance
+    VariancePop,
+    /// Sample variance (VARIANCE / VAR_SAMP)
+    VarianceSamp,
+    /// Population standard deviation
+    StddevPop,
+    /// Sample standard deviation (STDDEV / STDDEV_SAMP)
+    StddevSamp,
+    /// Boolean AND aggregate (BOOL_AND / EVERY)
+    BoolAnd,
+    /// Boolean OR aggregate
+    BoolOr,
+    /// Returns any non-null value from the group
+    AnyValue,
+    /// Exact continuous percentile (linear interpolation)
+    PercentileCont,
+    /// Exact discrete percentile (nearest value)
+    PercentileDisc,
+    /// Exact median (50th percentile, continuous)
+    Median,
 }
 
 impl fmt::Display for AggregateFunc {
@@ -652,6 +737,16 @@ impl fmt::Display for AggregateFunc {
             Self::ApproxCountDistinct => write!(f, "APPROX_COUNT_DISTINCT"),
             Self::ApproxPercentile => write!(f, "APPROX_PERCENTILE"),
             Self::ApproxMedian => write!(f, "APPROX_MEDIAN"),
+            Self::VariancePop => write!(f, "VAR_POP"),
+            Self::VarianceSamp => write!(f, "VARIANCE"),
+            Self::StddevPop => write!(f, "STDDEV_POP"),
+            Self::StddevSamp => write!(f, "STDDEV"),
+            Self::BoolAnd => write!(f, "BOOL_AND"),
+            Self::BoolOr => write!(f, "BOOL_OR"),
+            Self::AnyValue => write!(f, "ANY_VALUE"),
+            Self::PercentileCont => write!(f, "PERCENTILE_CONT"),
+            Self::PercentileDisc => write!(f, "PERCENTILE_DISC"),
+            Self::Median => write!(f, "MEDIAN"),
         }
     }
 }
@@ -846,6 +941,8 @@ pub struct WindowExpr {
     pub order_by: Vec<SortExpr>,
     /// Window frame
     pub frame: Option<WindowFrame>,
+    /// Optional FILTER clause for aggregate window functions
+    pub filter: Option<Box<LogicalExpr>>,
 }
 
 impl WindowExpr {
@@ -860,6 +957,7 @@ impl WindowExpr {
             partition_by,
             order_by,
             frame: None,
+            filter: None,
         }
     }
 }

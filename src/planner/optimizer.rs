@@ -41,6 +41,7 @@ impl Optimizer {
     pub fn new() -> Self {
         Self {
             rules: vec![
+                Box::new(DecorrelateSubqueries),
                 Box::new(SimplifyExpressions),
                 Box::new(ConstantFolding),
                 Box::new(PredicatePushdown),
@@ -1458,6 +1459,204 @@ impl EliminateLimit {
             }
 
             _ => Ok(plan.clone()),
+        }
+    }
+}
+
+/// Decorrelate subqueries by converting EXISTS/IN subqueries into semi/anti joins.
+#[derive(Debug)]
+pub struct DecorrelateSubqueries;
+
+impl OptimizerRule for DecorrelateSubqueries {
+    fn name(&self) -> &str {
+        "DecorrelateSubqueries"
+    }
+
+    fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+        self.rewrite(plan)
+    }
+}
+
+impl DecorrelateSubqueries {
+    fn rewrite(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+        match plan {
+            LogicalPlan::Filter { predicate, input } => {
+                let rewritten_input = self.rewrite(input)?;
+
+                match predicate {
+                    LogicalExpr::Exists {
+                        subquery, negated, ..
+                    } => {
+                        let join_type = if *negated {
+                            super::logical_plan::JoinType::LeftAnti
+                        } else {
+                            super::logical_plan::JoinType::LeftSemi
+                        };
+
+                        let (subquery_plan, join_on) =
+                            self.extract_correlation(subquery, &rewritten_input)?;
+
+                        if let Some((left_col, right_col)) = join_on {
+                            let outer_schema = rewritten_input.schema();
+                            
+                            let join_schema = outer_schema.clone();
+
+                            Ok(LogicalPlan::Join {
+                                left: Arc::new(rewritten_input),
+                                right: Arc::new(subquery_plan),
+                                join_type,
+                                on: vec![(left_col, right_col)],
+                                filter: None,
+                                schema: join_schema,
+                            })
+                        } else {
+                            Ok(LogicalPlan::Filter {
+                                predicate: predicate.clone(),
+                                input: Arc::new(rewritten_input),
+                            })
+                        }
+                    }
+                    LogicalExpr::InSubquery {
+                        expr,
+                        subquery,
+                        negated,
+                    } => {
+                        let join_type = if *negated {
+                            super::logical_plan::JoinType::LeftAnti
+                        } else {
+                            super::logical_plan::JoinType::LeftSemi
+                        };
+
+                        let subquery_schema = subquery.schema();
+                        if let Some(first_field) = subquery_schema.fields().first() {
+                            let subquery_col = LogicalExpr::Column(Column::unqualified(
+                                first_field.name().to_string(),
+                            ));
+
+                            let rewritten_subquery = self.rewrite(subquery)?;
+                            let outer_schema = rewritten_input.schema();
+                            
+                            let join_schema = outer_schema.clone();
+
+                            Ok(LogicalPlan::Join {
+                                left: Arc::new(rewritten_input),
+                                right: Arc::new(rewritten_subquery),
+                                join_type,
+                                on: vec![(*expr.clone(), subquery_col)],
+                                filter: None,
+                                schema: join_schema,
+                            })
+                        } else {
+                            Ok(LogicalPlan::Filter {
+                                predicate: predicate.clone(),
+                                input: Arc::new(rewritten_input),
+                            })
+                        }
+                    }
+                    _ => Ok(LogicalPlan::Filter {
+                        predicate: predicate.clone(),
+                        input: Arc::new(rewritten_input),
+                    }),
+                }
+            }
+
+            // Recurse into other plan nodes
+            LogicalPlan::Projection {
+                exprs,
+                schema,
+                input,
+            } => Ok(LogicalPlan::Projection {
+                exprs: exprs.clone(),
+                schema: schema.clone(),
+                input: Arc::new(self.rewrite(input)?),
+            }),
+            LogicalPlan::Sort { exprs, input } => Ok(LogicalPlan::Sort {
+                exprs: exprs.clone(),
+                input: Arc::new(self.rewrite(input)?),
+            }),
+            LogicalPlan::Limit {
+                skip,
+                fetch,
+                input,
+            } => Ok(LogicalPlan::Limit {
+                skip: *skip,
+                fetch: *fetch,
+                input: Arc::new(self.rewrite(input)?),
+            }),
+            LogicalPlan::Aggregate {
+                group_by,
+                aggr_exprs,
+                input,
+                schema,
+            } => Ok(LogicalPlan::Aggregate {
+                group_by: group_by.clone(),
+                aggr_exprs: aggr_exprs.clone(),
+                input: Arc::new(self.rewrite(input)?),
+                schema: schema.clone(),
+            }),
+            _ => Ok(plan.clone()),
+        }
+    }
+
+    /// Extract correlation predicate from a subquery's WHERE clause.
+    /// Returns the subquery without the correlation filter and the join ON columns.
+    fn extract_correlation(
+        &self,
+        subquery: &LogicalPlan,
+        outer_plan: &LogicalPlan,
+    ) -> Result<(LogicalPlan, Option<(LogicalExpr, LogicalExpr)>)> {
+        match subquery {
+            LogicalPlan::Filter { predicate, input } => {
+                let outer_schema = outer_plan.schema();
+                // Try to extract equality condition t1.col = t2.col
+                if let Some((left, right)) =
+                    self.extract_equality_join_cols(predicate, outer_schema, input.schema())
+                {
+                    Ok(((**input).clone(), Some((left, right))))
+                } else {
+                    Ok((subquery.clone(), None))
+                }
+            }
+            LogicalPlan::Projection { input, .. } => self.extract_correlation(input, outer_plan),
+            LogicalPlan::SubqueryAlias { input, .. } => {
+                self.extract_correlation(input, outer_plan)
+            }
+            _ => Ok((subquery.clone(), None)),
+        }
+    }
+
+    /// Try to extract an equality condition between outer and inner columns.
+    fn extract_equality_join_cols(
+        &self,
+        expr: &LogicalExpr,
+        outer_schema: &Schema,
+        inner_schema: &Schema,
+    ) -> Option<(LogicalExpr, LogicalExpr)> {
+        if let LogicalExpr::BinaryExpr {
+            left,
+            op: BinaryOp::Eq,
+            right,
+        } = expr
+        {
+            let left_is_outer = self.expr_references_schema(left, outer_schema);
+            let right_is_outer = self.expr_references_schema(right, outer_schema);
+            let left_is_inner = self.expr_references_schema(left, inner_schema);
+            let right_is_inner = self.expr_references_schema(right, inner_schema);
+
+            if left_is_outer && right_is_inner {
+                return Some((*left.clone(), *right.clone()));
+            }
+            if right_is_outer && left_is_inner {
+                return Some((*right.clone(), *left.clone()));
+            }
+        }
+        None
+    }
+
+    fn expr_references_schema(&self, expr: &LogicalExpr, schema: &Schema) -> bool {
+        match expr {
+            LogicalExpr::Column(col) => schema.fields().iter().any(|f| *f.name() == col.name),
+            _ => false,
         }
     }
 }

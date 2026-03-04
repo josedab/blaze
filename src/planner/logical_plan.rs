@@ -868,17 +868,26 @@ impl LogicalPlanBuilder {
                 AggregateFunc::Sum
                 | AggregateFunc::Avg
                 | AggregateFunc::ApproxPercentile
-                | AggregateFunc::ApproxMedian => DataType::Float64,
+                | AggregateFunc::ApproxMedian
+                | AggregateFunc::VariancePop
+                | AggregateFunc::VarianceSamp
+                | AggregateFunc::StddevPop
+                | AggregateFunc::StddevSamp
+                | AggregateFunc::PercentileCont
+                | AggregateFunc::PercentileDisc
+                | AggregateFunc::Median => DataType::Float64,
                 AggregateFunc::Min
                 | AggregateFunc::Max
                 | AggregateFunc::First
-                | AggregateFunc::Last => {
+                | AggregateFunc::Last
+                | AggregateFunc::AnyValue => {
                     if let Some(arg) = agg.args.first() {
                         arg.data_type(input_schema)
                     } else {
                         DataType::Float64
                     }
                 }
+                AggregateFunc::BoolAnd | AggregateFunc::BoolOr => DataType::Boolean,
                 AggregateFunc::ArrayAgg | AggregateFunc::StringAgg => DataType::Utf8,
             };
             fields.push(Field::new(agg.name(), data_type, true));

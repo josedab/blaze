@@ -223,7 +223,13 @@ impl PhysicalPlanner {
                     .map(|(_, r)| self.create_physical_expr(r, &right_schema))
                     .collect::<Result<Vec<_>>>()?;
 
-                let output_schema = Arc::new(schema.to_arrow());
+                // For semi/anti joins, output schema is left-only
+                let output_schema = match join_type {
+                    crate::planner::JoinType::LeftSemi | crate::planner::JoinType::LeftAnti => {
+                        left_schema.clone()
+                    }
+                    _ => Arc::new(schema.to_arrow()),
+                };
 
                 Ok(PhysicalPlan::HashJoin {
                     left: Box::new(left_plan),
@@ -980,13 +986,24 @@ impl PhysicalPlanner {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                Ok(PhysicalWindowExpr::new(
+                let mut phys_window = PhysicalWindowExpr::new(
                     func,
                     args,
                     partition_by,
                     order_by,
                     None, // alias will be handled at projection level
-                ))
+                );
+
+                // Thread FILTER clause if present
+                if let Some(filter_expr) = &window_expr.filter {
+                    phys_window.filter =
+                        Some(self.create_physical_expr(filter_expr, schema)?);
+                }
+
+                // Thread frame specification if present
+                phys_window.frame = window_expr.frame.clone();
+
+                Ok(phys_window)
             }
             _ => Err(BlazeError::analysis("Expected window expression")),
         }

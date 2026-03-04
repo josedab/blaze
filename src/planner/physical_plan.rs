@@ -554,6 +554,10 @@ pub struct WindowExpr {
     pub order_by: Vec<SortExpr>,
     /// Alias for the result
     pub alias: Option<String>,
+    /// Optional FILTER clause
+    pub filter: Option<Arc<dyn PhysicalExpr>>,
+    /// Optional window frame specification
+    pub frame: Option<crate::planner::WindowFrame>,
 }
 
 impl WindowExpr {
@@ -571,6 +575,8 @@ impl WindowExpr {
             partition_by,
             order_by,
             alias,
+            filter: None,
+            frame: None,
         }
     }
 

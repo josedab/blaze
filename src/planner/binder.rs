@@ -505,10 +505,10 @@ impl Binder {
                 let mut output_fields = input_schema.fields().to_vec();
 
                 // Add a field for each window function
-                for (i, _window_expr) in window_exprs.iter().enumerate() {
+                for (i, window_expr) in window_exprs.iter().enumerate() {
                     let field_name = format!("window_{}", i);
-                    // Window functions typically return Int64 (for ROW_NUMBER, RANK, etc.)
-                    output_fields.push(Field::new(&field_name, DataType::Int64, true));
+                    let data_type = window_expr.data_type(&input_schema);
+                    output_fields.push(Field::new(&field_name, data_type, true));
                 }
 
                 let output_schema = Schema::new(output_fields);
@@ -787,11 +787,14 @@ impl Binder {
     fn bind_table_function(
         &self,
         name: &str,
-        _args: &[sql::parser::Expr],
+        args: &[sql::parser::Expr],
         alias: Option<&sql::parser::TableAlias>,
         ctx: &mut BindContext,
     ) -> Result<LogicalPlan> {
         match name.to_lowercase().as_str() {
+            "generate_series" => {
+                self.bind_generate_series(args, alias, ctx)
+            }
             "read_parquet" | "read_csv" | "read_json" => {
                 // For now, create a placeholder table scan
                 let table_ref = ResolvedTableRef::new("default", "main", name);
@@ -809,6 +812,302 @@ impl Binder {
                 "Table function: {}",
                 name
             ))),
+        }
+    }
+
+    fn bind_generate_series(
+        &self,
+        args: &[sql::parser::Expr],
+        alias: Option<&sql::parser::TableAlias>,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(BlazeError::analysis(
+                "GENERATE_SERIES requires 2 or 3 arguments: (start, stop[, step])",
+            ));
+        }
+
+        // Try date-based generate_series first
+        if let Ok(plan) = self.bind_generate_series_date(args, alias, ctx) {
+            return Ok(plan);
+        }
+
+        // Fall back to integer generate_series
+        self.bind_generate_series_int(args, alias, ctx)
+    }
+
+    fn bind_generate_series_int(
+        &self,
+        args: &[sql::parser::Expr],
+        alias: Option<&sql::parser::TableAlias>,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
+
+        let start = self.eval_const_i64(&args[0], ctx)?;
+        let stop = self.eval_const_i64(&args[1], ctx)?;
+        let step = if args.len() == 3 {
+            self.eval_const_i64(&args[2], ctx)?
+        } else if start <= stop {
+            1
+        } else {
+            -1
+        };
+
+        if step == 0 {
+            return Err(BlazeError::analysis(
+                "GENERATE_SERIES: step must not be zero",
+            ));
+        }
+
+        let max_rows: i64 = 10_000_000;
+        let mut values = Vec::new();
+        let mut current = start;
+
+        if step > 0 {
+            while current <= stop {
+                if values.len() as i64 >= max_rows {
+                    return Err(BlazeError::execution(
+                        "GENERATE_SERIES: result exceeds 10 million rows",
+                    ));
+                }
+                values.push(vec![LogicalExpr::Literal(ScalarValue::Int64(Some(
+                    current,
+                )))]);
+                current += step;
+            }
+        } else {
+            while current >= stop {
+                if values.len() as i64 >= max_rows {
+                    return Err(BlazeError::execution(
+                        "GENERATE_SERIES: result exceeds 10 million rows",
+                    ));
+                }
+                values.push(vec![LogicalExpr::Literal(ScalarValue::Int64(Some(
+                    current,
+                )))]);
+                current += step;
+            }
+        }
+
+        let table_alias = alias
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "generate_series".to_string());
+
+        let schema = Schema::new(vec![crate::types::Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]);
+
+        ctx.with_alias(table_alias.clone(), schema.clone());
+
+        let plan = LogicalPlan::Values {
+            schema: schema.clone(),
+            values,
+        };
+
+        if alias.is_some() {
+            Ok(LogicalPlanBuilder::from(plan)
+                .alias(&table_alias)
+                .build())
+        } else {
+            Ok(LogicalPlanBuilder::from(plan)
+                .alias("generate_series")
+                .build())
+        }
+    }
+
+    /// Evaluate a constant integer expression for use in GENERATE_SERIES.
+    fn eval_const_i64(
+        &self,
+        expr: &sql::parser::Expr,
+        ctx: &mut BindContext,
+    ) -> Result<i64> {
+        let bound = self.bind_expr(expr.clone(), ctx)?;
+        match &bound {
+            LogicalExpr::Literal(ScalarValue::Int64(Some(v))) => Ok(*v),
+            LogicalExpr::Literal(ScalarValue::Int32(Some(v))) => Ok(*v as i64),
+            LogicalExpr::Literal(ScalarValue::Int16(Some(v))) => Ok(*v as i64),
+            LogicalExpr::Literal(ScalarValue::Int8(Some(v))) => Ok(*v as i64),
+            LogicalExpr::Literal(ScalarValue::Float64(Some(v))) => Ok(*v as i64),
+            LogicalExpr::Negative(inner) => {
+                if let LogicalExpr::Literal(ScalarValue::Int64(Some(v))) = inner.as_ref() {
+                    Ok(-v)
+                } else {
+                    Err(BlazeError::analysis(
+                        "GENERATE_SERIES: arguments must be constant integers",
+                    ))
+                }
+            }
+            _ => Err(BlazeError::analysis(
+                "GENERATE_SERIES: arguments must be constant integers",
+            )),
+        }
+    }
+
+    fn bind_generate_series_date(
+        &self,
+        args: &[sql::parser::Expr],
+        alias: Option<&sql::parser::TableAlias>,
+        ctx: &mut BindContext,
+    ) -> Result<LogicalPlan> {
+        use chrono::NaiveDate;
+
+        // Try to parse args as dates
+        let start_str = self.eval_const_string(&args[0], ctx)?;
+        let stop_str = self.eval_const_string(&args[1], ctx)?;
+
+        let start_date = NaiveDate::parse_from_str(&start_str, "%Y-%m-%d")
+            .map_err(|_| BlazeError::analysis("Not a date argument"))?;
+        let stop_date = NaiveDate::parse_from_str(&stop_str, "%Y-%m-%d")
+            .map_err(|_| BlazeError::analysis("Not a date argument"))?;
+
+        // Parse interval step (default: 1 day)
+        let step_days = if args.len() == 3 {
+            self.parse_interval_days(&args[2], ctx)?
+        } else if start_date <= stop_date {
+            1
+        } else {
+            -1
+        };
+
+        if step_days == 0 {
+            return Err(BlazeError::analysis(
+                "GENERATE_SERIES: interval step must not be zero",
+            ));
+        }
+
+        let max_rows = 10_000_000i64;
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)
+            .ok_or_else(|| BlazeError::internal("Invalid epoch"))?;
+
+        let mut values = Vec::new();
+        let mut current = start_date;
+
+        if step_days > 0 {
+            while current <= stop_date {
+                if values.len() as i64 >= max_rows {
+                    return Err(BlazeError::execution(
+                        "GENERATE_SERIES: result exceeds 10 million rows",
+                    ));
+                }
+                let days_since_epoch = (current - epoch).num_days() as i32;
+                values.push(vec![LogicalExpr::Literal(ScalarValue::Date32(Some(
+                    days_since_epoch,
+                )))]);
+                current += chrono::Duration::days(step_days as i64);
+            }
+        } else {
+            while current >= stop_date {
+                if values.len() as i64 >= max_rows {
+                    return Err(BlazeError::execution(
+                        "GENERATE_SERIES: result exceeds 10 million rows",
+                    ));
+                }
+                let days_since_epoch = (current - epoch).num_days() as i32;
+                values.push(vec![LogicalExpr::Literal(ScalarValue::Date32(Some(
+                    days_since_epoch,
+                )))]);
+                current += chrono::Duration::days(step_days as i64);
+            }
+        }
+
+        let table_alias = alias
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "generate_series".to_string());
+
+        let schema = Schema::new(vec![crate::types::Field::new(
+            "value",
+            DataType::Date32,
+            false,
+        )]);
+
+        ctx.with_alias(table_alias.clone(), schema.clone());
+
+        let plan = LogicalPlan::Values {
+            schema: schema.clone(),
+            values,
+        };
+
+        Ok(LogicalPlanBuilder::from(plan)
+            .alias(&table_alias)
+            .build())
+    }
+
+    /// Try to extract a string constant from an expression.
+    fn eval_const_string(
+        &self,
+        expr: &sql::parser::Expr,
+        ctx: &mut BindContext,
+    ) -> Result<String> {
+        let bound = self.bind_expr(expr.clone(), ctx)?;
+        match &bound {
+            LogicalExpr::Literal(ScalarValue::Utf8(Some(s))) => Ok(s.clone()),
+            LogicalExpr::Cast { expr, .. } => {
+                if let LogicalExpr::Literal(ScalarValue::Utf8(Some(s))) = expr.as_ref() {
+                    Ok(s.clone())
+                } else {
+                    Err(BlazeError::analysis("Expected string literal"))
+                }
+            }
+            _ => Err(BlazeError::analysis("Expected string literal")),
+        }
+    }
+
+    /// Parse an interval specification to number of days.
+    fn parse_interval_days(
+        &self,
+        expr: &sql::parser::Expr,
+        ctx: &mut BindContext,
+    ) -> Result<i32> {
+        let bound = self.bind_expr(expr.clone(), ctx)?;
+        match &bound {
+            LogicalExpr::Literal(ScalarValue::Utf8(Some(s))) => {
+                Self::parse_interval_string(s)
+            }
+            LogicalExpr::Literal(ScalarValue::Int64(Some(v))) => Ok(*v as i32),
+            _ => Err(BlazeError::analysis(
+                "GENERATE_SERIES: step must be an integer or interval string like '1 day', '7 days', '1 month'",
+            )),
+        }
+    }
+
+    fn parse_interval_string(s: &str) -> Result<i32> {
+        let s = s.trim().to_lowercase();
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() == 2 {
+            let n: i32 = parts[0].parse().map_err(|_| {
+                BlazeError::analysis(format!("Invalid interval number: {}", parts[0]))
+            })?;
+            match parts[1].trim_end_matches('s') {
+                "day" => Ok(n),
+                "week" => Ok(n * 7),
+                "month" => Ok(n * 30),
+                "year" => Ok(n * 365),
+                _ => Err(BlazeError::analysis(format!(
+                    "Unsupported interval unit: {}",
+                    parts[1]
+                ))),
+            }
+        } else if parts.len() == 1 {
+            // Try "1day", "7days", etc.
+            let digits_end = s.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(s.len());
+            if digits_end > 0 && digits_end < s.len() {
+                let n: i32 = s[..digits_end].parse().map_err(|_| {
+                    BlazeError::analysis(format!("Invalid interval: {}", s))
+                })?;
+                match s[digits_end..].trim_end_matches('s') {
+                    "day" => Ok(n),
+                    "week" => Ok(n * 7),
+                    "month" => Ok(n * 30),
+                    "year" => Ok(n * 365),
+                    _ => Err(BlazeError::analysis(format!("Invalid interval: {}", s))),
+                }
+            } else {
+                Err(BlazeError::analysis(format!("Invalid interval: {}", s)))
+            }
+        } else {
+            Err(BlazeError::analysis(format!("Invalid interval: {}", s)))
         }
     }
 
@@ -1076,6 +1375,7 @@ impl Binder {
                 Ok(LogicalExpr::ScalarSubquery(Arc::new(plan)))
             }
             sql::parser::Expr::Exists { subquery, negated } => {
+                // Try to decorrelate EXISTS into a semi/anti join marker
                 let plan = self.bind_query(*subquery, ctx)?;
                 Ok(LogicalExpr::Exists {
                     subquery: Arc::new(plan),
@@ -1121,11 +1421,22 @@ impl Binder {
                     .collect::<Result<Vec<_>>>()?;
                 let bound_frame = frame.map(|f| self.bind_window_frame(f)).transpose()?;
 
+                // Extract FILTER clause from aggregate functions used as window functions
+                let (clean_func, window_filter) = match &bound_func {
+                    LogicalExpr::Aggregate(agg) if agg.filter.is_some() => {
+                        let mut clean_agg = agg.clone();
+                        let filter = clean_agg.filter.take();
+                        (LogicalExpr::Aggregate(clean_agg), filter.map(|f| *f))
+                    }
+                    _ => (bound_func, None),
+                };
+
                 Ok(LogicalExpr::Window(Box::new(WindowExpr {
-                    function: bound_func,
+                    function: clean_func,
                     partition_by: bound_partition_by,
                     order_by: bound_order_by,
                     frame: bound_frame,
+                    filter: window_filter.map(Box::new),
                 })))
             }
             sql::parser::Expr::Array(elements) => {
@@ -1487,6 +1798,16 @@ impl Binder {
             }
             sql::parser::AggregateFunction::ApproxPercentile => Ok(AggregateFunc::ApproxPercentile),
             sql::parser::AggregateFunction::ApproxMedian => Ok(AggregateFunc::ApproxMedian),
+            sql::parser::AggregateFunction::VariancePop => Ok(AggregateFunc::VariancePop),
+            sql::parser::AggregateFunction::VarianceSamp => Ok(AggregateFunc::VarianceSamp),
+            sql::parser::AggregateFunction::StddevPop => Ok(AggregateFunc::StddevPop),
+            sql::parser::AggregateFunction::StddevSamp => Ok(AggregateFunc::StddevSamp),
+            sql::parser::AggregateFunction::BoolAnd => Ok(AggregateFunc::BoolAnd),
+            sql::parser::AggregateFunction::BoolOr => Ok(AggregateFunc::BoolOr),
+            sql::parser::AggregateFunction::AnyValue => Ok(AggregateFunc::AnyValue),
+            sql::parser::AggregateFunction::PercentileCont => Ok(AggregateFunc::PercentileCont),
+            sql::parser::AggregateFunction::PercentileDisc => Ok(AggregateFunc::PercentileDisc),
+            sql::parser::AggregateFunction::Median => Ok(AggregateFunc::Median),
             _ => Err(BlazeError::not_implemented(format!(
                 "Aggregate function: {:?}",
                 func
