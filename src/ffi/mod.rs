@@ -424,6 +424,150 @@ pub unsafe extern "C" fn blaze_string_free(s: *mut c_char) {
 }
 
 // ============================================================================
+// Arrow IPC Result Format
+// ============================================================================
+
+/// Opaque handle to an Arrow IPC result buffer.
+///
+/// Contains query results serialized in Arrow IPC streaming format,
+/// which is significantly more efficient than JSON for columnar data.
+#[repr(C)]
+pub struct BlazeArrowResult {
+    /// Arrow IPC bytes
+    data: Vec<u8>,
+    /// Number of rows
+    row_count: i64,
+    /// Number of columns
+    column_count: i64,
+}
+
+/// Execute a SQL query and return results in Arrow IPC format.
+///
+/// This is more efficient than `blaze_query` for consumers that can
+/// read Arrow IPC (e.g., PyArrow, Arrow C++, Arrow.js).
+///
+/// # Arguments
+/// - `conn`: Valid connection pointer
+/// - `sql`: Null-terminated SQL query string
+///
+/// # Returns
+/// - Pointer to a new `BlazeArrowResult` on success
+/// - NULL on failure (check `blaze_last_error`)
+///
+/// # Safety
+/// - `conn` must be a valid pointer
+/// - `sql` must be a valid null-terminated string
+/// - The returned pointer must be freed with `blaze_arrow_result_free`
+#[no_mangle]
+pub unsafe extern "C" fn blaze_query_arrow(
+    conn: *mut BlazeConnection,
+    sql: *const c_char,
+) -> *mut BlazeArrowResult {
+    if conn.is_null() || sql.is_null() {
+        return ptr::null_mut();
+    }
+
+    let conn = &mut *conn;
+    let sql_str = match CStr::from_ptr(sql).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_error(conn, "Invalid UTF-8 in SQL string");
+            return ptr::null_mut();
+        }
+    };
+
+    match conn.inner.query(sql_str) {
+        Ok(batches) => {
+            let row_count: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
+            let column_count = batches.first().map(|b| b.num_columns() as i64).unwrap_or(0);
+
+            match serialize_batches_to_ipc(&batches) {
+                Ok(data) => {
+                    let result = Box::new(BlazeArrowResult {
+                        data,
+                        row_count,
+                        column_count,
+                    });
+                    Box::into_raw(result)
+                }
+                Err(e) => {
+                    set_error(conn, &e.to_string());
+                    ptr::null_mut()
+                }
+            }
+        }
+        Err(e) => {
+            set_error(conn, &e.to_string());
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Get a pointer to the Arrow IPC data buffer.
+///
+/// # Returns
+/// - Pointer to the raw IPC bytes
+///
+/// # Safety
+/// - `result` must be a valid pointer
+/// - The returned pointer is valid until `blaze_arrow_result_free` is called
+#[no_mangle]
+pub unsafe extern "C" fn blaze_arrow_result_data(result: *const BlazeArrowResult) -> *const u8 {
+    if result.is_null() {
+        return ptr::null();
+    }
+    (*result).data.as_ptr()
+}
+
+/// Get the length of the Arrow IPC data buffer in bytes.
+///
+/// # Safety
+/// `result` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn blaze_arrow_result_data_len(result: *const BlazeArrowResult) -> usize {
+    if result.is_null() {
+        return 0;
+    }
+    (*result).data.len()
+}
+
+/// Get the number of rows in an Arrow IPC result.
+///
+/// # Safety
+/// `result` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn blaze_arrow_result_row_count(result: *const BlazeArrowResult) -> i64 {
+    if result.is_null() {
+        return 0;
+    }
+    (*result).row_count
+}
+
+/// Get the number of columns in an Arrow IPC result.
+///
+/// # Safety
+/// `result` must be a valid pointer
+#[no_mangle]
+pub unsafe extern "C" fn blaze_arrow_result_column_count(result: *const BlazeArrowResult) -> i64 {
+    if result.is_null() {
+        return 0;
+    }
+    (*result).column_count
+}
+
+/// Free an Arrow IPC result object.
+///
+/// # Safety
+/// - `result` must be a valid pointer returned by `blaze_query_arrow`
+/// - After calling this function, `result` is invalid
+#[no_mangle]
+pub unsafe extern "C" fn blaze_arrow_result_free(result: *mut BlazeArrowResult) {
+    if !result.is_null() {
+        drop(Box::from_raw(result));
+    }
+}
+
+// ============================================================================
 // Table Management
 // ============================================================================
 
@@ -768,6 +912,34 @@ fn serialize_batches_to_json(
         .map_err(|e| BlazeError::execution(format!("Invalid UTF-8: {}", e)))
 }
 
+fn serialize_batches_to_ipc(
+    batches: &[arrow::record_batch::RecordBatch],
+) -> Result<Vec<u8>, BlazeError> {
+    use arrow::ipc::writer::StreamWriter;
+    use std::io::Cursor;
+
+    if batches.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let schema = batches[0].schema();
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut writer = StreamWriter::try_new(&mut buf, &schema)
+            .map_err(|e| BlazeError::execution(format!("Arrow IPC writer init failed: {}", e)))?;
+        for batch in batches {
+            writer
+                .write(batch)
+                .map_err(|e| BlazeError::execution(format!("Arrow IPC write failed: {}", e)))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| BlazeError::execution(format!("Arrow IPC finish failed: {}", e)))?;
+    }
+
+    Ok(buf.into_inner())
+}
+
 fn parse_json_to_batches(json: &str) -> Result<Vec<arrow::record_batch::RecordBatch>, BlazeError> {
     use arrow_json::ReaderBuilder;
     use std::io::Cursor;
@@ -859,5 +1031,93 @@ mod tests {
             let version_str = CStr::from_ptr(version).to_str().unwrap();
             assert_eq!(version_str, "0.1.0");
         }
+    }
+
+    #[test]
+    fn test_query_arrow_ipc() {
+        unsafe {
+            let conn = blaze_connection_new();
+            assert!(!conn.is_null());
+
+            let sql = CString::new("SELECT 1 AS a, 2 AS b").unwrap();
+            let result = blaze_query_arrow(conn, sql.as_ptr());
+            assert!(!result.is_null());
+
+            let row_count = blaze_arrow_result_row_count(result);
+            assert_eq!(row_count, 1);
+
+            let col_count = blaze_arrow_result_column_count(result);
+            assert_eq!(col_count, 2);
+
+            let data = blaze_arrow_result_data(result);
+            let data_len = blaze_arrow_result_data_len(result);
+            assert!(!data.is_null());
+            assert!(data_len > 0);
+
+            // Verify the IPC bytes can be deserialized back to RecordBatches
+            let ipc_bytes = std::slice::from_raw_parts(data, data_len);
+            let reader = arrow::ipc::reader::StreamReader::try_new(
+                std::io::Cursor::new(ipc_bytes),
+                None,
+            )
+            .expect("Should parse Arrow IPC");
+            let batches: Vec<_> = reader.map(|b| b.unwrap()).collect();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].num_rows(), 1);
+            assert_eq!(batches[0].num_columns(), 2);
+
+            blaze_arrow_result_free(result);
+            blaze_connection_free(conn);
+        }
+    }
+
+    #[test]
+    fn test_query_arrow_ipc_empty() {
+        unsafe {
+            let conn = blaze_connection_new();
+            assert!(!conn.is_null());
+
+            // Create table with no data, then query it
+            let ddl = CString::new("CREATE TABLE empty_t (id INT)").unwrap();
+            blaze_execute(conn, ddl.as_ptr());
+
+            let sql = CString::new("SELECT * FROM empty_t").unwrap();
+            let result = blaze_query_arrow(conn, sql.as_ptr());
+            assert!(!result.is_null());
+
+            let row_count = blaze_arrow_result_row_count(result);
+            assert_eq!(row_count, 0);
+
+            blaze_arrow_result_free(result);
+            blaze_connection_free(conn);
+        }
+    }
+
+    #[test]
+    fn test_serialize_batches_to_ipc() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![10, 20, 30]))],
+        )
+        .unwrap();
+
+        let ipc_bytes = super::serialize_batches_to_ipc(&[batch]).unwrap();
+        assert!(!ipc_bytes.is_empty());
+
+        // Round-trip: deserialize back
+        let reader = arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(&ipc_bytes),
+            None,
+        )
+        .unwrap();
+        let batches: Vec<_> = reader.map(|b| b.unwrap()).collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
     }
 }
