@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- GROUPING SETS, CUBE, ROLLUP with GROUPING() bitmask function
+- Correlated subquery support: EXISTS, NOT EXISTS, IN, NOT IN, scalar subqueries
+- LATERAL join support with correlated column references
+- INTERSECT and EXCEPT set operations with ALL variant
+- String concatenation via `||` operator
+- ORDER BY and GROUP BY positional column references (ORDER BY 1, GROUP BY 1)
+- COUNT(DISTINCT) with type-specific hashing (integer, float, string)
+- STRING_AGG aggregate with configurable separator
+- ARRAY_AGG aggregate returning Arrow ListArray
+- Decimal-preserving SUM/MIN/MAX aggregates (i128 accumulation, Decimal128 output)
+- Integer-preserving SUM (i128 accumulation, Int64 output for lossless precision)
+- COPY FROM JSON format support
+- information_schema.schemata virtual table
+- Schema-qualified table scan (information_schema tables now return real data)
+- Arrow IPC result format for FFI (`blaze_query_arrow()`)
+- Arrow Flight TCP server with JSON command protocol
+- Federation HTTP and S3 remote data source providers
+- Multi-statement execution in Connection::execute()
+- HAVING clause support for nested expressions (NOT, BETWEEN, CASE, IS NULL)
+- Benchmark memory tracking with peak measurement and regression detection
+- Division by zero protection for integer arithmetic
+- SQL-standard NULL comparison behavior (WHERE x = NULL returns 0 rows)
+- CAST error messages with source/target type information
+
+### Changed
+- README: moved implemented features from Roadmap to Also Available section
+- LIMITATIONS.md: separated completed items from planned features
+- GPU module: documented as CPU simulation mode
+- Flight module: documented as handler-level (not standalone gRPC server)
+- Vector embeddings: moved from Coming Soon to Also Available
+
+### Fixed
+- SUM/AVG/MIN/MAX accumulators now handle Decimal128 input correctly
+- Physical planner now wires SubqueryExecutor in all code paths
+- information_schema virtual tables now visible via schema-qualified scan
+- INTERSECT/EXCEPT no longer silently converted to UNION
+
+### Previously Added (unreleased features from prior development)
 - Vector embeddings: `VECTOR(n)` data type, distance functions (L2, cosine, dot product), brute-force k-NN search
 - Production streaming SQL: temporal joins, deduplication, backpressure control, stream checkpointing
 - Enhanced LSP support: signature help, code actions, document symbols, SQL formatting, semantic validation

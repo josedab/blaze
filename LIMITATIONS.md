@@ -190,12 +190,27 @@ The CLI (`cargo run`) is a simple REPL for testing. It is not intended for produ
 
 The following features are planned for future releases:
 
-- [ ] Decimal type support in joins and GROUP BY
 - [ ] Parquet write support
+- [ ] `SPLIT` function (currently use `SPLIT_PART` with index)
+- [ ] Full `REGEXP_*` family with flags support
+
+### Recently Completed
+
+- [x] Decimal type support in joins and GROUP BY
 - [x] SQL-level transaction statements (BEGIN, COMMIT, ROLLBACK, SAVEPOINT)
-- [ ] Thread-safe connection pool
+- [x] Thread-safe connection pool
 - [x] Date/time functions (DATE_ADD, DATE_SUB, TO_DATE, TO_TIMESTAMP)
 - [x] Additional scalar functions (REPLACE, REGEXP_*, GREATEST, LEAST)
 - [x] Filter pushdown for CSV and Parquet files
-- [ ] `SPLIT` function (currently use `SPLIT_PART` with index)
-- [ ] Full `REGEXP_*` family with flags support
+- [x] GROUPING SETS / CUBE / ROLLUP with GROUPING() function
+- [x] Correlated subqueries (EXISTS, IN, scalar), LATERAL joins
+- [x] INTERSECT / EXCEPT with ALL variant
+- [x] String concatenation with || operator
+- [x] ORDER BY / GROUP BY positional column references
+- [x] COUNT(DISTINCT), STRING_AGG, ARRAY_AGG aggregates
+- [x] Decimal-preserving SUM/MIN/MAX aggregates
+- [x] COPY FROM JSON format
+- [x] information_schema.schemata table
+- [x] Multi-statement execution
+- [x] Division by zero protection
+- [x] NULL comparison SQL-standard behavior

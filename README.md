@@ -47,19 +47,33 @@ A high-performance, memory-safe embedded OLAP query engine written in Rust with 
 > APIs will change, implementations may be incomplete, and bugs are expected.
 > Enable them with `--features <flag>` for evaluation only. Core features (✅ Stable) are safe to depend on.
 
-### Coming Soon
+### Also Available (enable with feature flags or use directly)
 
-> The following features are in development and will be included in the next release.
+> These features are implemented and available for evaluation. See individual feature
+> documentation for maturity details. Some require feature flags (`--features <flag>`).
+
+- **Vector embeddings** — `VECTOR(n)` type, distance functions (L2, cosine, dot product), k-NN search _(available in core)_
+- **Streaming SQL** — async streaming with backpressure, Arrow IPC support, token-based cancellation _(feature: `streaming`)_
+- **SQL Language Server** — completions, diagnostics, hover, go-to-definition _(available in core)_
+- **Materialized views** — incremental refresh, change tracking, versioning _(available in core)_
+- **Time-series functions** — DATE_TRUNC, TIME_BUCKET, DATE_DIFF, GAP_FILL, MOVING_AVG _(feature: `timeseries`)_
+- **Full-text search** — tokenizer, BM25 ranking, inverted index, fuzzy matching _(available in core)_
+- **JSON processing** — JSON_EXTRACT, JSON_VALUE, JSON_OBJECT, JSON_ARRAY, path expressions _(available in core)_
+- **Visualization** — bar, line, histogram, scatter, pie, heatmap charts (Unicode + SVG) _(available in core)_
+- **Learned optimizer** — ML-based cardinality estimation with adaptive strategy selection _(feature: `learned-optimizer`)_
+- **GROUPING SETS / CUBE / ROLLUP** — hierarchical aggregation with GROUPING() function _(available in core)_
+- **Correlated subqueries** — EXISTS, IN, NOT EXISTS, NOT IN, scalar subqueries, LATERAL joins _(available in core)_
+- **INTERSECT / EXCEPT** — set operations with ALL variant support _(available in core)_
+- **Remote federation** — HTTP and S3 data source connectors _(feature: `federation`)_
+- **Arrow Flight server** — TCP-based Arrow IPC query server _(feature: `flight`)_
+
+### Roadmap
+
+> The following enhancements are planned for future releases.
 > See [CHANGELOG.md](CHANGELOG.md) for details.
 
-- **Vector embeddings** — `VECTOR(n)` type, distance functions (L2, cosine, dot product), k-NN search
-- **Production streaming SQL** — temporal joins, deduplication, backpressure, checkpointing
 - **Cloud-native storage** — partition discovery, parallel fetch, multi-cloud (S3/GCS/Azure)
-- **Enhanced LSP** — signature help, code actions, document symbols, SQL formatting
-- **Auto-tuning optimizer** — A/B plan testing, cardinality feedback loops
-- **Federated query enhancements** — cost-based routing, source capability modeling
-- **Incremental view maintenance** — refresh triggers, priority queue, consistency checking
-- **Time-series enhancements** — delta-of-delta compression, interpolation engine
+- **GPU acceleration** — CUDA/Metal kernel execution (currently CPU simulation mode)
 - **Observability** — query profiler history, OpenTelemetry export, Prometheus metrics
 - **WASM optimization** — build profiles, size tracking, lazy module loading
 
@@ -84,7 +98,7 @@ blaze = "0.1"
 
 - **Rust 1.92.0+** — Install via [rustup](https://rustup.rs/)
 - First build takes ~4-5 minutes (debug), ~10s incremental rebuilds; ~4-6min (release)
-- Tests run in ~0.2s (900+ tests)
+- Tests run in ~0.2s (1600+ tests)
 
 #### Minimum Supported Rust Version (MSRV)
 
@@ -290,7 +304,7 @@ cargo run -- -c "SELECT * FROM users" --format csv --output results.csv
 ```bash
 cargo build            # Debug build (~4-5min first, ~10s incremental)
 cargo build --release  # Release build (~4-6min)
-cargo test             # Run tests (~0.2s, 900+ tests)
+cargo test             # Run tests (~0.2s, 1600+ tests)
 cargo clippy           # Linting
 ```
 

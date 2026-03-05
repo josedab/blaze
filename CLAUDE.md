@@ -88,6 +88,27 @@ src/
 ├── streaming.rs        # Streaming query execution (feature: streaming)
 ├── timeseries.rs       # Time series operations (feature: timeseries)
 │
+│   # Core extension modules (always compiled)
+├── vector.rs           # Vector similarity search (L2, cosine, dot product, k-NN)
+├── fts.rs              # Full-text search (BM25, inverted index, fuzzy matching)
+├── json.rs             # JSON processing (extract, value, object, array)
+├── dataframe.rs        # DataFrame API (fluent builder pattern)
+├── materialized.rs     # Materialized views (incremental refresh)
+├── visualization.rs    # Chart rendering (Unicode + SVG)
+├── lsp.rs              # SQL Language Server Protocol
+├── rest.rs             # REST API server framework
+├── cache.rs            # Query result caching (LRU, TTL)
+├── ingestion.rs        # Micro-batching data ingestion
+├── security.rs         # RBAC, row-level security, audit logging
+├── persistence.rs      # WAL + snapshot persistence
+├── benchmark.rs        # Query benchmarking framework
+├── recursive_cte.rs    # WITH RECURSIVE support
+├── tvf.rs              # Table-valued functions (generate_series, unnest)
+├── approx.rs           # Approximate query processing (HLL, T-Digest)
+├── resource_governor.rs # Multi-tenant resource isolation
+├── plugin.rs           # Plugin SDK with hot-reload
+├── parallel/           # Thread pool and partitioning
+│
 │   # Platform binding modules (feature-gated)
 ├── ffi/                # C FFI bindings (feature: c-ffi)
 ├── python.rs           # Python bindings via PyO3 (feature: python)
