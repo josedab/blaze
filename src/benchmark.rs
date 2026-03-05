@@ -122,17 +122,24 @@ impl BenchmarkRunner {
             let _ = conn.query(&query.sql)?;
         }
 
+        // Reset peak memory counter before timed runs
+        let memory_manager = conn.memory_manager();
+        memory_manager.reset_peak();
+
         // Timed runs
         let mut total_elapsed = Duration::ZERO;
         let mut rows_returned = 0;
+        let mut max_peak_memory = 0usize;
 
         for _ in 0..self.timed_runs {
+            memory_manager.reset_peak();
             let start = Instant::now();
             let batches = conn.query(&query.sql)?;
             let elapsed = start.elapsed();
 
             total_elapsed += elapsed;
             rows_returned = batches.iter().map(|b| b.num_rows()).sum();
+            max_peak_memory = max_peak_memory.max(memory_manager.peak());
         }
 
         let avg_elapsed = total_elapsed / self.timed_runs as u32;
@@ -141,7 +148,7 @@ impl BenchmarkRunner {
             name: query.name.clone(),
             elapsed: avg_elapsed,
             rows_returned,
-            peak_memory_bytes: None, // Memory tracking not implemented yet
+            peak_memory_bytes: Some(max_peak_memory),
         })
     }
 
@@ -164,24 +171,46 @@ impl BenchmarkRunner {
 pub struct Regression {
     /// Name of the benchmark
     pub name: String,
-    /// Baseline elapsed time in ms
-    pub baseline_ms: f64,
-    /// Current elapsed time in ms
-    pub current_ms: f64,
-    /// Percentage slowdown (positive = slower)
-    pub slowdown_percent: f64,
+    /// Type of regression detected
+    pub kind: RegressionKind,
+}
+
+/// The kind of performance regression.
+#[derive(Debug, Clone)]
+pub enum RegressionKind {
+    /// Query execution time regression
+    Latency {
+        /// Baseline elapsed time in ms
+        baseline_ms: f64,
+        /// Current elapsed time in ms
+        current_ms: f64,
+        /// Percentage slowdown (positive = slower)
+        slowdown_percent: f64,
+    },
+    /// Peak memory usage regression
+    Memory {
+        /// Baseline peak memory in bytes
+        baseline_bytes: usize,
+        /// Current peak memory in bytes
+        current_bytes: usize,
+        /// Percentage increase (positive = more memory)
+        increase_percent: f64,
+    },
 }
 
 /// Detects performance regressions by comparing benchmark results.
 pub struct RegressionDetector {
-    /// Threshold for regression detection (default: 10.0 = 10% slowdown)
+    /// Threshold for latency regression detection (default: 10.0 = 10% slowdown)
     pub threshold_percent: f64,
+    /// Threshold for memory regression detection (default: 20.0 = 20% increase)
+    pub memory_threshold_percent: f64,
 }
 
 impl Default for RegressionDetector {
     fn default() -> Self {
         Self {
             threshold_percent: 10.0,
+            memory_threshold_percent: 20.0,
         }
     }
 }
@@ -191,9 +220,15 @@ impl RegressionDetector {
         Self::default()
     }
 
-    /// Set the regression threshold percentage.
+    /// Set the latency regression threshold percentage.
     pub fn with_threshold(mut self, percent: f64) -> Self {
         self.threshold_percent = percent;
+        self
+    }
+
+    /// Set the memory regression threshold percentage.
+    pub fn with_memory_threshold(mut self, percent: f64) -> Self {
+        self.memory_threshold_percent = percent;
         self
     }
 
@@ -211,6 +246,7 @@ impl RegressionDetector {
 
         for curr in current {
             if let Some(base) = baseline_map.get(curr.name.as_str()) {
+                // Check latency regression
                 let baseline_ms = base.elapsed_ms();
                 let current_ms = curr.elapsed_ms();
 
@@ -220,10 +256,33 @@ impl RegressionDetector {
                     if slowdown > self.threshold_percent {
                         regressions.push(Regression {
                             name: curr.name.clone(),
-                            baseline_ms,
-                            current_ms,
-                            slowdown_percent: slowdown,
+                            kind: RegressionKind::Latency {
+                                baseline_ms,
+                                current_ms,
+                                slowdown_percent: slowdown,
+                            },
                         });
+                    }
+                }
+
+                // Check memory regression
+                if let (Some(base_mem), Some(curr_mem)) =
+                    (base.peak_memory_bytes, curr.peak_memory_bytes)
+                {
+                    if base_mem > 0 {
+                        let increase =
+                            ((curr_mem as f64 - base_mem as f64) / base_mem as f64) * 100.0;
+
+                        if increase > self.memory_threshold_percent {
+                            regressions.push(Regression {
+                                name: curr.name.clone(),
+                                kind: RegressionKind::Memory {
+                                    baseline_bytes: base_mem,
+                                    current_bytes: curr_mem,
+                                    increase_percent: increase,
+                                },
+                            });
+                        }
                     }
                 }
             }
@@ -515,13 +574,31 @@ impl RegressionReport {
                 self.regressions.len(),
                 self.total_queries
             ));
-            md.push_str("| Query | Baseline (ms) | Current (ms) | Change |\n");
-            md.push_str("|-------|-------------|------------|--------|\n");
+            md.push_str("| Query | Type | Baseline | Current | Change |\n");
+            md.push_str("|-------|------|----------|---------|--------|\n");
             for r in &self.regressions {
-                md.push_str(&format!(
-                    "| {} | {:.2} | {:.2} | +{:.1}% |\n",
-                    r.name, r.baseline_ms, r.current_ms, r.slowdown_percent
-                ));
+                match &r.kind {
+                    RegressionKind::Latency {
+                        baseline_ms,
+                        current_ms,
+                        slowdown_percent,
+                    } => {
+                        md.push_str(&format!(
+                            "| {} | Latency | {:.2} ms | {:.2} ms | +{:.1}% |\n",
+                            r.name, baseline_ms, current_ms, slowdown_percent
+                        ));
+                    }
+                    RegressionKind::Memory {
+                        baseline_bytes,
+                        current_bytes,
+                        increase_percent,
+                    } => {
+                        md.push_str(&format!(
+                            "| {} | Memory | {} B | {} B | +{:.1}% |\n",
+                            r.name, baseline_bytes, current_bytes, increase_percent
+                        ));
+                    }
+                }
             }
         } else {
             md.push_str(&format!(
@@ -756,7 +833,47 @@ mod tests {
 
         assert_eq!(regressions.len(), 1);
         assert_eq!(regressions[0].name, "query1");
-        assert!((regressions[0].slowdown_percent - 25.0).abs() < 0.1);
+        match &regressions[0].kind {
+            RegressionKind::Latency {
+                slowdown_percent, ..
+            } => {
+                assert!((slowdown_percent - 25.0).abs() < 0.1);
+            }
+            _ => panic!("Expected latency regression"),
+        }
+    }
+
+    #[test]
+    fn test_memory_regression_detection() {
+        let baseline = vec![BenchmarkResult {
+            name: "query1".to_string(),
+            elapsed: Duration::from_millis(100),
+            rows_returned: 1000,
+            peak_memory_bytes: Some(1_000_000),
+        }];
+
+        let current = vec![BenchmarkResult {
+            name: "query1".to_string(),
+            elapsed: Duration::from_millis(100), // same latency
+            rows_returned: 1000,
+            peak_memory_bytes: Some(1_500_000), // 50% more memory
+        }];
+
+        let detector = RegressionDetector::new()
+            .with_threshold(10.0)
+            .with_memory_threshold(20.0);
+        let regressions = detector.detect(&baseline, &current);
+
+        assert_eq!(regressions.len(), 1);
+        assert_eq!(regressions[0].name, "query1");
+        match &regressions[0].kind {
+            RegressionKind::Memory {
+                increase_percent, ..
+            } => {
+                assert!((increase_percent - 50.0).abs() < 0.1);
+            }
+            _ => panic!("Expected memory regression"),
+        }
     }
 
     #[test]
