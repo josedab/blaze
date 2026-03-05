@@ -1,13 +1,19 @@
 //! Arrow Flight Protocol support for Blaze.
 //!
-//! Provides a server and client implementation for the Apache Arrow Flight protocol,
+//! Provides handler implementations for the Apache Arrow Flight protocol,
 //! enabling zero-copy data exchange between Blaze and other Arrow-based systems.
 //!
 //! # Architecture
 //!
-//! - **FlightServer**: Exposes Blaze queries via Flight RPC (DoGet, DoAction)
+//! - **FlightHandler**: Handles Flight RPC calls (DoGet, DoAction) using a Blaze connection
 //! - **FlightClient**: Register remote Flight endpoints as local tables
-//! - **FlightSqlHandler**: Flight SQL protocol for JDBC/ODBC compatibility
+//! - **FlightSqlMetadataProvider**: Flight SQL metadata for JDBC/ODBC compatibility
+//!
+//! # Current Status
+//!
+//! This module provides the **handler logic** for Flight operations, not a
+//! standalone gRPC server. To serve Flight clients, embed these handlers in
+//! a gRPC server (e.g., using `tonic` with `arrow-flight` crate).
 //!
 //! # Usage
 //!
@@ -1427,6 +1433,166 @@ impl FlightSqlSpan {
     }
 }
 
+// ============================================================================
+// Arrow Flight Lite TCP Server
+// ============================================================================
+
+/// A lightweight TCP-based Arrow Flight server.
+///
+/// Protocol: Each request is a framed message with a 4-byte big-endian length prefix,
+/// followed by a JSON command object:
+///
+/// ```json
+/// {"action": "query", "sql": "SELECT * FROM users"}
+/// {"action": "list_tables"}
+/// {"action": "get_schema", "table": "users"}
+/// ```
+///
+/// Response: 4-byte big-endian length prefix followed by Arrow IPC stream bytes,
+/// or a JSON error object: `{"error": "message"}`.
+pub struct FlightTcpServer {
+    handler: std::sync::Arc<FlightHandler>,
+}
+
+impl FlightTcpServer {
+    /// Create a new TCP Flight server wrapping a FlightHandler.
+    pub fn new(handler: FlightHandler) -> Self {
+        Self {
+            handler: std::sync::Arc::new(handler),
+        }
+    }
+
+    /// Start serving on the configured host:port. Blocks the current thread.
+    pub fn serve_blocking(&self) -> Result<()> {
+        use std::net::TcpListener;
+
+        let config = &self.handler.config;
+        let addr = format!("{}:{}", config.host, config.port);
+        let listener = TcpListener::bind(&addr).map_err(|e| {
+            BlazeError::execution(format!("Failed to bind to {}: {}", addr, e))
+        })?;
+
+        tracing::info!("Arrow Flight Lite server listening on {}", addr);
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    let handler = self.handler.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = Self::handle_connection(&handler, &mut stream) {
+                            tracing::error!("Connection error: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Accept error: {}", e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a single client connection.
+    fn handle_connection(
+        handler: &FlightHandler,
+        stream: &mut std::net::TcpStream,
+    ) -> Result<()> {
+        use std::io::{Read, Write};
+
+        loop {
+            // Read 4-byte length prefix
+            let mut len_buf = [0u8; 4];
+            match stream.read_exact(&mut len_buf) {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(BlazeError::execution(format!("Read error: {}", e))),
+            }
+            let msg_len = u32::from_be_bytes(len_buf) as usize;
+
+            if msg_len > handler.config.max_message_size {
+                let err = b"{\"error\":\"Message too large\"}";
+                let len = (err.len() as u32).to_be_bytes();
+                let _ = stream.write_all(&len);
+                let _ = stream.write_all(err);
+                continue;
+            }
+
+            // Read message body
+            let mut msg_buf = vec![0u8; msg_len];
+            stream
+                .read_exact(&mut msg_buf)
+                .map_err(|e| BlazeError::execution(format!("Read error: {}", e)))?;
+
+            // Parse JSON command
+            let response = match Self::process_command(handler, &msg_buf) {
+                Ok(data) => data,
+                Err(e) => {
+                    let err_json = format!("{{\"error\":\"{}\"}}", e.to_string().replace('"', "'"));
+                    err_json.into_bytes()
+                }
+            };
+
+            // Write length-prefixed response
+            let resp_len = (response.len() as u32).to_be_bytes();
+            stream
+                .write_all(&resp_len)
+                .map_err(|e| BlazeError::execution(format!("Write error: {}", e)))?;
+            stream
+                .write_all(&response)
+                .map_err(|e| BlazeError::execution(format!("Write error: {}", e)))?;
+            stream
+                .flush()
+                .map_err(|e| BlazeError::execution(format!("Flush error: {}", e)))?;
+        }
+    }
+
+    /// Process a single command and return the response bytes.
+    fn process_command(handler: &FlightHandler, msg: &[u8]) -> Result<Vec<u8>> {
+        let cmd: serde_json::Value = serde_json::from_slice(msg)
+            .map_err(|e| BlazeError::execution(format!("Invalid JSON command: {}", e)))?;
+
+        let action = cmd["action"]
+            .as_str()
+            .ok_or_else(|| BlazeError::invalid_argument("Command must have 'action' field"))?;
+
+        match action {
+            "query" => {
+                let sql = cmd["sql"]
+                    .as_str()
+                    .ok_or_else(|| BlazeError::invalid_argument("'query' action requires 'sql'"))?;
+                let batches = handler.connection.query(sql)?;
+                serialize_batches(&batches)
+            }
+            "list_tables" => {
+                let tables = handler.connection.list_tables();
+                serde_json::to_vec(&tables)
+                    .map_err(|e| BlazeError::execution(format!("Serialization error: {}", e)))
+            }
+            "get_schema" => {
+                let table = cmd["table"].as_str().ok_or_else(|| {
+                    BlazeError::invalid_argument("'get_schema' action requires 'table'")
+                })?;
+                let action = FlightAction::GetSchema {
+                    table: table.to_string(),
+                };
+                handler.do_action(&action)
+            }
+            "execute" => {
+                let sql = cmd["sql"].as_str().ok_or_else(|| {
+                    BlazeError::invalid_argument("'execute' action requires 'sql'")
+                })?;
+                handler.connection.execute(sql)?;
+                Ok(b"{\"status\":\"ok\"}".to_vec())
+            }
+            _ => Err(BlazeError::invalid_argument(format!(
+                "Unknown action '{}'. Supported: query, list_tables, get_schema, execute",
+                action
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1987,5 +2153,99 @@ mod tests {
         assert!(info
             .iter()
             .any(|(k, v)| k == "FLIGHT_SQL_SERVER_VERSION" && !v.is_empty()));
+    }
+
+    #[test]
+    fn test_flight_tcp_server_roundtrip() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        // Create server on random port
+        let conn = crate::Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE test_flight (id BIGINT, name VARCHAR)")
+            .unwrap();
+        conn.execute("INSERT INTO test_flight VALUES (1, 'Alice'), (2, 'Bob')")
+            .unwrap();
+
+        let config = FlightServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0, // OS assigns port
+            ..FlightServerConfig::default()
+        };
+        let handler = FlightHandler::new(conn, config);
+
+        // Bind to get actual port
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Spawn server thread
+        let handler_arc = std::sync::Arc::new(handler);
+        let server_handler = handler_arc.clone();
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = FlightTcpServer::handle_connection(&server_handler, &mut stream);
+            }
+        });
+
+        // Connect as client
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+
+        // Send query command
+        let cmd = b"{\"action\":\"query\",\"sql\":\"SELECT * FROM test_flight ORDER BY id\"}";
+        let len = (cmd.len() as u32).to_be_bytes();
+        client.write_all(&len).unwrap();
+        client.write_all(cmd).unwrap();
+        client.flush().unwrap();
+
+        // Read response
+        let mut resp_len = [0u8; 4];
+        client.read_exact(&mut resp_len).unwrap();
+        let resp_size = u32::from_be_bytes(resp_len) as usize;
+        assert!(resp_size > 0);
+
+        let mut resp_buf = vec![0u8; resp_size];
+        client.read_exact(&mut resp_buf).unwrap();
+
+        // Deserialize Arrow IPC
+        let batches = deserialize_batches(&resp_buf).unwrap();
+        assert!(!batches.is_empty());
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+
+        drop(client);
+        let _ = server_thread.join();
+    }
+
+    #[test]
+    fn test_flight_tcp_process_command() {
+        let conn = crate::Connection::in_memory().unwrap();
+        conn.execute("CREATE TABLE cmd_test (x BIGINT)")
+            .unwrap();
+        let handler = FlightHandler::with_default_config(conn);
+
+        // Test list_tables
+        let cmd = b"{\"action\":\"list_tables\"}";
+        let resp = FlightTcpServer::process_command(&handler, cmd).unwrap();
+        let tables: Vec<String> = serde_json::from_slice(&resp).unwrap();
+        assert!(tables.contains(&"cmd_test".to_string()));
+
+        // Test execute
+        let cmd = b"{\"action\":\"execute\",\"sql\":\"INSERT INTO cmd_test VALUES (42)\"}";
+        let resp = FlightTcpServer::process_command(&handler, cmd).unwrap();
+        assert!(String::from_utf8_lossy(&resp).contains("ok"));
+
+        // Test query
+        let cmd = b"{\"action\":\"query\",\"sql\":\"SELECT * FROM cmd_test\"}";
+        let resp = FlightTcpServer::process_command(&handler, cmd).unwrap();
+        let batches = deserialize_batches(&resp).unwrap();
+        assert_eq!(batches[0].num_rows(), 1);
+
+        // Test unknown action
+        let cmd = b"{\"action\":\"invalid\"}";
+        let resp = FlightTcpServer::process_command(&handler, cmd);
+        assert!(resp.is_err());
     }
 }
