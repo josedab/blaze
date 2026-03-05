@@ -6,8 +6,10 @@
 mod operators;
 mod stream;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use arrow::array::ArrayRef;
 use arrow::record_batch::RecordBatch;
 
 pub use operators::*;
@@ -166,12 +168,14 @@ impl Executor {
         match plan {
             PhysicalPlan::Scan {
                 table_name,
+                schema_name,
                 projection,
                 schema,
                 filters,
                 time_travel,
             } => self.execute_scan(
                 table_name,
+                schema_name.as_deref(),
                 projection.as_deref(),
                 schema,
                 filters,
@@ -234,10 +238,153 @@ impl Executor {
                 let right_batches = self.execute_plan(right)?;
                 self.execute_cross_join(left_batches, right_batches, schema)
             }
-            PhysicalPlan::Union { inputs, .. } => {
+            PhysicalPlan::Union { inputs, schema } => {
                 let mut result = Vec::new();
                 for input in inputs {
-                    result.extend(self.execute_plan(input)?);
+                    let batches = self.execute_plan(input)?;
+                    for batch in batches {
+                        // Coerce batch columns to match the union output schema
+                        if batch.schema() == *schema {
+                            result.push(batch);
+                        } else {
+                            let coerced_cols: Vec<ArrayRef> = (0..schema.fields().len())
+                                .map(|i| {
+                                    let col = batch.column(i);
+                                    let target_type = schema.field(i).data_type();
+                                    if col.data_type() == target_type {
+                                        Ok(col.clone())
+                                    } else {
+                                        arrow::compute::cast(col, target_type).map_err(|e| {
+                                            crate::error::BlazeError::execution(format!(
+                                                "UNION type coercion failed for column '{}': {} -> {}: {}",
+                                                schema.field(i).name(),
+                                                col.data_type(),
+                                                target_type,
+                                                e
+                                            ))
+                                        })
+                                    }
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            result.push(RecordBatch::try_new(schema.clone(), coerced_cols)?);
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            PhysicalPlan::Intersect {
+                left,
+                right,
+                schema,
+                all,
+            } => {
+                let left_batches = self.execute_plan(left)?;
+                let right_batches = self.execute_plan(right)?;
+                let mut right_keys = HashSet::new();
+                for batch in &right_batches {
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        right_keys.insert(key);
+                    }
+                }
+                let mut result = Vec::new();
+                let mut seen = HashSet::new();
+                for batch in &left_batches {
+                    let mut indices = Vec::new();
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        if right_keys.contains(&key) && (*all || seen.insert(key)) {
+                            indices.push(row);
+                        }
+                    }
+                    if !indices.is_empty() {
+                        let columns = batch
+                            .columns()
+                            .iter()
+                            .map(|col| {
+                                let idx =
+                                    arrow::array::UInt32Array::from(indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
+                                arrow::compute::take(col.as_ref(), &idx, None).expect("take failed")
+                            })
+                            .collect::<Vec<_>>();
+                        result.push(RecordBatch::try_new(schema.clone(), columns)?);
+                    }
+                }
+                Ok(result)
+            }
+            PhysicalPlan::Except {
+                left,
+                right,
+                schema,
+                all,
+            } => {
+                let left_batches = self.execute_plan(left)?;
+                let right_batches = self.execute_plan(right)?;
+                let mut right_keys = HashSet::new();
+                for batch in &right_batches {
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        right_keys.insert(key);
+                    }
+                }
+                let mut result = Vec::new();
+                let mut seen = HashSet::new();
+                for batch in &left_batches {
+                    let mut indices = Vec::new();
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        if !right_keys.contains(&key) && (*all || seen.insert(key)) {
+                            indices.push(row);
+                        }
+                    }
+                    if !indices.is_empty() {
+                        let columns = batch
+                            .columns()
+                            .iter()
+                            .map(|col| {
+                                let idx =
+                                    arrow::array::UInt32Array::from(indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
+                                arrow::compute::take(col.as_ref(), &idx, None).expect("take failed")
+                            })
+                            .collect::<Vec<_>>();
+                        result.push(RecordBatch::try_new(schema.clone(), columns)?);
+                    }
                 }
                 Ok(result)
             }
@@ -326,6 +473,7 @@ impl Executor {
         let result = match plan {
             PhysicalPlan::Scan {
                 table_name,
+                schema_name,
                 projection,
                 schema,
                 filters,
@@ -333,6 +481,7 @@ impl Executor {
             } => {
                 let batches = self.execute_scan(
                     table_name,
+                    schema_name.as_deref(),
                     projection.as_deref(),
                     schema,
                     filters,
@@ -428,14 +577,157 @@ impl Executor {
                     + right_batches.iter().map(|b| b.num_rows()).sum::<usize>();
                 self.execute_cross_join(left_batches, right_batches, schema)?
             }
-            PhysicalPlan::Union { inputs, .. } => {
+            PhysicalPlan::Union { inputs, schema } => {
                 let mut result = Vec::new();
                 for input in inputs {
                     let (batches, child_stats) = self.execute_with_stats(input)?;
                     stats.children.push(child_stats);
-                    result.extend(batches);
+                    for batch in batches {
+                        if batch.schema() == *schema {
+                            result.push(batch);
+                        } else {
+                            let coerced_cols: Vec<ArrayRef> = (0..schema.fields().len())
+                                .map(|i| {
+                                    let col = batch.column(i);
+                                    let target_type = schema.field(i).data_type();
+                                    if col.data_type() == target_type {
+                                        Ok(col.clone())
+                                    } else {
+                                        arrow::compute::cast(col, target_type).map_err(|e| {
+                                            crate::error::BlazeError::execution(format!(
+                                                "UNION type coercion failed: {}", e
+                                            ))
+                                        })
+                                    }
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            result.push(RecordBatch::try_new(schema.clone(), coerced_cols)?);
+                        }
+                    }
                 }
                 stats.rows_processed = result.iter().map(|b| b.num_rows()).sum();
+                result
+            }
+            PhysicalPlan::Intersect {
+                left,
+                right,
+                schema,
+                all,
+            } => {
+                let (left_batches, left_stats) = self.execute_with_stats(left)?;
+                stats.children.push(left_stats);
+                let (right_batches, right_stats) = self.execute_with_stats(right)?;
+                stats.children.push(right_stats);
+                let mut right_keys = HashSet::new();
+                for batch in &right_batches {
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        right_keys.insert(key);
+                    }
+                }
+                let mut result = Vec::new();
+                let mut seen = HashSet::new();
+                for batch in &left_batches {
+                    let mut indices = Vec::new();
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        if right_keys.contains(&key) && (*all || seen.insert(key)) {
+                            indices.push(row);
+                        }
+                    }
+                    if !indices.is_empty() {
+                        let columns = batch
+                            .columns()
+                            .iter()
+                            .map(|col| {
+                                let idx =
+                                    arrow::array::UInt32Array::from(indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
+                                arrow::compute::take(col.as_ref(), &idx, None).expect("take failed")
+                            })
+                            .collect::<Vec<_>>();
+                        result.push(RecordBatch::try_new(schema.clone(), columns)?);
+                    }
+                }
+                stats.rows_processed = left_batches.iter().map(|b| b.num_rows()).sum();
+                result
+            }
+            PhysicalPlan::Except {
+                left,
+                right,
+                schema,
+                all,
+            } => {
+                let (left_batches, left_stats) = self.execute_with_stats(left)?;
+                stats.children.push(left_stats);
+                let (right_batches, right_stats) = self.execute_with_stats(right)?;
+                stats.children.push(right_stats);
+                let mut right_keys = HashSet::new();
+                for batch in &right_batches {
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        right_keys.insert(key);
+                    }
+                }
+                let mut result = Vec::new();
+                let mut seen = HashSet::new();
+                for batch in &left_batches {
+                    let mut indices = Vec::new();
+                    for row in 0..batch.num_rows() {
+                        let key: String = (0..batch.num_columns())
+                            .map(|c| {
+                                arrow::util::display::array_value_to_string(
+                                    batch.column(c),
+                                    row,
+                                )
+                                .unwrap_or_default()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("|");
+                        if !right_keys.contains(&key) && (*all || seen.insert(key)) {
+                            indices.push(row);
+                        }
+                    }
+                    if !indices.is_empty() {
+                        let columns = batch
+                            .columns()
+                            .iter()
+                            .map(|col| {
+                                let idx =
+                                    arrow::array::UInt32Array::from(indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
+                                arrow::compute::take(col.as_ref(), &idx, None).expect("take failed")
+                            })
+                            .collect::<Vec<_>>();
+                        result.push(RecordBatch::try_new(schema.clone(), columns)?);
+                    }
+                }
+                stats.rows_processed = left_batches.iter().map(|b| b.num_rows()).sum();
                 result
             }
             PhysicalPlan::Values { data, .. } => {
@@ -560,6 +852,8 @@ impl Executor {
                 format!("SortMergeJoin({:?})", join_type)
             }
             PhysicalPlan::Union { .. } => "Union".to_string(),
+            PhysicalPlan::Intersect { .. } => "Intersect".to_string(),
+            PhysicalPlan::Except { .. } => "Except".to_string(),
             PhysicalPlan::Values { .. } => "Values".to_string(),
             PhysicalPlan::Empty { .. } => "Empty".to_string(),
             PhysicalPlan::Explain { .. } => "Explain".to_string(),
@@ -580,6 +874,7 @@ impl Executor {
     fn execute_scan(
         &self,
         table_name: &str,
+        schema_name: Option<&str>,
         projection: Option<&[usize]>,
         schema: &Arc<arrow::datatypes::Schema>,
         filters: &[Arc<dyn crate::planner::PhysicalExpr>],
@@ -588,20 +883,22 @@ impl Executor {
         // Try to get the table from catalog
         if let Some(catalog_list) = &self.catalog_list {
             if let Some(catalog) = catalog_list.catalog("default") {
-                if let Some(table) = catalog.get_table(table_name) {
-                    // TODO: For time travel, we need to get the Delta table at a specific version
-                    // For now, time_travel is used as metadata but actual implementation
-                    // will be enhanced when we add Delta-specific catalog support.
-                    let _ = time_travel; // Suppress unused warning for now
+                // Look up in the specified schema, or fall back to default
+                let table = if let Some(sn) = schema_name {
+                    catalog.schema(sn).and_then(|s| s.table(table_name))
+                } else {
+                    catalog.get_table(table_name)
+                };
 
-                    // Use scan_with_filters for filter pushdown when supported
+                if let Some(table) = table {
+                    let _ = time_travel;
+
                     let batches = if table.supports_filter_pushdown() && !filters.is_empty() {
                         table.scan_with_filters(projection, filters, None)?
                     } else {
                         table.scan(projection, None)?
                     };
 
-                    // If we got data, return it
                     if !batches.is_empty() {
                         return Ok(batches);
                     }
@@ -987,9 +1284,66 @@ impl Executor {
             crate::planner::CopyFormat::Csv => Box::new(CsvTable::open(source_path)?),
             crate::planner::CopyFormat::Parquet => Box::new(ParquetTable::open(source_path)?),
             crate::planner::CopyFormat::Json => {
-                return Err(crate::error::BlazeError::not_implemented(
-                    "COPY FROM JSON format is not yet supported. Use CSV or Parquet format instead.",
-                ));
+                // Read JSON/NDJSON file using Arrow JSON reader
+                let file = std::fs::File::open(source_path).map_err(|e| {
+                    crate::error::BlazeError::execution(format!(
+                        "Cannot open JSON file '{}': {}",
+                        source, e
+                    ))
+                })?;
+                let reader = std::io::BufReader::new(file);
+                let json_reader = arrow_json::ReaderBuilder::new(std::sync::Arc::new(
+                    arrow::datatypes::Schema::empty(),
+                ))
+                .with_batch_size(8192)
+                .build(reader)
+                .map_err(|e| {
+                    crate::error::BlazeError::execution(format!("JSON parse error: {}", e))
+                })?;
+                let json_batches: std::result::Result<Vec<_>, _> = json_reader.collect();
+                let json_batches = json_batches.map_err(|e| {
+                    crate::error::BlazeError::execution(format!("JSON read error: {}", e))
+                })?;
+                if json_batches.is_empty() {
+                    let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+                        arrow::datatypes::Field::new(
+                            "count",
+                            arrow::datatypes::DataType::Int64,
+                            false,
+                        ),
+                    ]));
+                    let count_array =
+                        Arc::new(arrow::array::Int64Array::from(vec![0i64]));
+                    return Ok(vec![RecordBatch::try_new(schema, vec![count_array])?]);
+                }
+                let row_count: usize = json_batches.iter().map(|b| b.num_rows()).sum();
+
+                // Insert into target table
+                if let Some(catalog_list) = &self.catalog_list {
+                    if let Some(catalog) = catalog_list.catalog("default") {
+                        if let Some(table) = catalog.get_table(table_name) {
+                            let memory_table = table
+                                .as_any()
+                                .downcast_ref::<crate::storage::MemoryTable>()
+                                .ok_or_else(|| {
+                                    crate::error::BlazeError::not_implemented(
+                                        "COPY FROM is only supported for in-memory tables.",
+                                    )
+                                })?;
+                            memory_table.append(json_batches);
+                        }
+                    }
+                }
+                let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+                    arrow::datatypes::Field::new(
+                        "count",
+                        arrow::datatypes::DataType::Int64,
+                        false,
+                    ),
+                ]));
+                let count_array =
+                    Arc::new(arrow::array::Int64Array::from(vec![row_count as i64]));
+                return Ok(vec![RecordBatch::try_new(schema, vec![count_array])?]);
             }
         };
 
@@ -1223,6 +1577,7 @@ mod tests {
 
         let plan = PhysicalPlan::Scan {
             table_name: "test".to_string(),
+            schema_name: None,
             projection: None,
             schema: scan_schema,
             filters: vec![],
@@ -1316,6 +1671,7 @@ mod tests {
 
         let scan_plan = PhysicalPlan::Scan {
             table_name: "users".to_string(),
+            schema_name: None,
             projection: None,
             schema: schema.clone(),
             filters: vec![],
