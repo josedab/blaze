@@ -156,3 +156,108 @@ fn test_decimal_group_by_other_column() {
     assert_eq!(categories.value(0), "food");
     assert_eq!(categories.value(1), "tech");
 }
+
+#[test]
+fn test_decimal_join() {
+    let conn = Connection::in_memory().unwrap();
+
+    // Create two tables with Decimal columns
+    let schema_a = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("product_id", ArrowDataType::Int64, false),
+        ArrowField::new("price", ArrowDataType::Decimal128(10, 2), true),
+    ]));
+    let batch_a = RecordBatch::try_new(
+        schema_a,
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(
+                Decimal128Array::from(vec![1050i128, 2075, 3000])
+                    .with_precision_and_scale(10, 2)
+                    .unwrap(),
+            ),
+        ],
+    )
+    .unwrap();
+    conn.register_batches("products", vec![batch_a]).unwrap();
+
+    let schema_b = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("order_id", ArrowDataType::Int64, false),
+        ArrowField::new("amount", ArrowDataType::Decimal128(10, 2), true),
+    ]));
+    let batch_b = RecordBatch::try_new(
+        schema_b,
+        vec![
+            Arc::new(Int64Array::from(vec![100, 101, 102])),
+            Arc::new(
+                Decimal128Array::from(vec![1050i128, 2075, 9999])
+                    .with_precision_and_scale(10, 2)
+                    .unwrap(),
+            ),
+        ],
+    )
+    .unwrap();
+    conn.register_batches("orders", vec![batch_b]).unwrap();
+
+    // Join on Decimal columns
+    let results = conn
+        .query(
+            "SELECT p.product_id, o.order_id
+             FROM products p
+             JOIN orders o ON p.price = o.amount
+             ORDER BY p.product_id",
+        )
+        .unwrap();
+
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 2, "Expected 2 matching rows from Decimal join");
+
+    let product_ids = results[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(product_ids.value(0), 1);
+    assert_eq!(product_ids.value(1), 2);
+}
+
+#[test]
+fn test_decimal_aggregate_sum() {
+    let conn = create_decimal_connection();
+    let results = conn
+        .query("SELECT SUM(amount) AS total FROM sales")
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].num_rows(), 1);
+    // SUM over Decimal128 should return Decimal128
+    // 100.50 + 200.75 + 100.50 + 300.00 + 200.75 + 500.25 = 1402.75
+    // In i128 with scale=2: 140275
+    let col = results[0].column(0);
+    let dec = col
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .expect("SUM(Decimal128) should return Decimal128Array");
+    assert_eq!(dec.value(0), 140275);
+}
+
+#[test]
+fn test_decimal_aggregate_min_max() {
+    let conn = create_decimal_connection();
+    let results = conn
+        .query("SELECT MIN(amount), MAX(amount) FROM sales")
+        .unwrap();
+    assert_eq!(results[0].num_rows(), 1);
+
+    let min_col = results[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .expect("MIN(Decimal128) should return Decimal128Array");
+    assert_eq!(min_col.value(0), 10050); // 100.50
+
+    let max_col = results[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .expect("MAX(Decimal128) should return Decimal128Array");
+    assert_eq!(max_col.value(0), 50025); // 500.25
+}
