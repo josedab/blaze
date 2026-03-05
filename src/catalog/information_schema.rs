@@ -235,6 +235,81 @@ impl TableProvider for InformationSchemaColumns {
     }
 }
 
+/// Virtual table providing metadata about schemas (namespaces) in the catalog.
+#[derive(Debug)]
+pub struct InformationSchemaSchemata {
+    schema: Schema,
+    catalog_list: Arc<CatalogList>,
+}
+
+impl InformationSchemaSchemata {
+    pub fn new(catalog_list: Arc<CatalogList>) -> Self {
+        let schema = Schema::new(vec![
+            Field::new("catalog_name", DataType::Utf8, false),
+            Field::new("schema_name", DataType::Utf8, false),
+            Field::new("schema_owner", DataType::Utf8, true),
+            Field::new("default_character_set_catalog", DataType::Utf8, true),
+        ]);
+        Self {
+            schema,
+            catalog_list,
+        }
+    }
+}
+
+impl TableProvider for InformationSchemaSchemata {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::View
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn scan(&self, projection: Option<&[usize]>, _limit: Option<usize>) -> Result<Vec<RecordBatch>> {
+        let mut catalog_names = Vec::new();
+        let mut schema_names = Vec::new();
+        let mut owners = Vec::new();
+        let mut charsets = Vec::new();
+
+        for catalog_name in self.catalog_list.catalog_names() {
+            if let Some(catalog) = self.catalog_list.catalog(&catalog_name) {
+                for schema_name in catalog.schema_names() {
+                    catalog_names.push(catalog_name.clone());
+                    schema_names.push(schema_name);
+                    owners.push(None::<String>);
+                    charsets.push(None::<String>);
+                }
+            }
+        }
+
+        let arrow_schema = self.schema.to_arrow();
+        let batch = RecordBatch::try_new(
+            Arc::new(arrow_schema),
+            vec![
+                Arc::new(StringArray::from(catalog_names)),
+                Arc::new(StringArray::from(schema_names)),
+                Arc::new(StringArray::from(owners)),
+                Arc::new(StringArray::from(charsets)),
+            ],
+        )?;
+
+        let batch = if let Some(indices) = projection {
+            batch
+                .project(indices)
+                .map_err(|e| crate::error::BlazeError::execution(e.to_string()))?
+        } else {
+            batch
+        };
+
+        Ok(vec![batch])
+    }
+}
+
 /// Register the `information_schema` schema in the default catalog.
 ///
 /// Must be called after the `CatalogList` is wrapped in `Arc` so
@@ -246,8 +321,11 @@ pub fn register_information_schema(catalog_list: &Arc<CatalogList>) {
             Arc::new(InformationSchemaTables::new(catalog_list.clone()));
         let columns_table: Arc<dyn TableProvider> =
             Arc::new(InformationSchemaColumns::new(catalog_list.clone()));
+        let schemata_table: Arc<dyn TableProvider> =
+            Arc::new(InformationSchemaSchemata::new(catalog_list.clone()));
         let _ = info_schema.register_table("tables", tables_table);
         let _ = info_schema.register_table("columns", columns_table);
+        let _ = info_schema.register_table("schemata", schemata_table);
         catalog.register_schema("information_schema", info_schema);
     }
 }
