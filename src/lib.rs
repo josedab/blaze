@@ -460,6 +460,19 @@ impl Connection {
         Ok(conn)
     }
 
+    /// Access the memory manager for memory usage tracking.
+    pub fn memory_manager(&self) -> &std::sync::Arc<executor::MemoryManager> {
+        self.execution_context.memory_manager()
+    }
+
+    /// Create a PhysicalPlanner with subquery execution support.
+    fn create_physical_planner(&self) -> PhysicalPlanner {
+        let exec_ctx = self.execution_context.clone();
+        PhysicalPlanner::with_subquery_executor(Box::new(
+            move |subquery_plan: &crate::planner::PhysicalPlan| exec_ctx.execute(subquery_plan),
+        ))
+    }
+
     /// Execute a SQL query and return results.
     ///
     /// ```rust,no_run
@@ -510,12 +523,7 @@ impl Connection {
         };
 
         // Create physical plan with subquery executor for IN/EXISTS support
-        let exec_ctx = self.execution_context.clone();
-        let physical_planner = PhysicalPlanner::with_subquery_executor(Box::new(
-            move |subquery_plan: &crate::planner::PhysicalPlan| {
-                exec_ctx.execute(subquery_plan)
-            },
-        ));
+        let physical_planner = self.create_physical_planner();
         let physical_plan = physical_planner.create_physical_plan(&optimized_plan)?;
 
         // Execute (use parallel executor when configured with multiple threads)
@@ -565,7 +573,7 @@ impl Connection {
         let binder = Binder::new(self.catalog_list.clone());
         let logical_plan = binder.bind(statement)?;
         let optimized = self.optimizer.optimize(&logical_plan)?;
-        let planner = PhysicalPlanner::new();
+        let planner = self.create_physical_planner();
         let physical = planner.create_physical_plan(&optimized)?;
 
         executor::PlanStream::new(&physical, &self.execution_context)
@@ -594,11 +602,20 @@ impl Connection {
         // Parse SQL
         let statements = Parser::parse_with_compat(sql, self.config.compat_mode)?;
 
-        // Take the first statement (ignore any additional statements)
-        let Some(statement) = statements.into_iter().next() else {
+        if statements.is_empty() {
             return Ok(0);
-        };
+        }
 
+        // Execute all statements, returning total rows affected
+        let mut total_affected = 0usize;
+        for statement in statements {
+            total_affected += self.execute_single_statement(statement, sql)?;
+        }
+        Ok(total_affected)
+    }
+
+    /// Execute a single parsed statement. Returns rows affected.
+    fn execute_single_statement(&self, statement: sql::Statement, sql: &str) -> Result<usize> {
         // Handle DDL statements directly
         match &statement {
             sql::Statement::CreateTable(create) => {
@@ -610,7 +627,7 @@ impl Connection {
                     let mut ctx = crate::planner::BindContext::new();
                     let logical_plan = binder.bind_query_public(*query, &mut ctx)?;
                     let optimized = self.optimizer.optimize(&logical_plan)?;
-                    let planner = PhysicalPlanner::new();
+                    let planner = self.create_physical_planner();
                     let physical = planner.create_physical_plan(&optimized)?;
                     let results = self.execution_context.execute(&physical)?;
                     if results.is_empty() {
@@ -850,6 +867,15 @@ impl Connection {
                 let table = catalog.get_table(&table_name).ok_or_else(|| {
                     BlazeError::catalog_with_suggestions(&table_name, &catalog.list_tables())
                 })?;
+
+                // Handle RENAME TABLE before memory_table downcast (works for any table type)
+                if let sql::parser::AlterTableOperation::RenameTable { new_name } = operation {
+                    self.deregister_table(&table_name)?;
+                    self.register_table(new_name, table.clone())?;
+                    self.query_cache.invalidate_table(&table_name);
+                    return Ok(0);
+                }
+
                 let memory_table = table
                     .as_any()
                     .downcast_ref::<MemoryTable>()
@@ -874,6 +900,9 @@ impl Connection {
                     sql::parser::AlterTableOperation::RenameColumn { old_name, new_name } => {
                         memory_table.with_renamed_column(old_name, new_name)?
                     }
+                    sql::parser::AlterTableOperation::RenameTable { .. } => {
+                        unreachable!("handled above")
+                    }
                 };
 
                 self.register_table(&table_name, Arc::new(new_table))?;
@@ -885,7 +914,7 @@ impl Connection {
                 let binder = Binder::new(self.catalog_list.clone());
                 let logical_plan = binder.bind(statement)?;
                 let optimized_plan = self.optimizer.optimize(&logical_plan)?;
-                let physical_planner = PhysicalPlanner::new();
+                let physical_planner = self.create_physical_planner();
                 let physical_plan = physical_planner.create_physical_plan(&optimized_plan)?;
                 let results = self.execution_context.execute(&physical_plan)?;
                 let count: usize = results.iter().map(|b| b.num_rows()).sum();
@@ -975,7 +1004,7 @@ impl Connection {
                 let binder = Binder::new(self.catalog_list.clone());
                 let logical_plan = binder.bind(statement)?;
                 let optimized_plan = self.optimizer.optimize(&logical_plan)?;
-                let physical_planner = PhysicalPlanner::new();
+                let physical_planner = self.create_physical_planner();
                 let physical_plan = physical_planner.create_physical_plan(&optimized_plan)?;
                 self.execution_context.execute(&physical_plan)?
             }
@@ -1080,7 +1109,7 @@ impl Connection {
             let mut ctx = planner::BindContext::new();
             let logical_expr = binder.bind_expr_public(selection.clone(), &mut ctx)?;
 
-            let physical_planner = PhysicalPlanner::new();
+            let physical_planner = self.create_physical_planner();
             Some(physical_planner.create_physical_expr_public(&logical_expr, &arrow_schema)?)
         } else {
             None
@@ -1122,7 +1151,7 @@ impl Connection {
                     let mut ctx = planner::BindContext::new();
                     let logical_expr = binder.bind_expr_public(expr.clone(), &mut ctx)?;
 
-                    let physical_planner = PhysicalPlanner::new();
+                    let physical_planner = self.create_physical_planner();
                     let phys_expr = physical_planner
                         .create_physical_expr_public(&logical_expr, &arrow_schema)?;
                     let new_values = phys_expr.evaluate(&batch)?;
@@ -1229,7 +1258,7 @@ impl Connection {
             let mut ctx = planner::BindContext::new();
             let logical_expr = binder.bind_expr_public(selection.clone(), &mut ctx)?;
 
-            let physical_planner = PhysicalPlanner::new();
+            let physical_planner = self.create_physical_planner();
             Some(physical_planner.create_physical_expr_public(&logical_expr, &arrow_schema)?)
         } else {
             // DELETE with no WHERE deletes all rows
