@@ -1,7 +1,8 @@
-//! GPU Query Executor
+//! GPU Query Executor (Simulation Mode)
 //!
-//! This module provides GPU-accelerated query execution, including
-//! execution planning and operator implementations.
+//! This module provides the GPU query execution framework. All operations
+//! currently run on the CPU as simulation — no GPU hardware is used.
+//! The API is designed for future CUDA/Metal/WebGPU backend integration.
 
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use super::{
 };
 use crate::error::{BlazeError, Result};
 
-/// GPU query executor.
+/// GPU query executor (currently runs in CPU simulation mode).
 pub struct GpuExecutor {
     /// Configuration
     config: GpuConfig,
@@ -26,7 +27,11 @@ pub struct GpuExecutor {
 
 impl GpuExecutor {
     /// Create a new GPU executor.
+    ///
+    /// Note: All operations execute on the CPU. GPU hardware acceleration
+    /// is not yet implemented.
     pub fn new(config: GpuConfig) -> Self {
+        tracing::info!("GPU executor initialized in CPU simulation mode — no GPU hardware is used");
         Self {
             transfer: MemoryTransfer::new(config.async_transfers),
             config,

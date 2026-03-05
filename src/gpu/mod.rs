@@ -1,8 +1,12 @@
-//! GPU Acceleration Module
+//! GPU Acceleration Module (Simulation Mode)
 //!
-//! This module provides GPU-accelerated query execution using CUDA (NVIDIA)
-//! or Metal (Apple) backends. It includes device management, memory transfer,
-//! and compute kernel abstractions.
+//! This module provides the framework for GPU-accelerated query execution.
+//! It includes device management, memory transfer, and compute kernel
+//! abstractions that currently run in **CPU simulation mode**.
+//!
+//! **Important**: No actual GPU hardware is used. All operations execute on
+//! the CPU using Arrow's columnar operations. The GPU abstractions provide
+//! the API surface for future CUDA/Metal/WebGPU backend integration.
 //!
 //! # Architecture
 //!
@@ -12,11 +16,15 @@
 //! - **Kernel Layer**: Compute kernel abstractions for query operations
 //! - **Executor Layer**: GPU-accelerated query execution engine
 //!
+//! # Current Status
+//!
+//! All kernel operations (filter, project, aggregate, sort, join) are
+//! implemented as CPU fallbacks. This allows code using the GPU API to
+//! work correctly today while enabling hardware acceleration in the future.
+//!
 //! # Feature Flags
 //!
-//! - `cuda`: Enable NVIDIA CUDA support
-//! - `metal`: Enable Apple Metal support
-//! - `wgpu`: Enable cross-platform WebGPU support (default fallback)
+//! - `gpu`: Enable GPU acceleration module (currently CPU simulation)
 
 mod device;
 mod executor;
