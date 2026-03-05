@@ -9,6 +9,8 @@ pub struct MemoryManager {
     max_memory: usize,
     /// Current memory usage in bytes
     used_memory: std::sync::atomic::AtomicUsize,
+    /// Peak memory usage in bytes (high-water mark)
+    peak_memory: std::sync::atomic::AtomicUsize,
 }
 
 impl MemoryManager {
@@ -17,6 +19,7 @@ impl MemoryManager {
         Self {
             max_memory,
             used_memory: std::sync::atomic::AtomicUsize::new(0),
+            peak_memory: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -31,7 +34,8 @@ impl MemoryManager {
 
         let current = self.used_memory.load(Ordering::Relaxed);
         if current + bytes <= self.max_memory {
-            self.used_memory.fetch_add(bytes, Ordering::Relaxed);
+            let new_used = self.used_memory.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            self.peak_memory.fetch_max(new_used, Ordering::Relaxed);
             true
         } else {
             false
@@ -74,6 +78,19 @@ impl MemoryManager {
     /// Get available memory.
     pub fn available(&self) -> usize {
         self.max_memory.saturating_sub(self.used())
+    }
+
+    /// Get peak memory usage (high-water mark since last reset).
+    pub fn peak(&self) -> usize {
+        self.peak_memory
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reset peak memory counter to current usage, returning the previous peak.
+    pub fn reset_peak(&self) -> usize {
+        let current = self.used();
+        self.peak_memory
+            .swap(current, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -156,5 +173,27 @@ mod tests {
         }
         // After drop, memory should be released
         assert_eq!(mgr.used(), 0);
+    }
+
+    #[test]
+    fn test_memory_manager_peak_tracking() {
+        let mgr = MemoryManager::new(1000);
+        assert_eq!(mgr.peak(), 0);
+
+        assert!(mgr.try_reserve(400));
+        assert_eq!(mgr.peak(), 400);
+
+        assert!(mgr.try_reserve(300));
+        assert_eq!(mgr.peak(), 700);
+
+        // Release some memory — peak should NOT decrease
+        mgr.release(500);
+        assert_eq!(mgr.used(), 200);
+        assert_eq!(mgr.peak(), 700);
+
+        // Reset peak — returns old peak, sets to current usage
+        let old_peak = mgr.reset_peak();
+        assert_eq!(old_peak, 700);
+        assert_eq!(mgr.peak(), 200);
     }
 }
