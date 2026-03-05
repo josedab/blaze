@@ -222,8 +222,6 @@ impl ExternalDataProvider for S3Provider {
                     .map(|s| s.as_str())
                     .unwrap_or("parquet");
 
-                let url = self.build_url(bucket, key);
-
                 // For local testing: if the "key" looks like a local path, read it directly
                 if std::path::Path::new(key).exists() {
                     match format_str {
@@ -239,10 +237,11 @@ impl ExternalDataProvider for S3Provider {
                     }
                 }
 
-                Err(BlazeError::not_implemented(format!(
-                    "S3 remote fetch not available (URL: {}). Use local file path for testing.",
-                    url
-                )))
+                // Download from S3 via HTTP using the endpoint URL
+                let url = self.build_url(bucket, key);
+                let data = self.download_s3(&url)?;
+                let http = HttpProvider::new();
+                http.parse_data(&data, format_str, config.max_rows)
             }
             _ => Err(BlazeError::invalid_argument(
                 "S3Provider requires Custom source type",
@@ -275,14 +274,62 @@ impl ExternalDataProvider for S3Provider {
                     }
                 }
 
-                Err(BlazeError::not_implemented(
-                    "S3 remote schema inference requires a live S3 connection. Use a local file path for testing.",
-                ))
+                // Fetch a sample from S3 to infer schema
+                let bucket = options.get("bucket").ok_or_else(|| {
+                    BlazeError::invalid_argument("S3 source requires 'bucket' option")
+                })?;
+                let url = self.build_url(bucket, key);
+                let data = self.download_s3(&url)?;
+                let format_str = options
+                    .get("format")
+                    .map(|s| s.as_str())
+                    .unwrap_or("parquet");
+                let http = HttpProvider::new();
+                let batches = http.parse_data(&data, format_str, Some(100))?;
+                if let Some(batch) = batches.first() {
+                    Schema::from_arrow(batch.schema().as_ref())
+                } else {
+                    Ok(Schema::empty())
+                }
             }
             _ => Err(BlazeError::invalid_argument(
                 "S3Provider requires Custom source type",
             )),
         }
+    }
+}
+
+impl S3Provider {
+    /// Download content from S3 using curl.
+    fn download_s3(&self, url: &str) -> Result<Vec<u8>> {
+        use std::process::Command;
+
+        let mut cmd = Command::new("curl");
+        cmd.arg("-s").arg("-f").arg("-L").arg("--max-time").arg("60");
+
+        // Add AWS auth if credentials are provided
+        if let (Some(ak), Some(sk)) = (&self.access_key, &self.secret_key) {
+            cmd.arg("--aws-sigv4")
+                .arg(format!("aws:amz:{}:s3", self.region))
+                .arg("-u")
+                .arg(format!("{}:{}", ak, sk));
+        }
+
+        cmd.arg(url);
+
+        let output = cmd.output().map_err(|e| {
+            BlazeError::execution(format!("Failed to execute curl for S3 fetch: {}", e))
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BlazeError::execution(format!(
+                "S3 fetch failed for {}: {}",
+                url, stderr
+            )));
+        }
+
+        Ok(output.stdout)
     }
 }
 
@@ -328,12 +375,14 @@ impl ExternalDataProvider for HttpProvider {
     fn fetch(&self, config: &ExternalTableConfig) -> Result<Vec<RecordBatch>> {
         match &config.source {
             ExternalSourceType::Http { url, format } => {
-                // For JSON format, we'd parse the response into RecordBatches
-                // For now, return error with instructions
-                Err(BlazeError::not_implemented(format!(
-                    "HTTP fetch from {} (format: {:?}) requires an async HTTP client. Use local file paths or the file provider instead.",
-                    url, format
-                )))
+                let format_str = match format {
+                    DataFormat::Csv => "csv",
+                    DataFormat::Json => "json",
+                    DataFormat::Parquet => "parquet",
+                    DataFormat::ArrowIpc => "arrow",
+                };
+                let data = self.download_url(url)?;
+                self.parse_data(&data, format_str, config.max_rows)
             }
             ExternalSourceType::Custom { options, .. } => {
                 let url = options.get("url").ok_or_else(|| {
@@ -342,17 +391,19 @@ impl ExternalDataProvider for HttpProvider {
 
                 // If the URL is actually a local file, read it
                 if std::path::Path::new(url).exists() {
-                    let format_str = options.get("format").map(|s| s.as_str()).unwrap_or("json");
+                    let format_str = options.get("format").map(|s| s.as_str()).unwrap_or("csv");
                     if format_str == "csv" {
                         let table = crate::storage::CsvTable::open(url)?;
                         return table.scan(None, config.max_rows);
                     }
                 }
 
-                Err(BlazeError::not_implemented(format!(
-                    "HTTP fetch from {} requires an async HTTP client. Use local file paths or the file provider instead.",
-                    url
-                )))
+                let format_str = options
+                    .get("format")
+                    .map(|s| s.as_str())
+                    .unwrap_or("csv");
+                let data = self.download_url(url)?;
+                self.parse_data(&data, format_str, config.max_rows)
             }
             _ => Err(BlazeError::invalid_argument(
                 "HttpProvider requires Http or Custom source type",
@@ -360,10 +411,142 @@ impl ExternalDataProvider for HttpProvider {
         }
     }
 
-    fn infer_schema(&self, _config: &ExternalTableConfig) -> Result<Schema> {
-        Err(BlazeError::not_implemented(
-            "HTTP schema inference requires fetching a sample from the endpoint. Use local file-based providers instead.",
-        ))
+    fn infer_schema(&self, config: &ExternalTableConfig) -> Result<Schema> {
+        // Download a sample and infer schema from it
+        let url = match &config.source {
+            ExternalSourceType::Http { url, .. } => url.clone(),
+            ExternalSourceType::Custom { options, .. } => options
+                .get("url")
+                .cloned()
+                .ok_or_else(|| BlazeError::invalid_argument("HTTP source requires 'url' option"))?,
+            _ => {
+                return Err(BlazeError::invalid_argument(
+                    "HttpProvider requires Http or Custom source type",
+                ))
+            }
+        };
+
+        if std::path::Path::new(&url).exists() {
+            let table = crate::storage::CsvTable::open(&url)?;
+            return Ok(table.schema().clone());
+        }
+
+        let data = self.download_url(&url)?;
+        // Parse first few rows to infer schema
+        let batches = self.parse_data(&data, "csv", Some(100))?;
+        if let Some(batch) = batches.first() {
+            Schema::from_arrow(batch.schema().as_ref())
+        } else {
+            Ok(Schema::empty())
+        }
+    }
+}
+
+impl HttpProvider {
+    /// Download content from a URL using std::process::Command (curl).
+    /// This avoids adding HTTP client dependencies while supporting HTTP/HTTPS.
+    fn download_url(&self, url: &str) -> Result<Vec<u8>> {
+        use std::process::Command;
+
+        let mut cmd = Command::new("curl");
+        cmd.arg("-s") // silent
+            .arg("-f") // fail on HTTP errors
+            .arg("-L") // follow redirects
+            .arg("--max-time")
+            .arg(self.timeout_secs.to_string());
+
+        for (key, value) in &self.default_headers {
+            cmd.arg("-H").arg(format!("{}: {}", key, value));
+        }
+
+        cmd.arg(url);
+
+        let output = cmd.output().map_err(|e| {
+            BlazeError::execution(format!(
+                "Failed to execute curl for HTTP fetch: {}. Is curl installed?",
+                e
+            ))
+        })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BlazeError::execution(format!(
+                "HTTP fetch failed for {}: {}",
+                url, stderr
+            )));
+        }
+
+        Ok(output.stdout)
+    }
+
+    /// Parse downloaded data into RecordBatches based on format.
+    fn parse_data(
+        &self,
+        data: &[u8],
+        format: &str,
+        max_rows: Option<usize>,
+    ) -> Result<Vec<RecordBatch>> {
+        match format.to_lowercase().as_str() {
+            "csv" => {
+                // Infer schema from the data
+                let mut cursor = std::io::Cursor::new(data);
+                let (schema, _) = arrow::csv::reader::Format::default()
+                    .with_header(true)
+                    .infer_schema(&mut cursor, Some(100))
+                    .map_err(|e| BlazeError::execution(format!("CSV schema inference error: {}", e)))?;
+                // Reset and read
+                cursor.set_position(0);
+                let reader = arrow::csv::ReaderBuilder::new(Arc::new(schema))
+                    .with_header(true)
+                    .with_batch_size(max_rows.unwrap_or(8192))
+                    .build(cursor)
+                    .map_err(|e| BlazeError::execution(format!("CSV parse error: {}", e)))?;
+                let batches: Result<Vec<_>> = reader
+                    .map(|r| r.map_err(|e| BlazeError::execution(format!("CSV read error: {}", e))))
+                    .collect();
+                batches
+            }
+            "json" | "ndjson" => {
+                let cursor = std::io::Cursor::new(data);
+                let reader = arrow_json::ReaderBuilder::new(Arc::new(
+                    arrow::datatypes::Schema::empty(),
+                ))
+                .with_batch_size(max_rows.unwrap_or(8192))
+                .build(cursor)
+                .map_err(|e| BlazeError::execution(format!("JSON parse error: {}", e)))?;
+                let batches: Result<Vec<_>> = reader
+                    .map(|r| {
+                        r.map_err(|e| BlazeError::execution(format!("JSON read error: {}", e)))
+                    })
+                    .collect();
+                batches
+            }
+            "parquet" | "pq" => {
+                let buf = bytes::Bytes::from(data.to_vec());
+                let reader =
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(buf)
+                        .map_err(|e| {
+                            BlazeError::execution(format!("Parquet parse error: {}", e))
+                        })?
+                        .with_batch_size(max_rows.unwrap_or(8192))
+                        .build()
+                        .map_err(|e| {
+                            BlazeError::execution(format!("Parquet reader error: {}", e))
+                        })?;
+                let batches: Result<Vec<_>> = reader
+                    .map(|r| {
+                        r.map_err(|e| {
+                            BlazeError::execution(format!("Parquet read error: {}", e))
+                        })
+                    })
+                    .collect();
+                batches
+            }
+            _ => Err(BlazeError::invalid_argument(format!(
+                "Unsupported format '{}'. Use csv, json, or parquet.",
+                format
+            ))),
+        }
     }
 }
 
@@ -3231,5 +3414,41 @@ mod federation_new_tests {
         let scheduler = ParallelScanScheduler::new(1);
         scheduler.schedule(&mut tasks);
         assert!(tasks.iter().all(|t| t.worker_id == Some(0)));
+    }
+
+    #[test]
+    fn test_http_provider_parse_csv() {
+        let provider = HttpProvider::new();
+        let csv_data = b"id,name,value\n1,alice,100\n2,bob,200\n3,charlie,300\n";
+        let batches = provider.parse_data(csv_data, "csv", None).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 3);
+        assert_eq!(batches[0].num_columns(), 3);
+    }
+
+    #[test]
+    fn test_http_provider_parse_json() {
+        let provider = HttpProvider::new();
+        // Arrow JSON reader expects newline-delimited JSON (one object per line)
+        let json_data = b"{\"id\":1,\"name\":\"alice\"}\n{\"id\":2,\"name\":\"bob\"}\n";
+        let batches = provider.parse_data(json_data, "json", None).unwrap();
+        assert!(!batches.is_empty());
+        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn test_http_provider_unsupported_format() {
+        let provider = HttpProvider::new();
+        let result = provider.parse_data(b"data", "xml", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported format"));
+    }
+
+    #[test]
+    fn test_s3_provider_build_url() {
+        let provider = S3Provider::new("https://s3.amazonaws.com", "us-east-1");
+        let url = provider.build_url("my-bucket", "data/file.parquet");
+        assert_eq!(url, "https://s3.amazonaws.com/my-bucket/data/file.parquet");
     }
 }
